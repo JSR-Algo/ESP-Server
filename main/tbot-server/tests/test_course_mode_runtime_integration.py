@@ -1545,7 +1545,7 @@ def test_durable_snapshot_rebases_monotonic_timing_across_replicas() -> None:
     assert restored.orchestrator.active_mastery.answer_leakage.last_full_model_at_ms == -35_000
 
 
-def test_terminal_snapshot_starts_a_fresh_assignment_execution() -> None:
+def test_closing_snapshot_preserves_the_same_assignment_execution() -> None:
     manifest = {"courseModeContract": contract()}
     finished = LessonRuntime(
         _Conn(), assignment={"assignmentId": "a1", "lessonId": "l1"},
@@ -1560,8 +1560,8 @@ def test_terminal_snapshot_starts_a_fresh_assignment_execution() -> None:
         course_mode_snapshot=terminal_snapshot,
     )
 
-    assert restarted.session_id != finished.session_id
-    assert restarted.course_mode.orchestrator.session_state is SessionState.PREPARING
+    assert restarted.session_id == finished.session_id
+    assert restarted.course_mode.orchestrator.session_state is SessionState.CLOSING
 
 
 @pytest.mark.asyncio
@@ -2057,7 +2057,7 @@ async def test_failed_closing_stop_remains_resumable_until_stop_is_sent() -> Non
 
 
 @pytest.mark.asyncio
-async def test_persist_failure_after_closing_stop_does_not_replay_stop() -> None:
+async def test_persist_failure_after_closing_stop_retries_only_the_terminal_control() -> None:
     class FailCompleteStore(MemoryCourseModeSnapshotStore):
         fail_complete = True
 
@@ -2087,7 +2087,8 @@ async def test_persist_failure_after_closing_stop_does_not_replay_stop() -> None
     assert [frame["type"] for frame in sent] == ["lesson_stop"]
     snapshot = await store.load("device-1", "a1")
     assert snapshot["orchestrator"]["sessionState"] == "CLOSING"
-    assert snapshot["completionStopDispatched"] is True
+    assert snapshot["terminalLifecycle"]["frameType"] == "lesson_stop"
+    assert snapshot["terminalLifecycle"]["body"] == sent[0]["body"]
 
     store.fail_complete = False
     resumed_sent = []
@@ -2101,9 +2102,11 @@ async def test_persist_failure_after_closing_stop_does_not_replay_stop() -> None
         forwarder=_Forwarder(), send=resumed_send, course_mode_snapshot=snapshot,
         course_mode_snapshot_store=store, course_mode_snapshot_device_id="device-1",
     )
-    assert await resumed._complete_course_mode_close() is True
-    assert resumed_sent == []
-    assert resumed.course_mode.orchestrator.session_state is SessionState.COMPLETE
+    await resumed.start_protocol(preloaded=True)
+    assert [frame["type"] for frame in resumed_sent] == ["lesson_stop"]
+    assert resumed_sent[0]["body"] == sent[0]["body"]
+    assert resumed.session_id == runtime.session_id
+    assert resumed.course_mode.orchestrator.session_state is SessionState.CLOSING
 
 
 @pytest.mark.asyncio

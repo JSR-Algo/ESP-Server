@@ -989,6 +989,7 @@ class CourseModeRuntimeAdapter:
             "responsePlanRollback": copy.deepcopy(self._response_plan_rollback),
             "courseBudgetStarted": self._course_budget_started,
             "completionStopDispatched": self._completion_stop_dispatched,
+            "pendingEvidenceBatches": copy.deepcopy(self._pending_evidence_batches),
             "pendingActivityDecisionIds": list(self._pending_activity_decision_ids),
             "pendingActivityDeliveries": [
                 {
@@ -1005,7 +1006,6 @@ class CourseModeRuntimeAdapter:
         value = self.snapshot()
         value["monotonicCapturedAtMs"] = int(self._clock() * 1_000)
         value["wallCapturedAtMs"] = int(self._wall_clock() * 1_000)
-        value["pendingEvidenceBatches"] = copy.deepcopy(self._pending_evidence_batches)
         return value
 
     @classmethod
@@ -1164,13 +1164,15 @@ def _rebase_course_orchestrator_snapshot(snapshot: Dict[str, Any], offset_ms: in
 def _course_mode_snapshot_is_terminal(snapshot: Any) -> bool:
     if not isinstance(snapshot, dict):
         return False
+    if isinstance(snapshot.get("terminalLifecycle"), dict):
+        return True
     orchestrator = snapshot.get("orchestrator")
     if not isinstance(orchestrator, dict):
         return False
     state = orchestrator.get("sessionState")
     latest_decision_id = snapshot.get("latestDecisionId")
     if state == SessionState.CLOSING.value:
-        return latest_decision_id is None
+        return False
     if state != SessionState.COMPLETE.value:
         return False
     return latest_decision_id is None or latest_decision_id in snapshot.get("appliedDecisionIds", [])
@@ -2297,9 +2299,16 @@ class LessonRuntime:
         course_mode_snapshot_device_id: str | None = None,
         course_mode_snapshot: Dict[str, Any] | None = None,
     ) -> None:
-        if _course_mode_snapshot_is_terminal(course_mode_snapshot):
-            course_mode_snapshot = None
         self.conn = conn
+        self._terminal_lifecycle = copy.deepcopy(
+            course_mode_snapshot.get("terminalLifecycle")
+            if isinstance(course_mode_snapshot, dict) else None
+        )
+        self._terminal_requested = self._terminal_lifecycle is not None
+        self._lesson_started_event = copy.deepcopy(
+            course_mode_snapshot.get("lessonStartedEvent")
+            if isinstance(course_mode_snapshot, dict) else None
+        )
         # Demo-only: when a child stays silent through an interactive step, model the
         # answer aloud and advance instead of abandoning with a sad face. Real assigned
         # lessons leave this False so the backend still learns the child disengaged.
@@ -2402,7 +2411,7 @@ class LessonRuntime:
         # — a missing alarm or a raising hook never affects the lesson run.
         self._alarm = alarm
 
-        self._seq = 0  # S->F monotonic counter; first emitted frame is sequence 1.
+        self._seq = max(0, int((self._terminal_lifecycle or {}).get("sequence", 0)))
         self.last_embodied_result: EmbodiedDispatchResult | None = None
         self._course_assessment_window_open = False
         self._course_assessment_generation = 0
@@ -2535,13 +2544,17 @@ class LessonRuntime:
         # auto-advance or interactive child response evidence.
         self._steps: List[Dict[str, Any]] = self._select_steps()
         self._step_index = -1  # bumped to 0 by the first _emit_step()
-        self._steps_completed = 0  # real count for lesson_completed.summary
+        self._steps_completed = max(0, int((self._terminal_lifecycle or {}).get("stepsCompleted", 0)))
         self._parent_phase_sequence = -2_000_000
         self._preparing_phase_forwarded = False
+        if self._terminal_lifecycle is not None:
+            self._validate_terminal_lifecycle()
 
     # ── lifecycle ──────────────────────────────────────────────────────────────
 
     async def _course_operation(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        if getattr(self, "_terminal_requested", False):
+            return {"accepted": False, "code": "COURSE_SESSION_TERMINAL"}
         if self.course_mode is None:
             return {"accepted": False, "code": "COURSE_MODE_NOT_ACTIVE"}
         before = self.course_mode.snapshot()
@@ -2556,6 +2569,8 @@ class LessonRuntime:
             and self._course_operation_interrupts_motion(name, arguments)
         ):
             await self._interrupt_course_embodied_action(name)
+        if self._terminal_requested:
+            return {"accepted": False, "code": "COURSE_SESSION_TERMINAL"}
         result = await getattr(self.course_mode, name)(arguments)
         if result.get("accepted") is not True:
             if self.course_mode.snapshot() != before:
@@ -2780,7 +2795,10 @@ class LessonRuntime:
         try:
             await self.persist_course_mode_snapshot()
         except Exception as exc:
-            self.course_mode.restore_pending_evidence_batches(pending_before)
+            current = self.course_mode.pending_evidence_batches()
+            self.course_mode.restore_pending_evidence_batches(
+                [item for item in pending_before if item not in current] + current
+            )
             self._log("warning", f"course mode evidence acknowledgment persist failed: {type(exc).__name__}")
             return
         self._queued_course_evidence_sequences.discard(sequence)
@@ -2817,7 +2835,19 @@ class LessonRuntime:
             or not self.assignment_id
         ):
             return
+        lock = getattr(self, "_course_snapshot_write_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._course_snapshot_write_lock = lock
+        async with lock:
+            await self._store_course_mode_snapshot()
+
+    async def _store_course_mode_snapshot(self) -> None:
         snapshot = self.course_mode.durable_snapshot()
+        if getattr(self, "_lesson_started_event", None) is not None:
+            snapshot["lessonStartedEvent"] = copy.deepcopy(self._lesson_started_event)
+        if getattr(self, "_terminal_lifecycle", None) is not None:
+            snapshot["terminalLifecycle"] = copy.deepcopy(self._terminal_lifecycle)
         if getattr(self, "_entrance_started", False):
             snapshot["cinematicPlayback"] = {
                 "version": 1, "manifestChecksum": self.manifest_checksum,
@@ -2846,6 +2876,8 @@ class LessonRuntime:
         return await self._course_operation("course_apply_response_plan", arguments)
 
     async def rollback_course_response_plan(self, arguments: Dict[str, Any]) -> bool:
+        if self._terminal_requested:
+            return False
         if self.course_mode is None:
             return False
         before = self.course_mode.snapshot()
@@ -2868,6 +2900,8 @@ class LessonRuntime:
         return True
 
     async def commit_course_response_plan(self, arguments: Dict[str, Any]) -> bool:
+        if self._terminal_requested:
+            return False
         if self.course_mode is None:
             return False
         before = self.course_mode.snapshot()
@@ -2876,6 +2910,8 @@ class LessonRuntime:
             decision,
             opens_response_window=arguments.get("questionCount") == 1,
         )
+        if self._terminal_requested:
+            return False
         committed = self.course_mode.commit_course_response_plan(arguments)
         if committed:
             closing = self.course_mode.orchestrator.session_state is SessionState.CLOSING
@@ -2934,12 +2970,6 @@ class LessonRuntime:
                 if (not self._is_active_runtime() or self.state not in (S_RUNNING, S_PAUSED)
                         or self._cinematic_cancel_sent):
                     return False
-            self.course_mode._completion_stop_dispatched = True
-            try:
-                await self.persist_course_mode_snapshot()
-            except Exception:
-                self.course_mode._completion_stop_dispatched = False
-                return False
             try:
                 if self._renderer_v5_enabled() and (
                     not self._is_active_runtime() or self._cinematic_cancel_sent
@@ -2956,6 +2986,7 @@ class LessonRuntime:
                     }
                     self._cinematic_stop_sent = True
                 await self._emit("lesson_stop", body=stop_body)
+                self.course_mode._completion_stop_dispatched = True
                 self._completion_stop_sent = True
             except Exception:
                 self.course_mode._completion_stop_dispatched = False
@@ -2972,6 +3003,8 @@ class LessonRuntime:
         return True
 
     async def mark_response_plan_delivery_attempted(self, arguments: Dict[str, Any]) -> bool:
+        if self._terminal_requested:
+            return False
         if self.course_mode is None:
             return False
         before = self.course_mode.snapshot()
@@ -3002,6 +3035,8 @@ class LessonRuntime:
 
     async def preload_only(self) -> bool:
         """Validate and materialize assets without sending ``lesson_prepare``."""
+        if self._terminal_requested:
+            return True
         features = getattr(self.conn, "features", None)
         manifest_version = self.manifest.get("manifestVersion")
         if manifest_version in {RENDERER_V3, RENDERER_V4, RENDERER_V5} and not self._cinematic_enabled():
@@ -3240,6 +3275,8 @@ class LessonRuntime:
         return True
 
     async def start_protocol(self, *, preloaded: bool = False) -> None:
+        if await self._resume_terminal_lifecycle():
+            return
         if not preloaded and not await self.preload_only():
             return
         if self.course_mode is not None:
@@ -3257,6 +3294,75 @@ class LessonRuntime:
                 self._entrance_started = False
                 raise
         await self._emit("lesson_prepare", body=self._prepare_body())
+
+    async def _resume_terminal_lifecycle(self) -> bool:
+        lifecycle = self._terminal_lifecycle
+        if lifecycle is None:
+            if self.course_mode is not None and (
+                self.course_mode.orchestrator.session_state is SessionState.COMPLETE
+                or self.course_mode._completion_stop_dispatched
+            ):
+                self.state = S_FAILED
+                self._terminal_requested = True
+                self.last_error = LessonError(
+                    "COURSE_TERMINAL_ACK_UNCONFIRMED",
+                    "legacy terminal snapshot has no recoverable command or validated ACK",
+                )
+                await self._notify_lesson_terminal("terminal_ack_unconfirmed")
+                return True
+            return False
+        if self.course_mode is not None:
+            await self._flush_course_evidence_outbox()
+        if self._lesson_started_event is not None:
+            remember = getattr(self.forwarder, "_remember_started_batch", None)
+            if callable(remember):
+                remember(self._forward_batch(self._lesson_started_event))
+        event = lifecycle.get("event")
+        if isinstance(event, dict):
+            self.state = S_FAILED if event.get("type") == "lesson_failed" else S_COMPLETED
+            if self.state == S_FAILED:
+                self._failure_forwarded = True
+            await self._forward_terminal(event)
+            await self._notify_lesson_terminal(event["type"])
+            return True
+        if any(frame.get("body") == lifecycle["body"] for frame in self._outstanding.values()):
+            return True
+        # Reconnect retries only the persisted terminal control. The command ID
+        # stays stable, while a fresh envelope fences late ACKs from the old socket.
+        self.state = S_RUNNING
+        self._cinematic_cancel_sent = True
+        await self._emit(
+            lifecycle["frameType"], step_id=lifecycle.get("stepId"),
+            body=copy.deepcopy(lifecycle["body"]),
+            frame_ack_retry_count=lifecycle.get("retryCount", 0),
+        )
+        return True
+
+    def _terminal_identity(self) -> Dict[str, Any]:
+        return {
+            "assignmentId": self.assignment_id, "assignmentVersion": self.assignment_version,
+            "lessonId": self.lesson_id, "lessonVersion": self.lesson_version,
+            "sessionId": self.session_id, "manifestChecksum": self.manifest_checksum,
+            "renderer": self.negotiated_version,
+        }
+
+    def _validate_terminal_lifecycle(self) -> None:
+        lifecycle = self._terminal_lifecycle
+        valid = isinstance(lifecycle, dict) and lifecycle.get("identity") == self._terminal_identity()
+        if valid and "event" in lifecycle:
+            valid = isinstance(lifecycle["event"], dict) and lifecycle["event"].get("type") in {
+                "lesson_completed", "lesson_abandoned", "lesson_failed",
+            }
+        elif valid:
+            body = lifecycle.get("body")
+            valid = isinstance(body, dict) and (
+                (lifecycle.get("frameType") == "lesson_stop" and body.get("reason") in {
+                    "COMPLETED", "CANCELLED", "FAILED",
+                }) or (lifecycle.get("frameType") == "lesson_cinematic_control"
+                       and body.get("command") == "cancel")
+            )
+        if not valid:
+            raise LessonError("COURSE_TERMINAL_IDENTITY_MISMATCH", "terminal snapshot identity or control is invalid")
 
     def _teardown_disposition(self):
         """T2.5 — classify this teardown in RMA terms (see failure-path-matrix.md).
@@ -4603,6 +4709,12 @@ class LessonRuntime:
         # malformed ack -> idempotent no-op, identical to a stale/unknown ack.
         acked = _coerce_ack_seq(acked)
         frame = self._outstanding.get(acked) if acked is not None else None
+        if self._terminal_requested and frame is not None:
+            command = self._cinematic_frame_command(frame)
+            if frame.get("type") != "lesson_stop" and not (
+                isinstance(command, dict) and command.get("command") == "cancel"
+            ):
+                return
         if frame is None:
             retired = (
                 self._retired_conversation_ack_sequences.get(acked)
@@ -4708,7 +4820,7 @@ class LessonRuntime:
     def _cinematic_ack_matches(
         self, frame: Dict[str, Any], ack_body: Dict[str, Any]
     ) -> bool:
-        if not self._cinematic_enabled():
+        if not self._cinematic_enabled() and self._terminal_cinematic_version() is None:
             return True
         command = self._cinematic_frame_command(frame)
         if command is None:
@@ -4793,7 +4905,7 @@ class LessonRuntime:
         )
 
     def _cinematic_command_identity(self, command: dict[str, Any]) -> tuple[str, str]:
-        if self._renderer_v5_enabled():
+        if self._renderer_v5_enabled() or self._terminal_cinematic_version() == RENDERER_V5:
             if set(key for key in ("phaseId", "cueId") if key in command) != {"phaseId"}:
                 raise LayeredCinematicContractError(
                     "CINEMATIC_IDENTITY_UNSUPPORTED",
@@ -4808,6 +4920,13 @@ class LessonRuntime:
             return "phaseId", phase_id
         identity_key = cinematic_identity_key(command)
         return ("phaseId" if "phaseId" in command else "cueId"), identity_key
+
+    def _terminal_cinematic_version(self) -> Optional[str]:
+        # Recovery retains the original ACK contract even if new-content admission changes.
+        lifecycle = getattr(self, "_terminal_lifecycle", None)
+        identity = lifecycle.get("identity") if isinstance(lifecycle, dict) else None
+        version = identity.get("renderer") if isinstance(identity, dict) else None
+        return version if version in {RENDERER_V3, RENDERER_V4, RENDERER_V5} else None
 
     async def _resolve_visual_ack(self, msg_json: Dict[str, Any]) -> bool:
         body = msg_json.get("body")
@@ -5018,6 +5137,8 @@ class LessonRuntime:
         return seq
 
     async def _on_lesson_progress_impl(self, msg_json: Dict[str, Any]) -> None:
+        if self._terminal_requested:
+            return
         if not self._is_active_runtime():
             return
         if self.state in (S_FAILED, S_PAUSED, S_COMPLETED):
@@ -5089,6 +5210,8 @@ class LessonRuntime:
                 await self._maybe_finish_step()
 
     async def on_child_response(self, text: Any, *, source: str = "voice_transcript") -> bool:
+        if self._terminal_requested:
+            return False
         if self.conversation is not None:
             return False
         response = str(text or "").strip()
@@ -5449,6 +5572,8 @@ class LessonRuntime:
         self, phase_id: str, *, activity_id: str | None = None
     ) -> bool:
         """Switch the character clip for a course visual transition without blocking the tool call."""
+        if self._terminal_requested:
+            return False
         if (not self._renderer_v5_enabled() or not self._is_active_runtime() or self._cinematic_cancel_sent
                 or self._completion_stop_sent or self._completion_visual_pending):
             return False
@@ -6062,6 +6187,11 @@ class LessonRuntime:
                 self._cancel_step_timeout()
                 self._cancel_child_response_timeout()
                 self._clear_cinematic_state()
+                await self._forward_terminal({
+                    "type": "lesson_abandoned", "reason": "cancelled",
+                    "abandonedAt": _wire_timestamp(),
+                })
+                await self._notify_lesson_terminal("lesson_abandoned")
         elif ftype == "lesson_step":
             # Step delivery is confirmed ONLY by its ack (plan §5.8) -> clear timeout.
             self._cancel_step_timeout()
@@ -6103,7 +6233,7 @@ class LessonRuntime:
                 if self._cinematic_enabled():
                     self._clear_cinematic_state()
                 self._forward_phase("abandoned")
-                self._forward(
+                await self._forward_terminal(
                     {
                         "type": "lesson_abandoned",
                         "stepId": self._step_id,
@@ -6219,7 +6349,7 @@ class LessonRuntime:
         if self.state == S_FAILED and not self._failure_forwarded:
             self._failure_forwarded = True
             self._forward_phase("failed")
-            self._forward(
+            await self._forward_terminal(
                 {
                     "type": "lesson_failed",
                     "reason": reason,
@@ -6801,7 +6931,13 @@ class LessonRuntime:
                 return
             self._frame_ack_timeout_task = None
             self._frame_ack_timeout_sequence = None
-            if seq not in self._outstanding or self.state in (S_FAILED, S_PAUSED, S_COMPLETED):
+            terminal_control = frame_type == "lesson_stop" or (
+                frame_type == "lesson_cinematic_control"
+                and (self._outstanding.get(seq, {}).get("body") or {}).get("command") == "cancel"
+            )
+            if seq not in self._outstanding or self.state in (S_FAILED, S_COMPLETED) or (
+                self.state == S_PAUSED and not terminal_control
+            ):
                 return
             frame = self._outstanding.pop(seq, None) or {}
             self._retire_conversation_ack_sequence(seq, frame)
@@ -6879,8 +7015,10 @@ class LessonRuntime:
             )
             self.state = S_FAILED
             self._log("error", f"FRAME_ACK_TIMEOUT type={frame_type} seq={seq} stepId={step_id or ''}")
-            await self._emit_error(self.last_error)
-            await self._notify_lesson_terminal("frame_ack_timeout")
+            try:
+                await self._emit_error(self.last_error)
+            finally:
+                await self._notify_lesson_terminal("frame_ack_timeout")
 
         self._frame_ack_timeout_sequence = seq
         self._frame_ack_timeout_task = asyncio.create_task(_timeout())
@@ -7612,9 +7750,17 @@ class LessonRuntime:
         return result
 
     async def stop(self) -> None:
+        if self._terminal_requested:
+            if self._terminal_lifecycle is not None and self.state not in (S_FAILED, S_COMPLETED):
+                await self._resume_terminal_lifecycle()
+            return
+        if self.state in (S_FAILED, S_COMPLETED):
+            return
+        self._terminal_requested = True
+        await self._retire_for_terminal_control()
         await self._interrupt_course_embodied_action("stopped")
         if self._cinematic_enabled():
-            if self._cinematic_stop_sent or self._cinematic_pending_command is not None:
+            if self._cinematic_stop_sent or self._cinematic_cancel_sent:
                 return
         else:
             self._cancel_visual_waiters(increment_generation=True, reason="stopped")
@@ -7637,19 +7783,21 @@ class LessonRuntime:
             await self._emit("lesson_stop", body=body)
 
     async def cancel(self, reason: str = "cancelled") -> None:
+        if self._terminal_requested:
+            if self._terminal_lifecycle is not None and self.state not in (S_FAILED, S_COMPLETED):
+                await self._resume_terminal_lifecycle()
+            return
         if (
             not self._cinematic_enabled()
             or self._cinematic_cancel_sent
+            or self._terminal_requested
+            or self.state in (S_FAILED, S_COMPLETED)
         ):
             return
+        self._terminal_requested = True
         self._cinematic_cancel_sent = True
-        # Cancel supersedes an in-flight prepare/start; its late ACK cannot start a clip.
-        self._retire_authored_cinematic_pending()
-        for sequence, frame in list(self._outstanding.items()):
-            if self._cinematic_frame_command(frame) is not None:
-                self._outstanding.pop(sequence, None)
-                self._cancel_frame_ack_timeout(sequence)
-        self._cinematic_pending_command = None
+        await self._retire_for_terminal_control()
+        await self._interrupt_course_embodied_action("cancelled")
         await self._emit(
             "lesson_cinematic_control",
             body={
@@ -7658,6 +7806,23 @@ class LessonRuntime:
                 "reason": str(reason or "cancelled")[:64],
             },
         )
+
+    async def _retire_for_terminal_control(self) -> None:
+        # Cancel supersedes an in-flight prepare/start; its late ACK cannot start a clip.
+        tasks = [task for task in (self._course_phase_task, self._visual_transition_task)
+                 if task is not None and task is not asyncio.current_task() and not task.done()]
+        for task in tasks:
+            task.cancel()
+        self._cancel_frame_ack_timeout()
+        self._cancel_frame_ack_retry()
+        self._cancel_step_timeout()
+        self._cancel_passive_dwell()
+        self._cancel_child_response_timeout()
+        self._close_child_response_window()
+        self._retire_authored_cinematic_pending()
+        self._outstanding.clear()
+        self._cinematic_pending_command = None
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     def _clear_cinematic_state(self) -> None:
         self._course_playout_deferred_finish = None
@@ -7733,7 +7898,7 @@ class LessonRuntime:
     ) -> int:
         seq = self._next_seq()
         frame_body = body or {}
-        if self._cinematic_enabled():
+        if self._cinematic_enabled() or self._terminal_cinematic_version() is not None:
             cinematic = frame_body.get("cinematicPhase")
             if isinstance(cinematic, dict) and isinstance(cinematic.get("command"), str):
                 cinematic.setdefault("commandSequenceId", seq)
@@ -7840,11 +8005,24 @@ class LessonRuntime:
             "body": copy.deepcopy(frame_body),
             "retryCount": max(0, int(frame_ack_retry_count or 0)),
         }
-        if frame_type in {
-            "lesson_prepare", "lesson_start", "lesson_stop", "lesson_cinematic_control"
-        }:
-            self._start_frame_ack_timeout(frame_type, seq, step_id)
         try:
+            if self.course_mode is not None and (
+                frame_type == "lesson_stop"
+                or (frame_type == "lesson_cinematic_control" and frame_body.get("command") == "cancel")
+            ):
+                self._terminal_requested = True
+                self._terminal_lifecycle = {
+                    "identity": self._terminal_identity(),
+                    "frameType": frame_type, "stepId": step_id,
+                    "body": copy.deepcopy(frame_body), "sequence": seq,
+                    "retryCount": max(0, int(frame_ack_retry_count or 0)),
+                    "stepsCompleted": self._steps_completed,
+                }
+                await self.persist_course_mode_snapshot()
+            if frame_type in {
+                "lesson_prepare", "lesson_start", "lesson_stop", "lesson_cinematic_control"
+            }:
+                self._start_frame_ack_timeout(frame_type, seq, step_id)
             await self._send(payload)
         except BaseException:
             failed_frame = self._outstanding.pop(seq, None)
@@ -8658,6 +8836,8 @@ class LessonRuntime:
     # ── progress forward (own dispatch path) ────────────────────────────────────
 
     def _forward(self, event: Dict[str, Any]) -> None:
+        if event.get("type") == "lesson_started":
+            self._lesson_started_event = copy.deepcopy(event)
         if self.forwarder is None:
             return
         clean = {k: v for k, v in event.items() if v is not None}
@@ -8679,6 +8859,17 @@ class LessonRuntime:
         if self.forwarder is None:
             return False
         clean = {key: value for key, value in event.items() if value is not None}
+        self._terminal_requested = True
+        if self.course_mode is not None:
+            self._terminal_lifecycle = {
+                "identity": self._terminal_identity(), "event": copy.deepcopy(clean),
+                "sequence": self._seq, "stepsCompleted": self._steps_completed,
+            }
+            self.course_mode.orchestrator.session_state = SessionState.COMPLETE
+            try:
+                await self.persist_course_mode_snapshot()
+            except Exception as exc:
+                self._log("warning", f"terminal snapshot write failed: {type(exc).__name__}")
         self._log_runtime_event(clean)
         batch = self._forward_batch(clean)
         prepare = getattr(self.forwarder, "_with_started_event_for_replay", None)
@@ -9372,6 +9563,18 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
         f"manifestSteps={_compact_json(_manifest_steps_log_summary(manifest))} "
         f"storyBeat={_compact_json(_manifest_story_log_summary(manifest))}",
     )
+    course_mode_snapshot_store = get_course_mode_snapshot_store()
+    course_mode_snapshot = None
+    if lesson_cfg.get("course_mode_v2_enabled") is True and "courseModeContract" in manifest:
+        try:
+            course_mode_snapshot = await course_mode_snapshot_store.load(
+                backend_device_id, assignment["assignmentId"],
+            )
+        except Exception as exc:
+            _log("warning", f"course mode snapshot load failed: {type(exc).__name__}")
+            return existing
+
+    recovering_terminal = _course_mode_snapshot_is_terminal(course_mode_snapshot)
     republish_previous = None
     if existing is not None and getattr(existing, "assignment_id", None) == assignment.get("assignmentId"):
         # Re-check after the awaited store/manifest calls above. A terminal
@@ -9498,7 +9701,10 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
         else:
             _log("warning", "lesson startup connection release unavailable")
 
-    mcp_ready, mcp_failure_type = await _wait_for_mcp_reconnect_ready(conn, lesson_cfg)
+    mcp_ready, mcp_failure_type = (
+        (True, None) if recovering_terminal
+        else await _wait_for_mcp_reconnect_ready(conn, lesson_cfg)
+    )
     if not mcp_ready:
         _set_lesson_start_status(
             conn,
@@ -9512,7 +9718,7 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
         await _cleanup_failed_start("lesson_start_refused")
         return republish_previous
 
-    gc = _sd_pack_gc_for_connection(conn, lesson_cfg)
+    gc = None if recovering_terminal else _sd_pack_gc_for_connection(conn, lesson_cfg)
     activation = None
     candidate_identity = None
     if gc is not None:
@@ -9620,22 +9826,6 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
         token_refresh_fn=_refresh_event_token,
         logger=logger,
     )
-    course_mode_snapshot_store = get_course_mode_snapshot_store()
-    course_mode_snapshot = None
-    if lesson_cfg.get("course_mode_v2_enabled") is True and "courseModeContract" in manifest:
-        try:
-            course_mode_snapshot = await course_mode_snapshot_store.load(
-                backend_device_id, assignment["assignmentId"],
-            )
-            if _course_mode_snapshot_is_terminal(course_mode_snapshot):
-                await course_mode_snapshot_store.clear(
-                    backend_device_id, assignment["assignmentId"],
-                )
-                course_mode_snapshot = None
-        except Exception as exc:
-            _log("warning", f"course mode snapshot load failed: {type(exc).__name__}")
-            return republish_previous
-
     async def _report_preload_status(report: Dict[str, Any]) -> None:
         timeout_sec = _finite_float_or_default(lesson_cfg.get("preload_status_timeout_sec", 5.0), 5.0)
         retry_delay = _finite_float_or_default(lesson_cfg.get("preload_status_retry_delay_sec", 1.0), 1.0)
@@ -9672,20 +9862,33 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
         except Exception as exc:  # pragma: no cover - alarm is best-effort
             _log("warning", f"voice-latency alarm unavailable: {type(exc).__name__}")
             alarm = None
-    runtime = LessonRuntime(
-        conn,
-        assignment=assignment,
-        manifest=manifest,
-        asset_cache=asset_cache,
-        forwarder=forwarder,
-        manifest_checksum=new_manifest_checksum,
-        min_step_timeout_sec=lesson_cfg.get("step_timeout_floor_sec", 0),
-        alarm=alarm,
-        preload_status_reporter=_report_preload_status,
-        course_mode_snapshot_store=course_mode_snapshot_store,
-        course_mode_snapshot_device_id=backend_device_id,
-        course_mode_snapshot=course_mode_snapshot,
-    )
+    try:
+        runtime = LessonRuntime(
+            conn,
+            assignment=assignment,
+            manifest=manifest,
+            asset_cache=asset_cache,
+            forwarder=forwarder,
+            manifest_checksum=new_manifest_checksum,
+            min_step_timeout_sec=lesson_cfg.get("step_timeout_floor_sec", 0),
+            alarm=alarm,
+            preload_status_reporter=_report_preload_status,
+            course_mode_snapshot_store=course_mode_snapshot_store,
+            course_mode_snapshot_device_id=backend_device_id,
+            course_mode_snapshot=course_mode_snapshot,
+        )
+    except LessonError as exc:
+        _set_lesson_start_status(conn, exc.code)
+        _log("warning", f"lesson candidate identity refused: {exc.code}")
+        if activation is not None:
+            activation.abort_candidate()
+        for resource in (forwarder, asset_cache):
+            try:
+                await resource.aclose()
+            except Exception as close_exc:
+                _log("warning", f"refused candidate cleanup failed: {type(close_exc).__name__}")
+        await _cleanup_failed_start("lesson_start_refused")
+        return republish_previous
     # Terminal same-assignment rebuilds may already have closed their runtime. Live
     # current runtimes, including a different assignment, stay open as the fallback
     # until the candidate passes READY attestation below.
@@ -9695,6 +9898,26 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
             await prior.close()
         except Exception as exc:  # pragma: no cover - teardown is best-effort
             _log("warning", f"prior lesson runtime teardown failed: {type(exc).__name__}")
+    if recovering_terminal:
+        if activation is not None:
+            activation.abort_candidate()
+        conn.lesson_runtime = runtime
+        conn.lesson_runtime_candidate = None
+        try:
+            await runtime.start_protocol(preloaded=True)
+        except Exception as exc:
+            _set_lesson_start_status(conn, "TERMINAL_REPLAY_PENDING")
+            _log("warning", f"terminal recovery deferred: {type(exc).__name__}")
+            conn.lesson_runtime = republish_previous
+            try:
+                await runtime.close()
+            finally:
+                await _cleanup_failed_start("lesson_terminal_recovery_deferred")
+            return republish_previous
+        _set_lesson_start_status(conn, "TERMINAL_REPLAY_PENDING")
+        if republish_previous is not None:
+            await republish_previous.close()
+        return runtime
     conn.lesson_runtime_candidate = runtime
     mode_not_captured = object()
 

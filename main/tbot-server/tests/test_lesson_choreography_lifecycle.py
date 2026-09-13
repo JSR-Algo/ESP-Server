@@ -235,7 +235,8 @@ async def test_cancelled_walk_does_not_checkpoint_completed_entrance():
     await asyncio.sleep(0)
     task = runtime._visual_transition_task
     await runtime.cancel()
-    await asyncio.wait_for(task, 1)
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 1)
     assert not runtime._entrance_completed
     runtime._continue_after_step_visuals.assert_not_awaited()
 

@@ -513,7 +513,17 @@ class RedisTerminalReplayStore:
         if key is None:
             return
         redis = await self._redis()
-        await redis.delete(self._key(key[0], key[1]))
+        redis_key = self._key(key[0], key[1])
+        raw = await redis.get(redis_key)
+        if raw is None or json.loads(raw) != batch:
+            return
+        # Compare the exact stored bytes atomically so a newer terminal survives
+        # a replay acknowledgment, including replacement after the read above.
+        await redis.eval(
+            "if redis.call('GET', KEYS[1]) == ARGV[1] then "
+            "return redis.call('DEL', KEYS[1]) else return 0 end",
+            1, redis_key, raw,
+        )
 
     async def _redis(self) -> Any:
         if self._client is not None:

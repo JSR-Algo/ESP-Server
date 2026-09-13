@@ -568,7 +568,14 @@ def _firmware_lesson_handler() -> "pathlib.Path | None":
     skip rather than a failure; it still runs in dev, in `gate.sh`, and in the
     docker E2E, which is where drift is actually introduced.
     """
+    import os
     import pathlib
+
+    selected = os.environ.get("TBOT_FIRMWARE_WORKTREE")
+    if selected:
+        candidate = pathlib.Path(selected).resolve() / "main" / "lesson_handler.cc"
+        assert candidate.is_file(), f"Selected firmware handler is missing: {candidate}"
+        return candidate
 
     here = pathlib.Path(__file__).resolve()
     for parent in here.parents:
