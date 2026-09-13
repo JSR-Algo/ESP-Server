@@ -355,6 +355,42 @@ async def test_cancel_supersedes_unsent_completion_with_real_snapshot_serializat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('operation', ['stop', 'cancel'])
+async def test_explicit_terminal_supersedes_completion_after_snapshot_failure(operation):
+    runtime = closing_runtime()
+
+    class FailFirstStore(MemoryCourseModeSnapshotStore):
+        first = True
+
+        async def store(self, *args):
+            if self.first:
+                self.first = False
+                raise OSError('owned completion snapshot failure')
+            await super().store(*args)
+
+    runtime._course_mode_snapshot_store = FailFirstStore()
+    runtime._course_mode_snapshot_device_id = 'review-failed-store-device'
+    runtime.persist_course_mode_snapshot = LessonRuntime.persist_course_mode_snapshot.__get__(runtime)
+    try:
+        assert await runtime._complete_course_mode_close() is False
+        assert not _frames(runtime)
+        await getattr(runtime, operation)()
+        frames = _frames(runtime)
+        assert len(frames) == 1
+        assert frames[0]['body'].get('reason') != 'COMPLETED'
+        snapshot = await runtime._course_mode_snapshot_store.load(
+            'review-failed-store-device', runtime.assignment_id,
+        )
+        assert snapshot['terminalLifecycle']['body'] == frames[0]['body']
+        await runtime.on_lesson_ack(_control_ack(runtime, frames[0], 1))
+        events = [event for batch in runtime.forwarder.batches for event in batch['events']]
+        assert sum(event['type'] == 'lesson_abandoned' for event in events) == 1
+        assert not any(event['type'] == 'lesson_completed' for event in events)
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('retired_kind', ['prepare', 'pause'])
 @pytest.mark.parametrize('invalid_kind', ['accepted', 'phase', 'command_sequence', 'session', 'step', 'acks_type'])
 async def test_retired_ack_validation_preserves_highwater_and_terminal_sequence(retired_kind, invalid_kind):
@@ -395,4 +431,142 @@ async def test_retired_ack_validation_preserves_highwater_and_terminal_sequence(
         await runtime.on_lesson_ack(_control_ack(runtime, terminal, 2))
         assert runtime.state == 'COMPLETED'
     finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('restart_origin', ['same_runtime_attempted', 'restart_attempted', 'restart_durable_before_send'])
+async def test_attempted_or_restored_completion_cannot_be_cancelled_during_retry_persist(restart_origin):
+    runtime = runtime_with_store()
+    current = runtime
+    original_send = runtime._send
+    store = runtime._course_mode_snapshot_store
+    original_store = store.store
+    retry_entered, release_retry = asyncio.Event(), asyncio.Event()
+    retry = cancel = None
+    attempts = []
+
+    async def attempted_send(payload):
+        attempts.append(payload)
+        raise ConnectionError('owned ambiguous transport result')
+
+    async def durable_then_process_loss(*args):
+        await original_store(*args)
+        raise asyncio.CancelledError('owned process loss before transport attempt')
+
+    async def hold_retry_store(*args):
+        if not retry_entered.is_set():
+            retry_entered.set()
+            await release_retry.wait()
+        await original_store(*args)
+
+    try:
+        body = {'reason': 'COMPLETED', 'cinematicPhase': {
+            'command': 'stop', **runtime._cinematic_identity_payload(),
+        }}
+        if restart_origin == 'restart_durable_before_send':
+            store.store = durable_then_process_loss
+            with pytest.raises(asyncio.CancelledError):
+                await runtime._emit('lesson_stop', body=body)
+            assert not attempts and not _frames(runtime)
+        else:
+            runtime._send = attempted_send
+            with pytest.raises(ConnectionError):
+                await runtime._emit('lesson_stop', body=body)
+            assert len(attempts) == 1
+            assert runtime._can_supersede_unsent_completion() is False
+        saved = copy.deepcopy(await store.load('terminal-test-device', runtime.assignment_id))
+        assert saved['terminalLifecycle']['body']['reason'] == 'COMPLETED'
+        expected_body = copy.deepcopy(saved['terminalLifecycle']['body'])
+        store.store = original_store
+        runtime._send = original_send
+        if restart_origin.startswith('restart_'):
+            await runtime.close()
+            current = restored(runtime, saved)
+            assert current._can_supersede_unsent_completion() is False
+        store.store = hold_retry_store
+        retry = asyncio.create_task(current.start_protocol(preloaded=True))
+        await asyncio.wait_for(retry_entered.wait(), 1)
+        assert current._can_supersede_unsent_completion() is False
+        cancel = asyncio.create_task(current.cancel())
+        await asyncio.sleep(0)
+        assert not cancel.done()
+        assert not _frames(current)
+        release_retry.set()
+        await asyncio.wait_for(asyncio.gather(retry, cancel), 2)
+        frames = _frames(current)
+        assert len(frames) == 1
+        assert frames[0]['type'] == 'lesson_stop'
+        assert frames[0]['body'] == expected_body
+        assert current._can_supersede_unsent_completion() is False
+        events = [event for batch in current.forwarder.batches for event in batch['events']]
+        assert not any(event['type'] in {'lesson_completed', 'lesson_abandoned'} for event in events)
+        await current.on_lesson_ack(_control_ack(current, frames[0], 1))
+        events = [event for batch in current.forwarder.batches for event in batch['events']]
+        assert sum(event['type'] == 'lesson_completed' for event in events) == 1
+        assert not any(event['type'] == 'lesson_abandoned' for event in events)
+    finally:
+        release_retry.set()
+        for task in (retry, cancel):
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        store.store = original_store
+        runtime._send = original_send
+        await runtime.close()
+        if current is not runtime:
+            await current.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('operation', ['stop', 'cancel'])
+async def test_never_sent_completion_retry_transfers_proof_before_second_store(operation):
+    runtime = runtime_with_store()
+    store = runtime._course_mode_snapshot_store
+    original_store = store.store
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls = 0
+    retry = superseding = None
+
+    async def fail_then_hold(*args):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ConnectionError('owned first snapshot failure')
+        if calls == 2:
+            entered.set()
+            await release.wait()
+        await original_store(*args)
+
+    try:
+        store.store = fail_then_hold
+        with pytest.raises(ConnectionError):
+            await runtime._emit('lesson_stop', body={
+                'reason': 'COMPLETED', 'cinematicPhase': {
+                    'command': 'stop', **runtime._cinematic_identity_payload(),
+                },
+            })
+        old_intent = runtime._terminal_lifecycle
+        assert runtime._can_supersede_unsent_completion()
+        retry = asyncio.create_task(runtime.start_protocol(preloaded=True))
+        await asyncio.wait_for(entered.wait(), 1)
+        assert runtime._terminal_lifecycle is not old_intent
+        assert runtime._can_supersede_unsent_completion()
+        superseding = asyncio.create_task(getattr(runtime, operation)())
+        await asyncio.sleep(0)
+        release.set()
+        outcomes = await asyncio.wait_for(asyncio.gather(retry, superseding, return_exceptions=True), 2)
+        assert not any(frame['body'].get('reason') == 'COMPLETED' for frame in _frames(runtime)), outcomes
+        frames = _frames(runtime)
+        assert len(frames) == 1
+        assert frames[0]['body'].get('reason') in {'CANCELLED', 'cancelled'}
+        saved = await store.load('terminal-test-device', runtime.assignment_id)
+        assert saved['terminalLifecycle']['body'] == frames[0]['body']
+    finally:
+        release.set()
+        for task in (retry, superseding):
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        store.store = original_store
         await runtime.close()

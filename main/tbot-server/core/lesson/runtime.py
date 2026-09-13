@@ -7797,11 +7797,13 @@ class LessonRuntime:
         await self._request_terminal_control("lesson_stop", body)
 
     async def cancel(self, reason: str = "cancelled") -> None:
-        if self._terminal_requested and not self._can_supersede_unsent_completion():
+        superseding_completion = self._can_supersede_unsent_completion()
+        if self._terminal_requested and not superseding_completion:
             if self._terminal_lifecycle is not None and self.state not in (S_FAILED, S_COMPLETED):
                 await self._resume_terminal_lifecycle()
             return
-        if (not self._cinematic_enabled() or self._cinematic_cancel_sent
+        if (not self._cinematic_enabled()
+                or (self._cinematic_cancel_sent and not superseding_completion)
                 or self.state in (S_FAILED, S_COMPLETED)):
             return
         self._cinematic_cancel_sent = True
@@ -7811,7 +7813,7 @@ class LessonRuntime:
         })
 
     def _can_supersede_unsent_completion(self) -> bool:
-        pending = getattr(self, "_pending_terminal_persistence", None)
+        pending = getattr(self, "_unsent_terminal_intent", None)
         return bool(pending is not None and pending is self._terminal_lifecycle
                     and pending.get("body", {}).get("reason") == "COMPLETED")
 
@@ -8037,12 +8039,17 @@ class LessonRuntime:
             "body": copy.deepcopy(frame_body),
             "retryCount": max(0, int(frame_ack_retry_count or 0)),
         }
+        intent = None
         try:
             if self.course_mode is not None and (
                 frame_type == "lesson_stop"
                 or (frame_type == "lesson_cinematic_control" and frame_body.get("command") == "cancel")
             ):
                 self._terminal_requested = True
+                previous_intent = self._terminal_lifecycle
+                never_sent = previous_intent is None or (
+                    previous_intent is getattr(self, "_unsent_terminal_intent", None)
+                )
                 self._terminal_lifecycle = {
                     "identity": self._terminal_identity(),
                     "frameType": frame_type, "stepId": step_id,
@@ -8051,18 +8058,19 @@ class LessonRuntime:
                     "stepsCompleted": self._steps_completed,
                 }
                 intent = self._terminal_lifecycle
-                self._pending_terminal_persistence = intent
-                try:
-                    await self.persist_course_mode_snapshot()
-                    if self._terminal_lifecycle is not intent:
-                        raise LessonError("COURSE_TERMINAL_SUPERSEDED", "terminal command was superseded before send")
-                finally:
-                    if self._pending_terminal_persistence is intent:
-                        self._pending_terminal_persistence = None
+                # Only this process can prove no transport attempt occurred. A
+                # restored or previously attempted command remains conservative.
+                if never_sent:
+                    self._unsent_terminal_intent = intent
+                await self.persist_course_mode_snapshot()
+                if self._terminal_lifecycle is not intent:
+                    raise LessonError("COURSE_TERMINAL_SUPERSEDED", "terminal command was superseded before send")
             if frame_type in {
                 "lesson_prepare", "lesson_start", "lesson_stop", "lesson_cinematic_control"
             }:
                 self._start_frame_ack_timeout(frame_type, seq, step_id)
+            if intent is not None and getattr(self, "_unsent_terminal_intent", None) is intent:
+                self._unsent_terminal_intent = None
             await self._send(payload)
         except BaseException:
             failed_frame = self._outstanding.pop(seq, None)
