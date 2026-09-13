@@ -191,3 +191,120 @@ async def test_recovered_v5_stop_requires_original_control_ack_contract(admissio
         await runtime.close()
         if restarted is not None:
             await restarted.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('operation', ['stop', 'cancel'])
+async def test_saved_terminal_intent_survives_crash_during_embodied_interrupt(operation):
+    runtime = runtime_with_store()
+    runtime._entrance_started = runtime._entrance_completed = True
+    await runtime.persist_course_mode_snapshot()
+    ordinary = await runtime._course_mode_snapshot_store.load('terminal-test-device', runtime.assignment_id)
+    assert ordinary['orchestrator']['sessionState'] == 'WORD_ACTIVE'
+    assert 'terminalLifecycle' not in ordinary
+    entered = asyncio.Event()
+    original_interrupt = runtime._interrupt_course_embodied_action
+    restarted = None
+    task = None
+
+    async def held_interrupt(reason):
+        entered.set()
+        await asyncio.Future()
+
+    try:
+        runtime._interrupt_course_embodied_action = held_interrupt
+        task = asyncio.create_task(getattr(runtime, operation)())
+        await asyncio.wait_for(entered.wait(), 1)
+        assert runtime._terminal_requested is True
+        assert not _frames(runtime)
+        crash_snapshot = copy.deepcopy(await runtime._course_mode_snapshot_store.load(
+            'terminal-test-device', runtime.assignment_id,
+        ))
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        runtime._interrupt_course_embodied_action = original_interrupt
+        await runtime.close()
+        restarted = restored(runtime, crash_snapshot)
+        await restarted.start_protocol(preloaded=True)
+        frames = _frames(restarted)
+        assert frames and all(frame['type'] not in {'lesson_prepare', 'lesson_start', 'lesson_step'}
+                              for frame in frames), {
+            'operation': operation,
+            'snapshotHasTerminalLifecycle': 'terminalLifecycle' in crash_snapshot,
+            'snapshotStillOrdinary': crash_snapshot == ordinary,
+            'restartedFrames': frames,
+        }
+        assert 'terminalLifecycle' in crash_snapshot
+    finally:
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        runtime._interrupt_course_embodied_action = original_interrupt
+        await runtime.close()
+        if restarted is not None:
+            await restarted.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('course', [True, False])
+@pytest.mark.parametrize('first,second', [('stop', 'cancel'), ('cancel', 'stop')])
+async def test_concurrent_terminal_calls_keep_one_control_while_cleanup_waits(course, first, second):
+    runtime = runtime_with_store()
+    if not course:
+        runtime.course_mode = None
+        runtime.course_embodied_dispatcher = None
+    entered, release = asyncio.Event(), asyncio.Event()
+    original_interrupt = runtime._interrupt_course_embodied_action
+
+    async def held_interrupt(reason):
+        entered.set()
+        await release.wait()
+
+    first_task = second_task = None
+    try:
+        runtime._interrupt_course_embodied_action = held_interrupt
+        first_task = asyncio.create_task(getattr(runtime, first)())
+        await asyncio.wait_for(entered.wait(), 1)
+        intent = runtime._terminal_lifecycle.copy()
+        second_task = asyncio.create_task(getattr(runtime, second)())
+        await asyncio.sleep(0)
+        assert not second_task.done()
+        assert not _frames(runtime)
+        release.set()
+        await asyncio.gather(first_task, second_task)
+        frames = _frames(runtime)
+        assert len(frames) == 1
+        assert frames[0]['body'] == intent['body']
+        await runtime.on_lesson_ack(_control_ack(runtime, frames[0], 1))
+        events = [event for batch in runtime.forwarder.batches for event in batch['events']]
+        assert sum(event['type'] == 'lesson_abandoned' for event in events) == 1
+    finally:
+        release.set()
+        for task in (first_task, second_task):
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        runtime._interrupt_course_embodied_action = original_interrupt
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_staged_snapshot_retries_exact_intent_after_storage_recovers():
+    runtime = runtime_with_store()
+    store = runtime._course_mode_snapshot_store
+    original_store = store.store
+    try:
+        store.store = AsyncMock(side_effect=ConnectionError('owned snapshot unavailable'))
+        with pytest.raises(ConnectionError):
+            await runtime.stop()
+        body = runtime._terminal_lifecycle['body'].copy()
+        assert not _frames(runtime)
+        store.store = original_store
+        await runtime.cancel()
+        assert len(_frames(runtime)) == 1
+        assert _frames(runtime)[0]['body'] == body
+        saved = await store.load('terminal-test-device', runtime.assignment_id)
+        assert saved['terminalLifecycle']['body'] == body
+    finally:
+        store.store = original_store
+        await runtime.close()

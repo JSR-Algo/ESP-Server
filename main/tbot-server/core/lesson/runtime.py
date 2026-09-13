@@ -3296,6 +3296,14 @@ class LessonRuntime:
         await self._emit("lesson_prepare", body=self._prepare_body())
 
     async def _resume_terminal_lifecycle(self) -> bool:
+        lock = getattr(self, "_terminal_control_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._terminal_control_lock = lock
+        async with lock:
+            return await self._resume_terminal_lifecycle_locked()
+
+    async def _resume_terminal_lifecycle_locked(self) -> bool:
         lifecycle = self._terminal_lifecycle
         if lifecycle is None:
             if self.course_mode is not None and (
@@ -3311,6 +3319,17 @@ class LessonRuntime:
                 await self._notify_lesson_terminal("terminal_ack_unconfirmed")
                 return True
             return False
+        if lifecycle.get("cleanupPending"):
+            tasks = self._retire_for_terminal_control()
+            # Persist before any cleanup/outbox await can strand an ordinary snapshot.
+            try:
+                await self.persist_course_mode_snapshot()
+            finally:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            await self._interrupt_course_embodied_action(
+                "stopped" if lifecycle["frameType"] == "lesson_stop" else "cancelled"
+            )
+            lifecycle["cleanupPending"] = False
         if self.course_mode is not None:
             await self._flush_course_evidence_outbox()
         if self._lesson_started_event is not None:
@@ -3329,7 +3348,8 @@ class LessonRuntime:
             return True
         # Reconnect retries only the persisted terminal control. The command ID
         # stays stable, while a fresh envelope fences late ACKs from the old socket.
-        self.state = S_RUNNING
+        if self.state not in (S_RUNNING, S_PAUSED):
+            self.state = S_RUNNING
         self._cinematic_cancel_sent = True
         await self._emit(
             lifecycle["frameType"], step_id=lifecycle.get("stepId"),
@@ -7756,58 +7776,53 @@ class LessonRuntime:
             return
         if self.state in (S_FAILED, S_COMPLETED):
             return
-        self._terminal_requested = True
-        await self._retire_for_terminal_control()
-        await self._interrupt_course_embodied_action("stopped")
-        if self._cinematic_enabled():
-            if self._cinematic_stop_sent or self._cinematic_cancel_sent:
-                return
+        if self._cinematic_enabled() and (self._cinematic_stop_sent or self._cinematic_cancel_sent):
+            return
+        body: Dict[str, Any] = {"reason": "CANCELLED"}
+        if self._cinematic_enabled() and self._cinematic_phase is not None:
+            body["cinematicPhase"] = {
+                "command": "stop", **self._cinematic_identity_payload(),
+            }
+            self._cinematic_stop_sent = True
         else:
             self._cancel_visual_waiters(increment_generation=True, reason="stopped")
-        if self.state not in (S_FAILED, S_COMPLETED):
-            # T2.1: the reason MUST stay inside the documented lesson_stop enum
-            # (COMPLETED | CANCELLED | FAILED, protocol §4.6). The firmware
-            # classifies ANY reason that is not COMPLETED/SUCCEEDED/CANCELLED as a
-            # FAILURE (lesson_handler.cc), so the previous "STOPPED" showed the
-            # child the sad-face "Bài học bị gián đoạn." UI + error sound for what
-            # is a graceful/administrative stop. CANCELLED is the enum member with
-            # exactly those semantics, and still projects lesson_abandoned (not
-            # lesson_failed) on the ack path below.
-            body: Dict[str, Any] = {"reason": "CANCELLED"}
-            if self._cinematic_enabled() and self._cinematic_phase is not None:
-                body["cinematicPhase"] = {
-                    "command": "stop",
-                    **self._cinematic_identity_payload(),
-                }
-                self._cinematic_stop_sent = True
-            await self._emit("lesson_stop", body=body)
+        await self._request_terminal_control("lesson_stop", body)
 
     async def cancel(self, reason: str = "cancelled") -> None:
         if self._terminal_requested:
             if self._terminal_lifecycle is not None and self.state not in (S_FAILED, S_COMPLETED):
                 await self._resume_terminal_lifecycle()
             return
-        if (
-            not self._cinematic_enabled()
-            or self._cinematic_cancel_sent
-            or self._terminal_requested
-            or self.state in (S_FAILED, S_COMPLETED)
-        ):
+        if (not self._cinematic_enabled() or self._cinematic_cancel_sent
+                or self.state in (S_FAILED, S_COMPLETED)):
             return
-        self._terminal_requested = True
         self._cinematic_cancel_sent = True
-        await self._retire_for_terminal_control()
-        await self._interrupt_course_embodied_action("cancelled")
-        await self._emit(
-            "lesson_cinematic_control",
-            body={
-                "command": "cancel",
-                **self._cinematic_identity_payload(),
-                "reason": str(reason or "cancelled")[:64],
-            },
-        )
+        await self._request_terminal_control("lesson_cinematic_control", {
+            "command": "cancel", **self._cinematic_identity_payload(),
+            "reason": str(reason or "cancelled")[:64],
+        })
 
-    async def _retire_for_terminal_control(self) -> None:
+    async def _request_terminal_control(self, frame_type: str, body: Dict[str, Any]) -> None:
+        self._terminal_requested = True
+        body = copy.deepcopy(body)
+        if self._cinematic_enabled():
+            nested = body.get("cinematicPhase")
+            command = nested if isinstance(nested, dict) else body
+            if isinstance(command.get("command"), str):
+                command.setdefault("commandSequenceId", self._seq + 1)
+                if command is not body:
+                    for key in ("command", "cueId", "effect", "stepKey", "playbackMode", "commandSequenceId"):
+                        if key in command:
+                            body.setdefault(key, command[key])
+        self._terminal_lifecycle = {
+            "identity": self._terminal_identity(), "frameType": frame_type,
+            "stepId": None, "body": body, "sequence": self._seq,
+            "retryCount": 0, "stepsCompleted": self._steps_completed,
+            "cleanupPending": True,
+        }
+        await self._resume_terminal_lifecycle()
+
+    def _retire_for_terminal_control(self) -> list[asyncio.Task]:
         # Cancel supersedes an in-flight prepare/start; its late ACK cannot start a clip.
         tasks = [task for task in (self._course_phase_task, self._visual_transition_task)
                  if task is not None and task is not asyncio.current_task() and not task.done()]
@@ -7822,7 +7837,7 @@ class LessonRuntime:
         self._retire_authored_cinematic_pending()
         self._outstanding.clear()
         self._cinematic_pending_command = None
-        await asyncio.gather(*tasks, return_exceptions=True)
+        return tasks
 
     def _clear_cinematic_state(self) -> None:
         self._course_playout_deferred_finish = None
