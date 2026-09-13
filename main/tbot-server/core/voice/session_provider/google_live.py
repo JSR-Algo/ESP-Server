@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import re
+import secrets
 import time
 import unicodedata
 from collections import deque
@@ -330,6 +331,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
         classic_provider_factory=None,
     ):
         self.conn = conn
+        self._course_playout = None
         self._client_factory = client_factory or GoogleLiveClientFactory.create
         self._classic_provider_factory = classic_provider_factory
         self._client = None
@@ -3034,9 +3036,111 @@ class GoogleLiveProvider(VoiceSessionProvider):
             )
         return True
 
+    def prepare_course_playout(self, response_generation):
+        if (not (getattr(self.conn, "features", None) or {}).get("lessonAudioPlayoutAck")
+                or self._closing or type(response_generation) is not int
+                or response_generation != self._response_generation
+                or self.is_response_cancelled(response_generation)):
+            return None
+        pending = self._course_playout
+        if (pending is not None and self._course_playout_current(pending)
+                and not pending["stopSent"]):
+            return pending["id"]
+        self.cancel_course_playout()
+        runtime = getattr(self.conn, "lesson_runtime", None)
+        capture = getattr(runtime, "capture_course_playout", None)
+        identity = capture() if callable(capture) else None
+        if identity is None:
+            return None
+        prefix = getattr(self.conn, "_course_playout_prefix", None)
+        if prefix is None:
+            prefix = secrets.token_hex(8)
+            self.conn._course_playout_prefix = prefix
+            self.conn._course_playout_counter = 0
+        counter = getattr(self.conn, "_course_playout_counter", 0)
+        if type(counter) is not int or not 0 <= counter < 2**64 - 1:
+            raise RuntimeError("course playout identity exhausted")
+        self.conn._course_playout_counter = counter + 1
+        self._course_playout = {
+            "id": f"{prefix}{counter + 1:016x}", "runtime": runtime, "identity": identity,
+            "runtimeEpoch": runtime._visual_generation,
+            "socket": self.conn.websocket, "session": self.conn.session_id,
+            "generation": response_generation, "startedAt": None, "stopSent": False,
+        }
+        return self._course_playout["id"]
+
+    def _course_playout_current(self, pending):
+        runtime = pending["runtime"]
+        identity = pending["identity"]
+        return (not self._closing and pending["runtime"] is getattr(self.conn, "lesson_runtime", None)
+                and pending["runtimeEpoch"] == pending["runtime"]._visual_generation
+                and identity["assignment_id"] == runtime.assignment_id
+                and identity["session_id"] == runtime.session_id
+                and identity["activity_id"] == runtime._current_cinematic_activity_id()
+                and identity["step_sequence"] == runtime._step_seq
+                and pending["socket"] is self.conn.websocket
+                and pending["session"] == self.conn.session_id
+                and pending["generation"] == self._response_generation
+                and not self.is_response_cancelled(pending["generation"]))
+
+    def current_course_playout_id(self):
+        pending = self._course_playout
+        return pending["id"] if pending is not None and self._course_playout_current(pending) else None
+
+    def mark_course_playout_stop_sent(self, playout_id):
+        pending = self._course_playout
+        if pending is not None and playout_id == pending["id"] and self._course_playout_current(pending):
+            pending["stopSent"] = True
+            return True
+        return False
+
+    def cancel_course_playout(self, *, restore_listen=True):
+        pending = self._course_playout
+        self._course_playout = None
+        if pending is not None and pending["startedAt"] is not None:
+            pending["runtime"].on_course_playout_cancelled(
+                restore_listen=restore_listen, **pending["identity"]
+            )
+
+    def _accept_course_playout_ack(self, message):
+        pending = self._course_playout
+        at = message.get("playoutAtMs")
+        if (pending is None or not self._course_playout_current(pending)
+                or message.get("playoutId") != pending["id"]
+                or message.get("session_id") != pending["session"]
+                or type(at) is not int or not 0 <= at <= 2**53 - 1):
+            return False
+        state = message.get("state")
+        if state == "start":
+            if pending["startedAt"] is not None:
+                return False
+            accepted = pending["runtime"].on_course_playout_started(**pending["identity"])
+            if accepted:
+                pending["startedAt"] = at
+        elif state == "stop":
+            if pending["startedAt"] is None or not pending["stopSent"] or at < pending["startedAt"]:
+                return False
+            accepted = pending["runtime"].on_course_playout_finished(**pending["identity"])
+            if accepted:
+                self._course_playout = None
+        else:
+            return False
+        if accepted:
+            self.conn.logger.bind(tag="GoogleLive").info(
+                "course_playout_receipt playout_id={} state={} device_playout_ms={} receipt_monotonic_ms={} "
+                "assignment_id={} lesson_session_id={} activity_id={} step_sequence={} lesson_playout_id={}",
+                pending["id"], state, at, round(time.monotonic() * 1000),
+                pending["identity"]["assignment_id"], pending["identity"]["session_id"],
+                pending["identity"]["activity_id"], pending["identity"]["step_sequence"],
+                pending["identity"]["playout_id"],
+            )
+        return accepted
+
     def accept_lesson_audio_drain_ack(self, message):
         if not isinstance(message, Mapping):
             return False
+        if message.get("type") == "tts_ack" and "playoutId" in message:
+            return self._accept_course_playout_ack(message)
         if message.get("type") != "tts_ack" or message.get("state") != "stop":
             return False
         drain_id = message.get("drainId")
@@ -3861,6 +3965,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
     async def _close_live_resources(
         self, *, preserve_live_prewarm=False, evidence_finalize=False
     ):
+        self.cancel_course_playout(restore_listen=False)
         cleanup_failure_code = None
         current_task = asyncio.current_task()
         receive_task = self._receive_task
@@ -7922,6 +8027,8 @@ class GoogleLiveProvider(VoiceSessionProvider):
             return
         self._last_interrupt_at = now
 
+        retired_playout_id = self.current_course_playout_id()
+        self.cancel_course_playout()
         previous_response_id = self._response_generation
         self._response_generation += 1
         bind_generation = getattr(self._client, "bind_response_generation", None)
@@ -7953,6 +8060,9 @@ class GoogleLiveProvider(VoiceSessionProvider):
         )
         if not hard_lesson_interrupt:
             await self._interrupt_lesson_conversation()
+        if (retired_playout_id is not None
+                and self.current_course_playout_id() not in (None, retired_playout_id)):
+            return
         if len(self._cancelled_response_ids) > 20:
             self._cancelled_response_ids = set(
                 sorted(self._cancelled_response_ids)[-10:]
@@ -7995,10 +8105,11 @@ class GoogleLiveProvider(VoiceSessionProvider):
         if self._bridge is not None and hasattr(self._bridge, "stop_output"):
             try:
                 lesson_stop = getattr(self._bridge, "stop_output_for_lesson", None)
+                stop_options = {"playout_id": retired_playout_id} if retired_playout_id else {}
                 if reason == "lesson_start_intent" and callable(lesson_stop):
-                    await lesson_stop()
+                    await lesson_stop(**stop_options)
                 else:
-                    await self._bridge.stop_output()
+                    await self._bridge.stop_output(**stop_options)
                 self._evidence_active_response_generation = None
                 self._record_candidate_interrupt(
                     previous_response_id, self._response_generation

@@ -5655,6 +5655,19 @@ class LessonRuntime:
         self._course_phase_task = asyncio.create_task(run())
         return True
 
+    def capture_course_playout(self) -> dict[str, Any] | None:
+        """Capture ownership before dispatch; this does not claim audible output."""
+        if (not self._is_active_runtime() or self.state != S_RUNNING
+                or not self._entrance_completed or self._terminal_requested
+                or self._cinematic_cancel_sent or self._completion_stop_sent
+                or not self._activity_is_phase_bound(None)):
+            return None
+        return {
+            "assignment_id": self.assignment_id, "session_id": self.session_id,
+            "activity_id": self._current_cinematic_activity_id(),
+            "step_sequence": self._step_seq, "playout_id": self._course_playout_id + 1,
+        }
+
     def on_course_playout_started(
         self, *, assignment_id: str, session_id: str, activity_id: str,
         step_sequence: int, playout_id: int,
@@ -5682,6 +5695,19 @@ class LessonRuntime:
         self, *, assignment_id: str, session_id: str, activity_id: str,
         step_sequence: int, playout_id: int,
     ) -> bool:
+        return self._end_course_playout(
+            assignment_id=assignment_id, session_id=session_id, activity_id=activity_id,
+            step_sequence=step_sequence, playout_id=playout_id,
+        )
+
+    def on_course_playout_cancelled(self, *, restore_listen: bool = True, **identity: Any) -> bool:
+        """Retire an interrupted visual; cancellation is not successful playout."""
+        return self._end_course_playout(restore_listen=restore_listen, **identity)
+
+    def _end_course_playout(
+        self, *, assignment_id: str, session_id: str, activity_id: str,
+        step_sequence: int, playout_id: int, restore_listen: bool = True,
+    ) -> bool:
         if (not self._is_active_runtime() or self.state not in (S_RUNNING, S_PAUSED) or self._cinematic_cancel_sent
                 or self._completion_stop_sent or self._completion_visual_pending
                 or not self._course_playout_active or type(playout_id) is not int
@@ -5691,6 +5717,12 @@ class LessonRuntime:
                 or type(step_sequence) is not int or step_sequence != self._step_seq):
             return False
         self._course_playout_active = False
+        if not restore_listen:
+            self._course_playout_deferred_finish = None
+            task = self._course_phase_task
+            if task is not None and not task.done():
+                task.cancel()
+            return True
         pending = self._cinematic_pending_command
         if self.state == S_PAUSED or (isinstance(pending, dict) and pending.get("command") == "pause"):
             self._course_playout_deferred_finish = {

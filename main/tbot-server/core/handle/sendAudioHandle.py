@@ -356,7 +356,7 @@ async def _do_send_audio(conn: "ConnectionHandler", opus_packet, flow_control):
     flow_control["sequence"] = sequence + 1
 
 
-async def send_tts_message(conn: "ConnectionHandler", state, text=None, extra_fields=None):
+async def send_tts_message(conn: "ConnectionHandler", state, text=None, extra_fields=None, on_send_started=None):
     """Send TTS status message"""
     if text is None and state == "sentence_start":
         return
@@ -394,6 +394,8 @@ async def send_tts_message(conn: "ConnectionHandler", state, text=None, extra_fi
         flow_sentence_id = getattr(conn, "audio_flow_control", {}).get("sentence_id")
         if current_sentence_id != conn.sentence_id and flow_sentence_id == conn.sentence_id:
             return
+        if on_send_started is not None and on_send_started() is False:
+            return False
 
         # Stop audio sending loop (only call when flow controller initialized)
         if hasattr(conn, "audio_rate_controller") and conn.audio_rate_controller:
@@ -401,6 +403,8 @@ async def send_tts_message(conn: "ConnectionHandler", state, text=None, extra_fi
         conn.clearSpeakStatus()
 
     # SendMessageto Client
+    if state != "stop" and on_send_started is not None:
+        on_send_started()
     await conn.websocket.send(json.dumps(message))
     if state == "start":
         conn.client_is_speaking = True

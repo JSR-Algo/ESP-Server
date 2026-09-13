@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "feature": "lessonAudioPlayoutAck",
+  "start": {"type": "tts", "state": "start", "playoutId": "0123456789abcdef0000000000000001", "session_id": "transport-session"},
+  "stop": {"type": "tts", "state": "stop", "playoutId": "0123456789abcdef0000000000000001", "session_id": "transport-session", "drainId": "lesson-1", "continue_listening": true, "listen_mode": "realtime"},
+  "started": {"type": "tts_ack", "state": "start", "playoutId": "0123456789abcdef0000000000000001", "session_id": "transport-session", "playoutAtMs": 100},
+  "drained": {"type": "tts_ack", "state": "stop", "playoutId": "0123456789abcdef0000000000000001", "session_id": "transport-session", "playoutAtMs": 120},
+  "interrupted": {"type": "tts", "state": "stop", "reason": "interrupt", "playoutId": "0123456789abcdef0000000000000001", "session_id": "transport-session", "continue_listening": true, "listen_mode": "realtime"}
+}
