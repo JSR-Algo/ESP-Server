@@ -4367,7 +4367,8 @@ class LessonRuntime:
         if (
             frame.get("type") != "lesson_cinematic_control"
             and not conversation_prepare
-        ) or command is None:
+            and not self._terminal_requested
+        ) or (command is None and not self._terminal_requested):
             return
         self._retired_conversation_ack_sequences[sequence] = {
             "protocolVersion": self.negotiated_version,
@@ -4376,6 +4377,7 @@ class LessonRuntime:
             "lessonId": self.lesson_id,
             "lessonVersion": self.lesson_version,
             "stepId": frame.get("stepId"),
+            "terminalFrameType": frame.get("type") if self._terminal_requested else None,
             "command": {
                 key: copy.deepcopy(command.get(key))
                 for key in (
@@ -4383,7 +4385,7 @@ class LessonRuntime:
                     "phaseId" if "phaseId" in command else "cueId",
                     "commandSequenceId",
                 )
-            },
+            } if command is not None else None,
         }
         while (
             len(self._retired_conversation_ack_sequences)
@@ -4903,8 +4905,13 @@ class LessonRuntime:
         retired: dict[str, Any],
     ) -> bool:
         command = retired.get("command")
+        plain_terminal_ack = self._terminal_requested and command is None and (
+            retired.get("terminalFrameType") == "lesson_step"
+            or (retired.get("terminalFrameType") in {"lesson_prepare", "lesson_start"}
+                and self.negotiated_version not in {RENDERER_V3, RENDERER_V4, RENDERER_V5})
+        )
         return bool(
-            isinstance(command, dict)
+            (isinstance(command, dict) or plain_terminal_ack)
             and msg_json.get("type") == "lesson_ack"
             and msg_json.get("protocolVersion") == retired.get("protocolVersion")
             and msg_json.get("assignmentId") == retired.get("assignmentId")
@@ -4921,7 +4928,7 @@ class LessonRuntime:
             and type(msg_json.get("sequence")) is int
             and type(body.get("acks")) is int
             and body.get("acks") == acked
-            and self._cinematic_ack_payload_matches(command, body)
+            and (command is None or self._cinematic_ack_payload_matches(command, body))
         )
 
     def _cinematic_command_identity(self, command: dict[str, Any]) -> tuple[str, str]:
@@ -7770,13 +7777,14 @@ class LessonRuntime:
         return result
 
     async def stop(self) -> None:
-        if self._terminal_requested:
+        superseding_completion = self._can_supersede_unsent_completion()
+        if self._terminal_requested and not superseding_completion:
             if self._terminal_lifecycle is not None and self.state not in (S_FAILED, S_COMPLETED):
                 await self._resume_terminal_lifecycle()
             return
         if self.state in (S_FAILED, S_COMPLETED):
             return
-        if self._cinematic_enabled() and (self._cinematic_stop_sent or self._cinematic_cancel_sent):
+        if self._cinematic_enabled() and not superseding_completion and (self._cinematic_stop_sent or self._cinematic_cancel_sent):
             return
         body: Dict[str, Any] = {"reason": "CANCELLED"}
         if self._cinematic_enabled() and self._cinematic_phase is not None:
@@ -7789,7 +7797,7 @@ class LessonRuntime:
         await self._request_terminal_control("lesson_stop", body)
 
     async def cancel(self, reason: str = "cancelled") -> None:
-        if self._terminal_requested:
+        if self._terminal_requested and not self._can_supersede_unsent_completion():
             if self._terminal_lifecycle is not None and self.state not in (S_FAILED, S_COMPLETED):
                 await self._resume_terminal_lifecycle()
             return
@@ -7801,6 +7809,11 @@ class LessonRuntime:
             "command": "cancel", **self._cinematic_identity_payload(),
             "reason": str(reason or "cancelled")[:64],
         })
+
+    def _can_supersede_unsent_completion(self) -> bool:
+        pending = getattr(self, "_pending_terminal_persistence", None)
+        return bool(pending is not None and pending is self._terminal_lifecycle
+                    and pending.get("body", {}).get("reason") == "COMPLETED")
 
     async def _request_terminal_control(self, frame_type: str, body: Dict[str, Any]) -> None:
         self._terminal_requested = True
@@ -7835,7 +7848,11 @@ class LessonRuntime:
         self._cancel_child_response_timeout()
         self._close_child_response_window()
         self._retire_authored_cinematic_pending()
+        # Discard semantic work while preserving known late ACK transport sequencing.
+        for sequence, frame in self._outstanding.items():
+            self._retire_conversation_ack_sequence(sequence, frame)
         self._outstanding.clear()
+        self._cinematic_deferred_step_ack = None
         self._cinematic_pending_command = None
         return tasks
 
@@ -8033,7 +8050,15 @@ class LessonRuntime:
                     "retryCount": max(0, int(frame_ack_retry_count or 0)),
                     "stepsCompleted": self._steps_completed,
                 }
-                await self.persist_course_mode_snapshot()
+                intent = self._terminal_lifecycle
+                self._pending_terminal_persistence = intent
+                try:
+                    await self.persist_course_mode_snapshot()
+                    if self._terminal_lifecycle is not intent:
+                        raise LessonError("COURSE_TERMINAL_SUPERSEDED", "terminal command was superseded before send")
+                finally:
+                    if self._pending_terminal_persistence is intent:
+                        self._pending_terminal_persistence = None
             if frame_type in {
                 "lesson_prepare", "lesson_start", "lesson_stop", "lesson_cinematic_control"
             }:

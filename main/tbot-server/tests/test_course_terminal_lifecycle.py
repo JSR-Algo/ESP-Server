@@ -63,8 +63,8 @@ async def test_terminal_request_supersedes_pending_pause_and_late_ack(operation)
         terminal = _frames(runtime)[-1]
         assert terminal != pause
         await runtime.on_lesson_ack(_control_ack(runtime, pause, 1))
-        await runtime.on_lesson_ack(_control_ack(runtime, terminal, 1))
-        await runtime.on_lesson_ack(_control_ack(runtime, terminal, 1))
+        await runtime.on_lesson_ack(_control_ack(runtime, terminal, 2))
+        await runtime.on_lesson_ack(_control_ack(runtime, terminal, 2))
         assert runtime.state == S_COMPLETED
         events = [e for b in runtime.forwarder.batches for e in b['events']]
         assert sum(e['type'] == 'lesson_abandoned' for e in events) == 1

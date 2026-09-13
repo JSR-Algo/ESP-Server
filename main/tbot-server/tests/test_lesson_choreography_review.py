@@ -234,6 +234,8 @@ async def test_cancel_during_early_close_persistence_cannot_emit_completed_stop(
     runtime = closing_runtime()
     entered, release = asyncio.Event(), asyncio.Event()
     async def persist():
+        if entered.is_set():
+            return
         entered.set()
         await release.wait()
     runtime.persist_course_mode_snapshot = persist

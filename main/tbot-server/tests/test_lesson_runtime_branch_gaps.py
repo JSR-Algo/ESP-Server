@@ -2218,7 +2218,8 @@ class CinematicRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
                 await rt.on_lesson_ack(step_ack)
                 self.assertEqual(rt._last_inbound_sequence, next_inbound)
-                self.assertIsNotNone(rt._cinematic_deferred_step_ack)
+                self.assertIsNone(rt._cinematic_deferred_step_ack)
+                self.assertFalse(rt._step_acked)
                 self.assertNotIn(step["sequence"], rt._outstanding)
                 await rt.on_lesson_ack(self._ack(rt, terminal, next_inbound + 1))
 

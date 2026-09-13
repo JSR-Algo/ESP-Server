@@ -7,10 +7,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from core.lesson.course_snapshot_store import MemoryCourseModeSnapshotStore
 from core.lesson.runtime import LessonRuntime
 from core.lesson.errors import LessonError
 from tests.test_course_terminal_lifecycle import runtime_with_store, restored, _frames, _control_ack
 from tests.test_lesson_cinematic_phase_routing import _v5_ack
+from tests.test_lesson_choreography_review import closing_runtime
 
 
 @pytest.mark.asyncio
@@ -307,4 +309,90 @@ async def test_failed_staged_snapshot_retries_exact_intent_after_storage_recover
         assert saved['terminalLifecycle']['body'] == body
     finally:
         store.store = original_store
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_supersedes_unsent_completion_with_real_snapshot_serialization():
+    runtime = closing_runtime()
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    class HeldFirstStore(MemoryCourseModeSnapshotStore):
+        async def store(self, *args):
+            if not entered.is_set():
+                entered.set()
+                await release.wait()
+            await super().store(*args)
+
+    runtime._course_mode_snapshot_store = HeldFirstStore()
+    runtime._course_mode_snapshot_device_id = 'review-serialized-device'
+    runtime.persist_course_mode_snapshot = LessonRuntime.persist_course_mode_snapshot.__get__(runtime)
+    completing = cancelling = None
+    try:
+        completing = asyncio.create_task(runtime._complete_course_mode_close())
+        await asyncio.wait_for(entered.wait(), 1)
+        cancelling = asyncio.create_task(runtime.cancel())
+        await asyncio.sleep(0)
+        assert not cancelling.done()
+        assert not _frames(runtime)
+        release.set()
+        complete_result, _ = await asyncio.wait_for(asyncio.gather(completing, cancelling), 2)
+        assert complete_result is False
+        assert not any(frame['type'] == 'lesson_stop' for frame in _frames(runtime))
+        cancel = _frames(runtime)[-1]
+        assert cancel['body']['command'] == 'cancel'
+        snapshot = await runtime._course_mode_snapshot_store.load('review-serialized-device', runtime.assignment_id)
+        assert snapshot['terminalLifecycle']['body'] == cancel['body']
+        await runtime.on_lesson_ack(_control_ack(runtime, cancel, 1))
+        assert runtime.state == 'COMPLETED'
+    finally:
+        release.set()
+        for task in (completing, cancelling):
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('retired_kind', ['prepare', 'pause'])
+@pytest.mark.parametrize('invalid_kind', ['accepted', 'phase', 'command_sequence', 'session', 'step', 'acks_type'])
+async def test_retired_ack_validation_preserves_highwater_and_terminal_sequence(retired_kind, invalid_kind):
+    runtime = runtime_with_store()
+    step_acked_before = runtime._step_acked
+    try:
+        if retired_kind == 'prepare':
+            assert runtime._queue_course_cinematic_phase('listen')
+            await asyncio.sleep(0)
+        else:
+            await runtime.pause()
+        old = _frames(runtime)[-1]
+        valid = _v5_ack(runtime, old, 1) if retired_kind == 'prepare' else _control_ack(runtime, old, 1)
+        await runtime.cancel()
+        terminal = _frames(runtime)[-1]
+        invalid = copy.deepcopy(valid)
+        if invalid_kind == 'accepted':
+            invalid['body']['cinematicPhase']['accepted'] = False
+        elif invalid_kind == 'phase':
+            invalid['body']['cinematicPhase']['phaseId'] = 'exit'
+        elif invalid_kind == 'command_sequence':
+            invalid['body']['cinematicPhase']['commandSequenceId'] += 100
+        elif invalid_kind == 'session':
+            invalid['sessionId'] = 'other-session'
+        elif invalid_kind == 'step':
+            invalid['stepId'] = 'other-step'
+        else:
+            invalid['body']['acks'] = str(invalid['body']['acks'])
+        await runtime.on_lesson_ack(invalid)
+        assert runtime._last_inbound_sequence == 0
+        assert old['sequence'] in runtime._retired_conversation_ack_sequences
+        count = len(_frames(runtime))
+        await runtime.on_lesson_ack(valid)
+        assert runtime._last_inbound_sequence == 1
+        assert len(_frames(runtime)) == count
+        assert runtime._step_acked is step_acked_before
+        assert runtime._cinematic_deferred_step_ack is None
+        await runtime.on_lesson_ack(_control_ack(runtime, terminal, 2))
+        assert runtime.state == 'COMPLETED'
+    finally:
         await runtime.close()

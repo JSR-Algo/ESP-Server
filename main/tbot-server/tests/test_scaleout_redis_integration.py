@@ -52,6 +52,9 @@ class _RedisCliAsyncClient:
         output = await self._run("DEL", key)
         return int(output or 0)
 
+    async def eval(self, script, numkeys, *args):
+        return int(await self._run("EVAL", script, str(numkeys), *map(str, args)))
+
     async def incrbyfloat(self, key, amount):
         output = await self._run("INCRBYFLOAT", key, str(float(amount)))
         return float(output)
