@@ -3127,10 +3127,15 @@ class GoogleLiveProvider(VoiceSessionProvider):
             return False
         if accepted:
             self.conn.logger.bind(tag="GoogleLive").info(
-                "course_playout_receipt playout_id={} state={} device_playout_ms={} receipt_monotonic_ms={} "
-                "assignment_id={} lesson_session_id={} activity_id={} step_sequence={} lesson_playout_id={}",
+                with_lesson_log_context(
+                    "course_playout_receipt",
+                    assignment_id=pending["identity"]["assignment_id"],
+                    session_id=pending["session"],
+                )
+                + " playout_id={} state={} device_playout_ms={} receipt_monotonic_ms={} "
+                "lesson_session_id={} activity_id={} step_sequence={} lesson_playout_id={}",
                 pending["id"], state, at, round(time.monotonic() * 1000),
-                pending["identity"]["assignment_id"], pending["identity"]["session_id"],
+                pending["identity"]["session_id"],
                 pending["identity"]["activity_id"], pending["identity"]["step_sequence"],
                 pending["identity"]["playout_id"],
             )
@@ -4744,8 +4749,11 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 evidence_transition = None
                 if evidence_scope is not None and evidence_attempt is not None:
                     self.conn.logger.bind(tag="GoogleLive").info(
-                        "Google Live evidence_reconnect_started journey_id={} "
-                        "connection_id={} from_live_connection_id={} attempt={} reason={}",
+                        with_lesson_log_context(
+                            "Google Live evidence_reconnect_started journey_id={} "
+                            "connection_id={} from_live_connection_id={} attempt={} reason={}",
+                            self.conn,
+                        ),
                         evidence_scope[0],
                         evidence_scope[1],
                         evidence_attempt["fromLiveConnectionId"],
@@ -5684,9 +5692,12 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 evidence_transition = None
                 if evidence_scope is not None and evidence_attempt is not None:
                     self.conn.logger.bind(tag="GoogleLive").info(
-                        "Google Live evidence_reconnect_started journey_id={} "
-                        "connection_id={} from_live_connection_id={} attempt={} "
-                        "reason=waiting_model_timeout",
+                        with_lesson_log_context(
+                            "Google Live evidence_reconnect_started journey_id={} "
+                            "connection_id={} from_live_connection_id={} attempt={} "
+                            "reason=waiting_model_timeout",
+                            self.conn,
+                        ),
                         evidence_scope[0],
                         evidence_scope[1],
                         evidence_attempt["fromLiveConnectionId"],
@@ -8380,9 +8391,12 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 evidence_attempt = self._begin_evidence_reconnect("lesson_reconnect")
                 if evidence_scope is not None and evidence_attempt is not None:
                     self.conn.logger.bind(tag="GoogleLive").info(
-                        "Google Live evidence_reconnect_started journey_id={} "
-                        "connection_id={} from_live_connection_id={} attempt={} "
-                        "reason=lesson_reconnect",
+                        with_lesson_log_context(
+                            "Google Live evidence_reconnect_started journey_id={} "
+                            "connection_id={} from_live_connection_id={} attempt={} "
+                            "reason=lesson_reconnect",
+                            self.conn,
+                        ),
                         evidence_scope[0],
                         evidence_scope[1],
                         evidence_attempt["fromLiveConnectionId"],
@@ -8530,9 +8544,12 @@ class GoogleLiveProvider(VoiceSessionProvider):
         evidence_transition = None
         if evidence_scope is not None and evidence_attempt is not None:
             self.conn.logger.bind(tag="GoogleLive").info(
-                "Google Live evidence_reconnect_started journey_id={} "
-                "connection_id={} from_live_connection_id={} attempt={} "
-                "reason=hard_interrupt",
+                with_lesson_log_context(
+                    "Google Live evidence_reconnect_started journey_id={} "
+                    "connection_id={} from_live_connection_id={} attempt={} "
+                    "reason=hard_interrupt",
+                    self.conn,
+                ),
                 evidence_scope[0],
                 evidence_scope[1],
                 evidence_attempt["fromLiveConnectionId"],
