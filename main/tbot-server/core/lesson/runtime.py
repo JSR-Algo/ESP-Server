@@ -4364,9 +4364,16 @@ class LessonRuntime:
             and command.get("templateVersion") == 2
             and isinstance(command.get("cueId"), str)
         )
+        layered_phase = bool(
+            self._renderer_v5_enabled()
+            and frame.get("type") in {"lesson_prepare", "lesson_start"}
+            and isinstance(command, dict)
+            and isinstance(command.get("phaseId"), str)
+        )
         if (
             frame.get("type") != "lesson_cinematic_control"
             and not conversation_prepare
+            and not layered_phase
             and not self._terminal_requested
         ) or (command is None and not self._terminal_requested):
             return
@@ -4730,6 +4737,13 @@ class LessonRuntime:
         # anything that is not a hashable int (None, list, dict, non-numeric str) is a
         # malformed ack -> idempotent no-op, identical to a stale/unknown ack.
         acked = _coerce_ack_seq(acked)
+        if acked is None and (
+            self.negotiated_version == RENDERER_V5
+            or self._terminal_cinematic_version() == RENDERER_V5
+        ):
+            # Invalid v5 correlation cannot consume a transport slot, including
+            # recovery after new-content admission changes. Keep legacy coercion.
+            return
         frame = self._outstanding.get(acked) if acked is not None else None
         if self._terminal_requested and frame is not None:
             command = self._cinematic_frame_command(frame)
@@ -5832,7 +5846,8 @@ class LessonRuntime:
             emitted = await self._emit(
                 "lesson_prepare",
                 step_id=self._step_id,
-                body={
+                # V5 revalidates pack and retained ownership on every phase prepare.
+                body=self._prepare_body() if self._renderer_v5_enabled() else {
                     "profile": self.profile,
                     "cinematicPhase": {"command": "prepare", **copy.deepcopy(cue)},
                 },
@@ -5844,7 +5859,10 @@ class LessonRuntime:
         except BaseException:
             if self._authored_cinematic_pending is pending:
                 self._authored_cinematic_pending = None
-                self._outstanding.pop(pending["sequence"], None)
+                frame = self._outstanding.pop(pending["sequence"], None)
+                if isinstance(frame, dict) and self._renderer_v5_enabled():
+                    # Consume only its matching late ACK without restarting the retired phase.
+                    self._retire_conversation_ack_sequence(pending["sequence"], frame)
                 self._cancel_frame_ack_timeout(pending["sequence"])
                 wire_pending = self._cinematic_pending_command
                 if isinstance(wire_pending, dict) and wire_pending.get("commandSequenceId") == pending["sequence"]:
