@@ -1,0 +1,1771 @@
+{
+  "contractVersion": "retained-assignment-device.v1",
+  "valid": [
+    {
+      "name": "bind",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "bind",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      },
+      "receipt": {
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "contractVersion": "retained-assignment-device.v1",
+        "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688",
+        "state": "bound",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      }
+    },
+    {
+      "name": "release",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000009",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 2,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 3,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "release"
+      },
+      "receipt": {
+        "operationId": "00000000-0000-0000-0000-000000000009",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 2,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 3,
+        "contractVersion": "retained-assignment-device.v1",
+        "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688",
+        "state": "released"
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "bind-missing-operationId",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "bind",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      },
+      "receipt": {
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "contractVersion": "retained-assignment-device.v1",
+        "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688",
+        "state": "bound",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      }
+    },
+    {
+      "name": "bind-wrong-operationId",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "bind",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      },
+      "receipt": {
+        "operationId": true,
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "contractVersion": "retained-assignment-device.v1",
+        "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688",
+        "state": "bound",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      }
+    },
+    {
+      "name": "bind-missing-requestId",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "bind",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      },
+      "receipt": {
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "contractVersion": "retained-assignment-device.v1",
+        "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688",
+        "state": "bound",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      }
+    },
+    {
+      "name": "bind-wrong-requestId",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "bind",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      },
+      "receipt": {
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": true,
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "contractVersion": "retained-assignment-device.v1",
+        "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688",
+        "state": "bound",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      }
+    },
+    {
+      "name": "bind-missing-requestRevision",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "bind",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      },
+      "receipt": {
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "contractVersion": "retained-assignment-device.v1",
+        "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688",
+        "state": "bound",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      }
+    },
+    {
+      "name": "bind-wrong-requestRevision",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "bind",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      },
+      "receipt": {
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": true,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "contractVersion": "retained-assignment-device.v1",
+        "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688",
+        "state": "bound",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      }
+    },
+    {
+      "name": "bind-missing-deviceId",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "bind",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      },
+      "receipt": {
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "contractVersion": "retained-assignment-device.v1",
+        "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688",
+        "state": "bound",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      }
+    },
+    {
+      "name": "bind-wrong-deviceId",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "bind",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      },
+      "receipt": {
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": true,
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "contractVersion": "retained-assignment-device.v1",
+        "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688",
+        "state": "bound",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      }
+    },
+    {
+      "name": "bind-missing-consumerIdentity",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "bind",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      },
+      "receipt": {
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "desiredSelectionRevision": 1,
+        "contractVersion": "retained-assignment-device.v1",
+        "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688",
+        "state": "bound",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      }
+    },
+    {
+      "name": "bind-wrong-consumerIdentity",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "bind",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      },
+      "receipt": {
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": true,
+        "desiredSelectionRevision": 1,
+        "contractVersion": "retained-assignment-device.v1",
+        "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688",
+        "state": "bound",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      }
+    },
+    {
+      "name": "bind-missing-desiredSelectionRevision",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "bind",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      },
+      "receipt": {
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "contractVersion": "retained-assignment-device.v1",
+        "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688",
+        "state": "bound",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      }
+    },
+    {
+      "name": "bind-wrong-desiredSelectionRevision",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "bind",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      },
+      "receipt": {
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": true,
+        "contractVersion": "retained-assignment-device.v1",
+        "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688",
+        "state": "bound",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      }
+    },
+    {
+      "name": "bind-missing-contractVersion",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "bind",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      },
+      "receipt": {
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688",
+        "state": "bound",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      }
+    },
+    {
+      "name": "bind-wrong-contractVersion",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "bind",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      },
+      "receipt": {
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "contractVersion": true,
+        "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688",
+        "state": "bound",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      }
+    },
+    {
+      "name": "bind-missing-cacheKey",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "bind",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      },
+      "receipt": {
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "contractVersion": "retained-assignment-device.v1",
+        "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688",
+        "state": "bound",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      }
+    },
+    {
+      "name": "bind-wrong-cacheKey",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "bind",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      },
+      "receipt": {
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "contractVersion": "retained-assignment-device.v1",
+        "cacheKey": true,
+        "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688",
+        "state": "bound",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      }
+    },
+    {
+      "name": "bind-missing-packDescriptorChecksum",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "bind",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      },
+      "receipt": {
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "contractVersion": "retained-assignment-device.v1",
+        "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "state": "bound",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      }
+    },
+    {
+      "name": "bind-wrong-packDescriptorChecksum",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "bind",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      },
+      "receipt": {
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "contractVersion": "retained-assignment-device.v1",
+        "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "packDescriptorChecksum": true,
+        "state": "bound",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      }
+    },
+    {
+      "name": "bind-missing-state",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "bind",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      },
+      "receipt": {
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "contractVersion": "retained-assignment-device.v1",
+        "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      }
+    },
+    {
+      "name": "bind-wrong-state",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "bind",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      },
+      "receipt": {
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "contractVersion": "retained-assignment-device.v1",
+        "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688",
+        "state": true,
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      }
+    },
+    {
+      "name": "bind-missing-assignmentId",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "bind",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      },
+      "receipt": {
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "contractVersion": "retained-assignment-device.v1",
+        "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688",
+        "state": "bound",
+        "assignmentVersion": 2
+      }
+    },
+    {
+      "name": "bind-wrong-assignmentId",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "bind",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      },
+      "receipt": {
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "contractVersion": "retained-assignment-device.v1",
+        "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688",
+        "state": "bound",
+        "assignmentId": true,
+        "assignmentVersion": 2
+      }
+    },
+    {
+      "name": "bind-missing-assignmentVersion",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "bind",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      },
+      "receipt": {
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "contractVersion": "retained-assignment-device.v1",
+        "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688",
+        "state": "bound",
+        "assignmentId": "00000000-0000-0000-0000-000000000007"
+      }
+    },
+    {
+      "name": "bind-wrong-assignmentVersion",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "bind",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      },
+      "receipt": {
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "contractVersion": "retained-assignment-device.v1",
+        "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688",
+        "state": "bound",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": true
+      }
+    },
+    {
+      "name": "bind-extra",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "bind",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      },
+      "receipt": {
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "contractVersion": "retained-assignment-device.v1",
+        "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688",
+        "state": "bound",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2,
+        "ready": true
+      }
+    },
+    {
+      "name": "release-missing-operationId",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000009",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 2,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 3,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "release"
+      },
+      "receipt": {
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 2,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 3,
+        "contractVersion": "retained-assignment-device.v1",
+        "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688",
+        "state": "released"
+      }
+    },
+    {
+      "name": "release-wrong-operationId",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000009",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 2,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 3,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "release"
+      },
+      "receipt": {
+        "operationId": true,
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 2,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 3,
+        "contractVersion": "retained-assignment-device.v1",
+        "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688",
+        "state": "released"
+      }
+    },
+    {
+      "name": "release-missing-requestId",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000009",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 2,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 3,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "release"
+      },
+      "receipt": {
+        "operationId": "00000000-0000-0000-0000-000000000009",
+        "requestRevision": 2,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 3,
+        "contractVersion": "retained-assignment-device.v1",
+        "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688",
+        "state": "released"
+      }
+    },
+    {
+      "name": "release-wrong-requestId",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000009",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 2,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 3,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "release"
+      },
+      "receipt": {
+        "operationId": "00000000-0000-0000-0000-000000000009",
+        "requestId": true,
+        "requestRevision": 2,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 3,
+        "contractVersion": "retained-assignment-device.v1",
+        "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688",
+        "state": "released"
+      }
+    },
+    {
+      "name": "release-missing-requestRevision",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000009",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 2,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 3,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "release"
+      },
+      "receipt": {
+        "operationId": "00000000-0000-0000-0000-000000000009",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 3,
+        "contractVersion": "retained-assignment-device.v1",
+        "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688",
+        "state": "released"
+      }
+    },
+    {
+      "name": "release-wrong-requestRevision",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000009",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 2,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 3,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "release"
+      },
+      "receipt": {
+        "operationId": "00000000-0000-0000-0000-000000000009",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": true,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 3,
+        "contractVersion": "retained-assignment-device.v1",
+        "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688",
+        "state": "released"
+      }
+    },
+    {
+      "name": "release-missing-deviceId",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000009",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 2,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 3,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "release"
+      },
+      "receipt": {
+        "operationId": "00000000-0000-0000-0000-000000000009",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 2,
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 3,
+        "contractVersion": "retained-assignment-device.v1",
+        "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688",
+        "state": "released"
+      }
+    },
+    {
+      "name": "release-wrong-deviceId",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000009",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 2,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 3,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "release"
+      },
+      "receipt": {
+        "operationId": "00000000-0000-0000-0000-000000000009",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 2,
+        "deviceId": true,
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 3,
+        "contractVersion": "retained-assignment-device.v1",
+        "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688",
+        "state": "released"
+      }
+    },
+    {
+      "name": "release-missing-consumerIdentity",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000009",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 2,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 3,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "release"
+      },
+      "receipt": {
+        "operationId": "00000000-0000-0000-0000-000000000009",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 2,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "desiredSelectionRevision": 3,
+        "contractVersion": "retained-assignment-device.v1",
+        "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688",
+        "state": "released"
+      }
+    },
+    {
+      "name": "release-wrong-consumerIdentity",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000009",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 2,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 3,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "release"
+      },
+      "receipt": {
+        "operationId": "00000000-0000-0000-0000-000000000009",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 2,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": true,
+        "desiredSelectionRevision": 3,
+        "contractVersion": "retained-assignment-device.v1",
+        "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688",
+        "state": "released"
+      }
+    },
+    {
+      "name": "release-missing-desiredSelectionRevision",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000009",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 2,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 3,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "release"
+      },
+      "receipt": {
+        "operationId": "00000000-0000-0000-0000-000000000009",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 2,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "contractVersion": "retained-assignment-device.v1",
+        "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688",
+        "state": "released"
+      }
+    },
+    {
+      "name": "release-wrong-desiredSelectionRevision",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000009",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 2,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 3,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "release"
+      },
+      "receipt": {
+        "operationId": "00000000-0000-0000-0000-000000000009",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 2,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": true,
+        "contractVersion": "retained-assignment-device.v1",
+        "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688",
+        "state": "released"
+      }
+    },
+    {
+      "name": "release-missing-contractVersion",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000009",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 2,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 3,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "release"
+      },
+      "receipt": {
+        "operationId": "00000000-0000-0000-0000-000000000009",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 2,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 3,
+        "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688",
+        "state": "released"
+      }
+    },
+    {
+      "name": "release-wrong-contractVersion",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000009",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 2,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 3,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "release"
+      },
+      "receipt": {
+        "operationId": "00000000-0000-0000-0000-000000000009",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 2,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 3,
+        "contractVersion": true,
+        "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688",
+        "state": "released"
+      }
+    },
+    {
+      "name": "release-missing-cacheKey",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000009",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 2,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 3,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "release"
+      },
+      "receipt": {
+        "operationId": "00000000-0000-0000-0000-000000000009",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 2,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 3,
+        "contractVersion": "retained-assignment-device.v1",
+        "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688",
+        "state": "released"
+      }
+    },
+    {
+      "name": "release-wrong-cacheKey",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000009",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 2,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 3,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "release"
+      },
+      "receipt": {
+        "operationId": "00000000-0000-0000-0000-000000000009",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 2,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 3,
+        "contractVersion": "retained-assignment-device.v1",
+        "cacheKey": true,
+        "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688",
+        "state": "released"
+      }
+    },
+    {
+      "name": "release-missing-packDescriptorChecksum",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000009",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 2,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 3,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "release"
+      },
+      "receipt": {
+        "operationId": "00000000-0000-0000-0000-000000000009",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 2,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 3,
+        "contractVersion": "retained-assignment-device.v1",
+        "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "state": "released"
+      }
+    },
+    {
+      "name": "release-wrong-packDescriptorChecksum",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000009",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 2,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 3,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "release"
+      },
+      "receipt": {
+        "operationId": "00000000-0000-0000-0000-000000000009",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 2,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 3,
+        "contractVersion": "retained-assignment-device.v1",
+        "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "packDescriptorChecksum": true,
+        "state": "released"
+      }
+    },
+    {
+      "name": "release-missing-state",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000009",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 2,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 3,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "release"
+      },
+      "receipt": {
+        "operationId": "00000000-0000-0000-0000-000000000009",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 2,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 3,
+        "contractVersion": "retained-assignment-device.v1",
+        "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+      }
+    },
+    {
+      "name": "release-wrong-state",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000009",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 2,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 3,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "release"
+      },
+      "receipt": {
+        "operationId": "00000000-0000-0000-0000-000000000009",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 2,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 3,
+        "contractVersion": "retained-assignment-device.v1",
+        "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688",
+        "state": true
+      }
+    },
+    {
+      "name": "release-extra",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000009",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 2,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 3,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "release"
+      },
+      "receipt": {
+        "operationId": "00000000-0000-0000-0000-000000000009",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 2,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 3,
+        "contractVersion": "retained-assignment-device.v1",
+        "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688",
+        "state": "released",
+        "ready": true
+      }
+    }
+  ]
+}

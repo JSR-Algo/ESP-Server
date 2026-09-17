@@ -384,6 +384,8 @@ async def test_http_server_start_registers_routes_and_starts_site(monkeypatch):
         for route in runner_apps[0].router.routes()
     )
     assert "/internal/lesson-assets/generation/retry" in route_paths
+    assert {route.method for route in runner_apps[0].router.routes()
+            if route.resource.canonical == "/internal/lesson-assets/retained"} == {"GET", "HEAD", "POST"}
     assert "/internal/lesson-runtime/preload-voice-alarm" in route_paths
     assert "/internal/lesson-runtime/preload-voice-alarm/reset" in route_paths
     assert "/internal/lesson-runtime/metrics" in route_paths

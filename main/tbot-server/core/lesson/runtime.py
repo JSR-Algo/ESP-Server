@@ -2370,6 +2370,22 @@ class LessonRuntime:
         self.logger = getattr(conn, "logger", None)
         self.assignment_id = assignment.get("assignmentId")
         self.assignment_version = int(assignment.get("assignmentVersion", 1))
+        self._retained_selection = None
+        self._retained_device_receipt = None
+        self._selection_revision = 0
+        if 'retainedSelection' in assignment:
+            from core.lesson.retained_pack_contract import parse_operation
+
+            op = parse_operation(assignment['retainedSelection'])
+            if (op['action'] != 'bind' or op['assignmentId'] != self.assignment_id
+                    or op['assignmentVersion'] != self.assignment_version
+                    or op['selection']['lessonKey'] != assignment.get('lessonId')
+                    or op['selection']['lessonVersion'] != assignment.get('lessonVersion')
+                    or op['selection']['profile'] != assignment.get('profile')
+                    or op['selection']['manifestChecksum'] != manifest_checksum):
+                raise ValueError('retained assignment identity mismatch')
+            self._retained_selection = op
+            self._selection_revision = op['desiredSelectionRevision']
         self.lesson_id = assignment.get("lessonId")
         self.lesson_version = int(assignment.get("lessonVersion", 1))
         self.profile = assignment.get("profile", "espTft")
@@ -3115,6 +3131,8 @@ class LessonRuntime:
 
     async def preload_only(self) -> bool:
         """Validate and materialize assets without sending ``lesson_prepare``."""
+        if self._retained_selection and not self._use_sd_asset_pack():
+            raise LessonError('RETAINED_SD_REQUIRED', 'retained assignments require verified SD delivery', retryable=True)
         if self._terminal_requested:
             return True
         features = getattr(self.conn, "features", None)
@@ -3260,13 +3278,12 @@ class LessonRuntime:
                             "layered cinematic activity mapping is incomplete",
                         )
                     projected_by_asset = {
-                        next(
-                            layer["assetVersionId"]
-                            for layer in source["layers"]
-                            if layer.get("layer") == "robotOverlay"
-                        ): target
+                        asset_key: target
                         for source, target in zip(phases, projected)
                         if not target.get("activityIds")
+                        for layer in source["layers"]
+                        if layer.get("layer") == "robotOverlay"
+                        for asset_key in (layer["assetVersionId"], layered_cinematic_asset_key(layer))
                     }
                     self._layered_cinematic_step_phases = {}
                     for asset in self.manifest.get("assets", []) or []:
@@ -3364,6 +3381,9 @@ class LessonRuntime:
             return
         if not preloaded and not await self.preload_only():
             return
+        if not self._retained_selection:
+            from core.lesson.retained_device_selection import observe_ordinary_selection
+            self._selection_revision = await observe_ordinary_selection(self.conn, getattr(self.conn, 'mcp_client', None))
         if self.course_mode is not None:
             await self._flush_course_evidence_outbox()
             if self.course_mode.orchestrator.session_state is SessionState.CLOSING:
@@ -6715,8 +6735,15 @@ class LessonRuntime:
                 "assetId": asset_id,
                 "state": state,
             }
+            if self._retained_selection and state == 'READY':
+                if self._retained_device_receipt is None:
+                    report['state'] = 'FAILED'
+                else:
+                    report['retainedDeviceReceipt'] = copy.deepcopy(self._retained_device_receipt)
             if sd_attested is not False and asset.get("checksumOk") is not None:
                 report["checksumOk"] = bool(asset.get("checksumOk"))
+            if report['state'] != 'READY' and self._retained_selection:
+                report.pop('checksumOk', None)
             task = asyncio.create_task(self._send_preload_status_report(reporter, report))
             self._preload_status_report_tasks.add(task)
             task.add_done_callback(self._preload_status_report_tasks.discard)
@@ -8628,6 +8655,11 @@ class LessonRuntime:
             "criticalAssets": self._critical_assets_payload(),
             "preloadTimeoutSec": int(self.asset_cache.preload_timeout_sec),
         }
+        if self._retained_selection:
+            body['retainedSelection'] = copy.deepcopy(self._retained_selection)
+            body['selectionRevision'] = self._selection_revision
+        elif self._selection_revision:
+            body['selectionRevision'] = self._selection_revision
         motion_enabled = self._lesson_rollout_control_enabled("motion_presets_enabled")
         playful_enabled = self._lesson_rollout_control_enabled("playful_interactions_enabled")
         if motion_enabled or playful_enabled:
@@ -8910,6 +8942,7 @@ class LessonRuntime:
         return self._sd_asset_pack_enabled() and not self._sd_asset_pack_online_fallback
 
     async def _sync_sd_asset_pack_to_robot(self) -> bool:
+        self._retained_device_receipt = None
         mcp_client = getattr(self.conn, "mcp_client", None)
         if mcp_client is None:
             self._log("warning", "robot SD sync unavailable: no MCP client")
@@ -8964,12 +8997,18 @@ class LessonRuntime:
                 return False
 
         async def call_sync_once() -> Any:
+            from core.lesson.retained_device_selection import (
+                bind_retained_on_connection, call_retained_on_connection, observe_ordinary_selection,
+            )
+
             has_tool = getattr(mcp_client, "has_tool", None)
             timeout = sd_pack_sync_timeout_sec(
                 getattr(self.conn, "config", {}) or {},
                 mcp_pack or pack or {},
             )
             if sample_request is not None:
+                if self._retained_selection:
+                    raise ValueError('retained assignment cannot use sample media')
                 if callable(has_tool) and has_tool(SAMPLE_SD_ASSET_SYNC_TOOL):
                     return await call_mcp_tool(
                         self.conn,
@@ -8987,6 +9026,15 @@ class LessonRuntime:
                     sample_request,
                     timeout=timeout,
                 )
+            if self._retained_selection:
+                await bind_retained_on_connection(self.conn, self._retained_selection)
+                mcp_pack['selectionRevision'] = self._selection_revision
+                mcp_pack['retainedSelection'] = copy.deepcopy(self._retained_selection)
+                return await call_retained_on_connection(self.conn, self._retained_selection,
+                    'self.lesson_assets.sync_to_sd', {'assetPack': mcp_pack}, timeout=timeout)
+            self._selection_revision = await observe_ordinary_selection(self.conn, mcp_client)
+            if (getattr(self.conn, 'features', {}) or {}).get('retainedSelection'):
+                mcp_pack['selectionRevision'] = self._selection_revision
             if callable(has_tool) and has_tool(SD_ASSET_SYNC_TOOL):
                 return await call_mcp_tool(
                     self.conn,
@@ -9227,6 +9275,7 @@ class LessonRuntime:
     def _sd_asset_sync_attestation(
         self, result: Any, requested_pack: Dict[str, Any]
     ) -> Optional[Dict[str, Any]]:
+        self._retained_device_receipt = None
         if isinstance(result, str):
             try:
                 result = json.loads(result)
@@ -9266,6 +9315,14 @@ class LessonRuntime:
             counts[key] = value
         if counts["failedCount"] != 0 or sum(counts.values()) != len(assets):
             return None
+        if self._retained_selection:
+            from core.lesson.retained_pack_contract import parse_device_receipt
+
+            try:
+                receipt = parse_device_receipt(result.get('retainedSelection'), self._retained_selection)
+            except ValueError:
+                return None
+            self._retained_device_receipt = receipt
         return {
             "cacheKey": expected_cache_key,
             "assetCount": len(assets),

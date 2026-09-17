@@ -538,8 +538,12 @@ async def _call_sd_pack_sync_with_voice_guard(
 
 async def call_sd_pack_sync_tool(conn: Any, mcp_client: Any, pack: dict[str, Any]) -> Any:
     from core.api.device_mcp_admin_handler import _call_raw_mcp_tool
+    from core.lesson.retained_device_selection import observe_ordinary_selection
 
     mcp_pack = build_firmware_sync_pack(pack)
+    selection_revision = await observe_ordinary_selection(conn, mcp_client)
+    if (getattr(conn, 'features', {}) or {}).get('retainedSelection'):
+        mcp_pack['selectionRevision'] = selection_revision
 
     return await _call_raw_mcp_tool(
         conn,

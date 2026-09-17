@@ -16,6 +16,7 @@ from core.api.lesson_nudge_handler import LessonNudgeHandler
 from core.api.lesson_sd_evict_handler import LessonSdEvictHandler
 from core.api.lesson_sd_fanout_handler import LessonSdFanoutHandler
 from core.api.lesson_sd_materialize_handler import LessonSdMaterializeHandler
+from core.api.retained_pack_handler import RetainedPackHandler
 from core.api.ota_handler import OTAHandler, is_placeholder_websocket_url
 from core.api.remote_unpair_handler import RemoteUnpairHandler
 from core.api.vision_handler import VisionHandler
@@ -135,6 +136,7 @@ class SimpleHttpServer:
             config,
             self.lesson_connections,
         )
+        self.retained_pack_handler = RetainedPackHandler(config, self.lesson_connections)
         self.generation_poller = generation_poller
         self.generation_retry_handler = GenerationRetryHandler(generation_poller)
         self.generation_status = generation_status
@@ -273,6 +275,8 @@ class SimpleHttpServer:
                             "/internal/lesson-assets/materialize",
                             self.lesson_sd_materialize_handler.handle_post,
                         ),
+                        web.get("/internal/lesson-assets/retained", self.retained_pack_handler.handle_get),
+                        web.post("/internal/lesson-assets/retained", self.retained_pack_handler.handle_post),
                         web.get(
                             "/internal/lesson-assets/sd-fanout/pending",
                             self.lesson_sd_fanout_handler.handle_get_pending,

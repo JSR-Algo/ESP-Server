@@ -63,8 +63,11 @@ class LivePackReference:
 
 
 def shared_protected_cache_keys(store: SharedAssetStore) -> Set[str]:
+    from core.lesson.retained_pack_store import retained_protected_cache_keys
+
     # Retain the old unscoped record: it has no device identity for safe migration.
     keys = activation_protected_cache_keys(store.root / ACTIVATION_STATE_FILENAME)
+    keys.update(retained_protected_cache_keys(store))
     states = store.root / ACTIVATION_STATES_DIRECTORY
     if states.exists():
         for path in states.iterdir():

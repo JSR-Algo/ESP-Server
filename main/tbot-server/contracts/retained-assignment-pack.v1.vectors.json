@@ -1,0 +1,414 @@
+{
+  "contractVersion": "retained-assignment-pack.v1",
+  "valid": [
+    {
+      "name": "acquire-seed-uuid",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000001",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "acquire",
+        "packCanonicalJson": "{\"assets\":[{\"critical\":true,\"key\":\"scene.farm\",\"localPath\":\"/sdcard/tbot/lesson-assets/retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/scene.farm\",\"mediaType\":\"image/png\",\"onlineUrl\":\"https://cdn.example.com/farm.png\",\"sdPath\":\"/sdcard/tbot/lesson-assets/retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/scene.farm\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"size\":10,\"url\":\"https://cdn.example.com/farm.png\"}],\"cacheKey\":\"retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"lessonId\":\"retained-farm\",\"lessonVersion\":2,\"manifestChecksum\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"profile\":\"espTft\"}"
+      }
+    },
+    {
+      "name": "bind",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000006",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "bind",
+        "assignmentId": "00000000-0000-0000-0000-000000000007",
+        "assignmentVersion": 2
+      }
+    },
+    {
+      "name": "reconcile-safe-integer-limit",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000008",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 9007199254740991,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "reconcile"
+      }
+    },
+    {
+      "name": "release",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000009",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 2,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 3,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "release"
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "revision-0",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000001",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 0,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "acquire",
+        "packCanonicalJson": "{\"assets\":[{\"critical\":true,\"key\":\"scene.farm\",\"localPath\":\"/sdcard/tbot/lesson-assets/retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/scene.farm\",\"mediaType\":\"image/png\",\"onlineUrl\":\"https://cdn.example.com/farm.png\",\"sdPath\":\"/sdcard/tbot/lesson-assets/retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/scene.farm\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"size\":10,\"url\":\"https://cdn.example.com/farm.png\"}],\"cacheKey\":\"retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"lessonId\":\"retained-farm\",\"lessonVersion\":2,\"manifestChecksum\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"profile\":\"espTft\"}"
+      }
+    },
+    {
+      "name": "revision--1",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000001",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": -1,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "acquire",
+        "packCanonicalJson": "{\"assets\":[{\"critical\":true,\"key\":\"scene.farm\",\"localPath\":\"/sdcard/tbot/lesson-assets/retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/scene.farm\",\"mediaType\":\"image/png\",\"onlineUrl\":\"https://cdn.example.com/farm.png\",\"sdPath\":\"/sdcard/tbot/lesson-assets/retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/scene.farm\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"size\":10,\"url\":\"https://cdn.example.com/farm.png\"}],\"cacheKey\":\"retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"lessonId\":\"retained-farm\",\"lessonVersion\":2,\"manifestChecksum\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"profile\":\"espTft\"}"
+      }
+    },
+    {
+      "name": "revision-1.5",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000001",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1.5,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "acquire",
+        "packCanonicalJson": "{\"assets\":[{\"critical\":true,\"key\":\"scene.farm\",\"localPath\":\"/sdcard/tbot/lesson-assets/retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/scene.farm\",\"mediaType\":\"image/png\",\"onlineUrl\":\"https://cdn.example.com/farm.png\",\"sdPath\":\"/sdcard/tbot/lesson-assets/retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/scene.farm\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"size\":10,\"url\":\"https://cdn.example.com/farm.png\"}],\"cacheKey\":\"retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"lessonId\":\"retained-farm\",\"lessonVersion\":2,\"manifestChecksum\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"profile\":\"espTft\"}"
+      }
+    },
+    {
+      "name": "revision-true",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000001",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": true,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "acquire",
+        "packCanonicalJson": "{\"assets\":[{\"critical\":true,\"key\":\"scene.farm\",\"localPath\":\"/sdcard/tbot/lesson-assets/retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/scene.farm\",\"mediaType\":\"image/png\",\"onlineUrl\":\"https://cdn.example.com/farm.png\",\"sdPath\":\"/sdcard/tbot/lesson-assets/retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/scene.farm\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"size\":10,\"url\":\"https://cdn.example.com/farm.png\"}],\"cacheKey\":\"retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"lessonId\":\"retained-farm\",\"lessonVersion\":2,\"manifestChecksum\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"profile\":\"espTft\"}"
+      }
+    },
+    {
+      "name": "revision-2",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000001",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": "2",
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "acquire",
+        "packCanonicalJson": "{\"assets\":[{\"critical\":true,\"key\":\"scene.farm\",\"localPath\":\"/sdcard/tbot/lesson-assets/retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/scene.farm\",\"mediaType\":\"image/png\",\"onlineUrl\":\"https://cdn.example.com/farm.png\",\"sdPath\":\"/sdcard/tbot/lesson-assets/retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/scene.farm\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"size\":10,\"url\":\"https://cdn.example.com/farm.png\"}],\"cacheKey\":\"retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"lessonId\":\"retained-farm\",\"lessonVersion\":2,\"manifestChecksum\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"profile\":\"espTft\"}"
+      }
+    },
+    {
+      "name": "revision-9007199254740992",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000001",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 9007199254740992,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "acquire",
+        "packCanonicalJson": "{\"assets\":[{\"critical\":true,\"key\":\"scene.farm\",\"localPath\":\"/sdcard/tbot/lesson-assets/retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/scene.farm\",\"mediaType\":\"image/png\",\"onlineUrl\":\"https://cdn.example.com/farm.png\",\"sdPath\":\"/sdcard/tbot/lesson-assets/retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/scene.farm\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"size\":10,\"url\":\"https://cdn.example.com/farm.png\"}],\"cacheKey\":\"retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"lessonId\":\"retained-farm\",\"lessonVersion\":2,\"manifestChecksum\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"profile\":\"espTft\"}"
+      }
+    },
+    {
+      "name": "extra-field",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000001",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "acquire",
+        "packCanonicalJson": "{\"assets\":[{\"critical\":true,\"key\":\"scene.farm\",\"localPath\":\"/sdcard/tbot/lesson-assets/retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/scene.farm\",\"mediaType\":\"image/png\",\"onlineUrl\":\"https://cdn.example.com/farm.png\",\"sdPath\":\"/sdcard/tbot/lesson-assets/retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/scene.farm\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"size\":10,\"url\":\"https://cdn.example.com/farm.png\"}],\"cacheKey\":\"retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"lessonId\":\"retained-farm\",\"lessonVersion\":2,\"manifestChecksum\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"profile\":\"espTft\"}",
+        "ready": true
+      }
+    },
+    {
+      "name": "wrong-tuple",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000001",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 3,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "acquire",
+        "packCanonicalJson": "{\"assets\":[{\"critical\":true,\"key\":\"scene.farm\",\"localPath\":\"/sdcard/tbot/lesson-assets/retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/scene.farm\",\"mediaType\":\"image/png\",\"onlineUrl\":\"https://cdn.example.com/farm.png\",\"sdPath\":\"/sdcard/tbot/lesson-assets/retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/scene.farm\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"size\":10,\"url\":\"https://cdn.example.com/farm.png\"}],\"cacheKey\":\"retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"lessonId\":\"retained-farm\",\"lessonVersion\":2,\"manifestChecksum\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"profile\":\"espTft\"}"
+      }
+    },
+    {
+      "name": "tampered-bytes",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000001",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "acquire",
+        "packCanonicalJson": "{\"assets\":[{\"critical\":true,\"key\":\"scene.farm\",\"localPath\":\"/sdcard/tbot/lesson-assets/retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/scene.farm\",\"mediaType\":\"image/png\",\"onlineUrl\":\"https://cdn.example.com/farm.png\",\"sdPath\":\"/sdcard/tbot/lesson-assets/retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/scene.farm\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"size\":10,\"url\":\"https://cdn.example.com/farm.png\"}],\"cacheKey\":\"retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"lessonId\":\"retained-farm\",\"lessonVersion\":2,\"manifestChecksum\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"profile\":\"espTft\"} "
+      }
+    },
+    {
+      "name": "missing-assignment",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000001",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "bind"
+      }
+    },
+    {
+      "name": "release-descriptor",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000001",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "release",
+        "packCanonicalJson": "{\"assets\":[{\"critical\":true,\"key\":\"scene.farm\",\"localPath\":\"/sdcard/tbot/lesson-assets/retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/scene.farm\",\"mediaType\":\"image/png\",\"onlineUrl\":\"https://cdn.example.com/farm.png\",\"sdPath\":\"/sdcard/tbot/lesson-assets/retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/scene.farm\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"size\":10,\"url\":\"https://cdn.example.com/farm.png\"}],\"cacheKey\":\"retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"lessonId\":\"retained-farm\",\"lessonVersion\":2,\"manifestChecksum\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"profile\":\"espTft\"}"
+      }
+    },
+    {
+      "name": "uuid-newline",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000001",
+        "requestId": "00000000-0000-0000-0000-000000000002\n",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "acquire",
+        "packCanonicalJson": "{\"assets\":[{\"critical\":true,\"key\":\"scene.farm\",\"localPath\":\"/sdcard/tbot/lesson-assets/retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/scene.farm\",\"mediaType\":\"image/png\",\"onlineUrl\":\"https://cdn.example.com/farm.png\",\"sdPath\":\"/sdcard/tbot/lesson-assets/retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/scene.farm\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"size\":10,\"url\":\"https://cdn.example.com/farm.png\"}],\"cacheKey\":\"retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"lessonId\":\"retained-farm\",\"lessonVersion\":2,\"manifestChecksum\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"profile\":\"espTft\"}"
+      }
+    },
+    {
+      "name": "renderer-newline",
+      "operation": {
+        "contractVersion": "retained-assignment-pack.v1",
+        "operationId": "00000000-0000-0000-0000-000000000001",
+        "requestId": "00000000-0000-0000-0000-000000000002",
+        "requestRevision": 1,
+        "deviceId": "00000000-0000-0000-0000-000000000003",
+        "consumerIdentity": "00000000-0000-0000-0000-000000000004",
+        "desiredSelectionRevision": 1,
+        "selection": {
+          "lessonRowId": "00000000-0000-0000-0000-000000000005",
+          "manifestVersion": "teebot-lesson-renderer.v5\n",
+          "lessonKey": "retained-farm",
+          "lessonVersion": 2,
+          "profile": "espTft",
+          "manifestChecksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cacheKey": "retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "packDescriptorChecksum": "ec40f4aba8b750060f5b64ba055847a925368100e062399048d341b796f8f688"
+        },
+        "action": "acquire",
+        "packCanonicalJson": "{\"assets\":[{\"critical\":true,\"key\":\"scene.farm\",\"localPath\":\"/sdcard/tbot/lesson-assets/retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/scene.farm\",\"mediaType\":\"image/png\",\"onlineUrl\":\"https://cdn.example.com/farm.png\",\"sdPath\":\"/sdcard/tbot/lesson-assets/retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/scene.farm\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"size\":10,\"url\":\"https://cdn.example.com/farm.png\"}],\"cacheKey\":\"retained-farm/v2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"lessonId\":\"retained-farm\",\"lessonVersion\":2,\"manifestChecksum\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"profile\":\"espTft\"}"
+      }
+    }
+  ]
+}

@@ -122,6 +122,27 @@ def _course_mode_v5_identity() -> dict:
     )
 
 
+def test_uuid_phase_refs_project_to_canonical_shared_cache_keys():
+    from uuid import uuid4
+    phase = _phase()
+    assets = []
+    for layer in phase['layers']:
+        key = layer['assetVersionId']
+        layer['assetVersionId'] = str(uuid4())
+        assets.append({'id': key, 'url': 'https://cdn.example.com/' + key,
+            'path': 'media/' + key})
+    manifest = {'manifestVersion': 'teebot-lesson-renderer.v5',
+        'assets': assets, 'cinematicPhases': [phase]}
+    projected = _manifest_asset_cache_inputs(manifest)
+    assert [a['key'] for a in projected] == [a['id'] for a in assets]
+    assert [a['url'] for a in projected] == [a['url'] for a in assets]
+    assert all(AssetState(a).renderer_v5_media for a in projected)
+    assert project_layered_cinematic_phase(phase, _pack())['phaseId'] == 'teach'
+    phase['layers'][0]['assetVersionId'] = 'unrelated@v9'
+    with pytest.raises(LayeredCinematicContractError):
+        _manifest_asset_cache_inputs(manifest)
+
+
 def test_course_mode_v5_fixture_preserves_reviewed_layered_identity() -> None:
     manifest = _course_mode_v5_identity()
 
