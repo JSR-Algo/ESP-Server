@@ -5538,12 +5538,24 @@ class LessonRuntime:
         return None
 
     def _current_cinematic_activity_id(self) -> str | None:
-        if self.course_mode is not None:
-            activity_id = self.course_mode.orchestrator.active_activity_id
-            if activity_id in self._layered_cinematic_activity_phases:
-                return activity_id
         step = self._step
         activity_id = step.get("activityId") if isinstance(step, dict) else None
+        if (
+            isinstance(activity_id, str)
+            and activity_id
+            and activity_id in self._layered_cinematic_activity_phases
+        ):
+            # The served step is what the device is rendering and what completion
+            # is measured against. The Course Mode orchestrator's activity can lag
+            # behind it when activities complete through the passive dwell or the
+            # internal child-response path (observed on the real wire, S18 run12):
+            # preferring it bound the first activity's clips to every later step and
+            # hid the last activity's exit clip, so no lesson_stop was ever sent.
+            return activity_id
+        if self.course_mode is not None:
+            orchestrator_activity = self.course_mode.orchestrator.active_activity_id
+            if orchestrator_activity in self._layered_cinematic_activity_phases:
+                return orchestrator_activity
         if isinstance(activity_id, str) and activity_id:
             return activity_id
         step_id = step.get("id") if isinstance(step, dict) else None
