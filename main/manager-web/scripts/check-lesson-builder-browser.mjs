@@ -189,6 +189,10 @@ try {
   assert.equal(courseModeResult.addStep, false);
   assert.equal(courseModeResult.actionButtons, 0);
   assert.equal(courseModeResult.leakageWarning, true);
+  assert.equal(courseModeResult.targetCardCount > 0, true);
+  assert.deepEqual(courseModeResult.targetLabels, ['Word', 'Role', 'Vietnamese meaning']);
+  assert.equal(courseModeResult.meaningInputPresent, true);
+  assert.equal(courseModeResult.meaningEditApplied, true);
   assert.equal(courseModeResult.adminCatalogObjectSelectable, true);
   assert.equal(courseModeResult.draftCatalogObjectExcluded, true);
   assert.equal(courseModeResult.selectedCatalogObjectKey, 'object.admin-only');
