@@ -11,6 +11,7 @@ from core.lesson.course_mode_compatibility import (
 )
 from core.lesson.asset_cache import AssetCache, AssetState
 from core.lesson.layered_cinematic_contract import (
+    validate_layered_cinematic_runtime_asset,
     LayeredCinematicContractError,
     project_layered_cinematic_phase,
 )
@@ -238,16 +239,30 @@ def test_projects_checked_in_canonical_v5_phase_with_uuid_asset_version_ids() ->
     ]
 
 
-def test_runtime_sd_pack_inputs_keep_canonical_uuid_version_keys() -> None:
+def test_runtime_sd_pack_inputs_join_uuid_layer_references_to_shared_keys() -> None:
+    """Layers reference the published UUID; the SD pack input is keyed by the shared identity.
+
+    Previously pinned as keeping the raw UUID as the pack key. That pin was unreachable on the
+    real wire: ``manifest.assets`` are keyed ``assetKey@vN`` (so the UUID key never joined the
+    asset's path/url) and ``validate_layered_cinematic_runtime_asset`` refuses a key that is not
+    ``f"{sharedAssetKey}@v{sharedAssetVersion}"`` (so no entry could ever become renderer-v5 media).
+    Shared-key priority with the UUID as fallback alias is the reviewed wire-identity decision
+    (1dc0674); S18 run12 observed the refusal on a real cpr-s03-final52 manifest.
+    """
     manifest = _course_mode_v5_identity()["manifestIdentityProjection"]
 
     assets = _manifest_asset_cache_inputs(manifest)
 
     assert [asset["key"] for asset in assets] == [
-        "75000000-0000-4000-8000-000000000011",
-        "75000000-0000-4000-8000-000000000022",
-        "75000000-0000-4000-8000-000000000031",
+        "course-mode.v5.scene.farm@v1",
+        "course-mode.v5.object.barn@v1",
+        "course-mode.v5.robot.teach@v1",
     ]
+    by_id = {asset["id"]: asset for asset in manifest["assets"]}
+    for asset in assets:
+        assert asset["path"] == by_id[asset["key"]]["path"]
+        assert asset["url"] == by_id[asset["key"]].get("url") or asset["url"] is None
+        validate_layered_cinematic_runtime_asset(asset)
 
 
 @pytest.mark.parametrize("asset_version_id", ["not-a-uuid", "75000000-0000-4000-7000-000000000011"])
