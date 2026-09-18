@@ -47,7 +47,7 @@
 
 <script>
 import Api from '@/apis/api';
-import { COURSE_MODE_PHASES, courseModeVisualSelection, buildCourseModeVisualRequest, courseModeAssetRejection } from './lesson-visual-selection';
+import { COURSE_MODE_PHASES, courseModeVisualSelection, buildCourseModeVisualRequest, courseModeAssetRejection, newestPublishedAssetVersions } from './lesson-visual-selection';
 
 export default {
   name: 'CourseModeVisualSelection',
@@ -61,6 +61,7 @@ export default {
     conflict: false, error: '', savedMessage: '', requestId: 0, destroyed: false, saveReceipt: null }),
   computed: {
     dirty() { return Boolean(this.snapshot && this.draft && JSON.stringify(this.draft) !== JSON.stringify(courseModeVisualSelection(this.snapshot))); },
+    newestPublished() { return newestPublishedAssetVersions(this.assets); },
     selectors() {
       return [ {key:'background',slot:'backgroundScene',field:'backgroundAssetVersionId',label:'Background image (JPEG)'},
         {key:'object',slot:'teachingObject',field:'objectAssetVersionId',label:'Teaching object (PNG)',optional:!(this.contract.activities || []).some(a=>a.visual && a.visual.objectAssetKey)},
@@ -79,7 +80,7 @@ export default {
     label(id) { const asset = this.assets.find(a=>a.versionId === id); return asset ? `${asset.assetKey} / v${asset.version} / ${asset.publicationState}` : `Unavailable version ${id}`; },
     slotLabel(slot) { const phase = COURSE_MODE_PHASES.find(p=>slot === `robotOverlay.${p.id}`); return phase ? phase.label : slot === 'backgroundScene' ? 'Background image' : slot === 'teachingObject' ? 'Teaching object' : slot; },
     rejection(asset, row) {
-      const reason = courseModeAssetRejection(asset,row.slot,row.phase);
+      const reason = courseModeAssetRejection(asset,row.slot,row.phase,this.newestPublished);
       if (reason || row.phase) return reason;
       const field = row.slot === 'backgroundScene' ? 'backgroundAssetKey' : 'objectAssetKey';
       const keys = (this.contract.activities || []).map(a=>a.visual && a.visual[field]).filter(Boolean);

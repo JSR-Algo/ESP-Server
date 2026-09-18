@@ -40,3 +40,16 @@ test('codec, audio, frame timing and chroma failures are explained',()=>{
 
 test('valid phase-specific clip is selectable; wrong dimensions are explained',()=>{const a=robot();a.width=150;a.height=150;Object.assign(a.compatibilityMetadata,{width:150,height:150,rect:{x:118,y:160,width:150,height:150}});assert.equal(selection.courseModeAssetRejection(a,'robotOverlay','teach'),'');assert.match(selection.courseModeAssetRejection(a,'robotOverlay','flyIn'),/dimensions/i);});
 test('activity choices reject incompatible profile and unpublished images',()=>{const source=require('node:fs').readFileSync(require('node:path').join(__dirname,'../../src/views/LessonEditor.vue'),'utf8');const body=source.slice(source.indexOf('    courseModeAssets() {'),source.indexOf('    ',source.indexOf('    courseModeAssets() {')+25));const start=source.indexOf('    courseModeAssets() {');const end=source.indexOf('\n    },',start)+7;const computed=new Function('courseModeAssetRejection',`return ({${source.slice(start,end)}}).courseModeAssets`)(selection.courseModeAssetRejection);const invalid={category:'teachingObject',assetKey:'object.bad',versionId:id(1),publicationState:'published',profile:'mobile'};const e={isCourseModeV5:true,rawCinematicLibraries:{backgroundScene:[],teachingObject:[invalid]},bundleAssets:[],sharedVisualAssets:[]};assert.deepEqual(computed.call(e),[]);});
+
+// S07 run12 (T07 run02): the backend publish gate accepts only the newest published version of each
+// asset key, so the picker must not offer superseded published versions as if they were selectable.
+test('superseded published versions are explained, the newest published version stays selectable', () => {
+  const image = (n, version, key = 'object.no') => ({ versionId: id(n), assetKey: key, category: 'teachingObject', profile: 'espTft', publicationState: 'published', mimeType: 'image/png', sha256: 'a'.repeat(64), bytes: 12913, width: 95, height: 95, compatibilityMetadata: { mediaKind: 'image', mediaType: 'image/png', width: 95, height: 95, fit: 'contain', rect: { x: 20, y: 168, width: 95, height: 95 } }, version });
+  const rows = [image(1, 1), image(3, 3), image(5, 2, 'object.please'), { ...image(6, 4, 'object.please'), publicationState: 'draft' }];
+  const newest = selection.newestPublishedAssetVersions(rows);
+  assert.equal(selection.courseModeAssetRejection(rows[1], 'teachingObject', null, newest), '');
+  assert.match(selection.courseModeAssetRejection(rows[0], 'teachingObject', null, newest), /superseded by v3/i);
+  assert.equal(selection.courseModeAssetRejection(rows[2], 'teachingObject', null, newest), '', 'newest published is v2 because v4 is only a draft');
+  assert.match(selection.courseModeAssetRejection(rows[3], 'teachingObject', null, newest), /draft/i, 'unpublished stays rejected for its own reason');
+  assert.equal(selection.courseModeAssetRejection(rows[0], 'teachingObject', null), '', 'without a catalog map the version-level checks are unchanged');
+});

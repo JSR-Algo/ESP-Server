@@ -102,12 +102,17 @@ function buildCourseModeVisualRequest(snapshot, selection) {
     ...(selection.objectAssetVersionId ? { objectAssetVersionId: selection.objectAssetVersionId } : {}), robotAssetVersionIds };
 }
 
-function courseModeAssetRejection(asset, slot, phase) {
+// newestPublished (optional): the newestPublishedAssetVersions() map of the catalog the picker shows. The
+// backend publish gate resolves each asset key to its newest published espTft version and refuses any other
+// pin, so an older published version must be explained here instead of offered as selectable.
+function courseModeAssetRejection(asset, slot, phase, newestPublished) {
   const a = asset || {}, m = a.compatibilityMetadata || {};
   const expected = { backgroundScene: ['scene', 'image/jpeg'], teachingObject: ['teachingObject', 'image/png'], robotOverlay: ['robotPose', 'video/mp4'] }[slot];
   if (!expected || a.category !== expected[0]) return 'Incompatible visual slot.';
   if (a.profile !== 'espTft') return 'Requires the espTft profile.';
   if (a.publicationState !== 'published') return `Version is ${a.publicationState || 'unknown'}; select a published version.`;
+  const newest = newestPublished && a.assetKey ? newestPublished[a.assetKey] : null;
+  if (newest && newest.versionId !== a.versionId) return `Superseded by v${newest.version}; publishing accepts only the newest published version of ${a.assetKey}.`;
   if (!UUID.test(a.versionId) || !SHA.test(a.sha256) || !Number.isSafeInteger(a.bytes) || a.bytes <= 0) return 'Missing immutable version, checksum or byte size.';
   if (a.mimeType !== expected[1]) return slot === 'robotOverlay' ? 'Requires silent MJPEG MP4 character video.' : `Requires ${expected[1]} image.`;
   if (!Number.isSafeInteger(a.width) || a.width <= 0 || !Number.isSafeInteger(a.height) || a.height <= 0
