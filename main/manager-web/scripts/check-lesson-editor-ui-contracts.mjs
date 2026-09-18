@@ -204,7 +204,7 @@ expectContains('src/views/LessonEditor.vue', 'applyLessonVisualSelection(patch)'
 expectContains('src/views/LessonEditor.vue', 'Api.lesson.applyLessonVisuals(', 'visual selection must use the lesson-level API');
 expectNotContains('src/views/LessonEditor.vue', 'lessonVisualSelectionDisabled() {\n      return this.isCourseModeAuthority', 'Course Mode must keep lesson-level cinematic visual selection enabled');
 expectContains('src/views/LessonEditor.vue', '&& (this.hasLoadedCourseModeAuthority || this.courseModeContract)', 'renderer-v5 visual triple detection must not depend on a preview that requires the triple');
-expectContains('src/apis/module/lesson.js', 'data: { expectedChecksum, contract }', 'Course Mode saves must carry the optimistic concurrency checksum');
+expectContains('src/apis/module/lesson.js', 'data: { expectedChecksum, expectedVisualChecksum, contract }', 'Course Mode saves must carry both optimistic concurrency checksums (contract and visual)');
 expectNotContains('src/views/LessonEditor.vue', '<SharedAssetPicker', 'the primary editor must not expose a second per-step object selector');
 const lessonEditorSource = read('src/views/LessonEditor.vue');
 expectContains(
