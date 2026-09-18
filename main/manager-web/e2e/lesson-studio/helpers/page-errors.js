@@ -25,8 +25,10 @@ function isExpectedNavigationAbort(request) {
     const canonicalAdminImage = resourceType === 'image'
       && url.origin === 'https://admin.tjbot.vn'
       && path.startsWith('/tvideo-demo/assets/');
+    const externalWebFont = resourceType === 'font'
+      && url.origin === 'https://fonts.gstatic.com';
     return internalMediaProbe || canonicalAdminMediaProbe || task4FixtureMediaProbe
-      || canonicalAdminImage;
+      || canonicalAdminImage || externalWebFont;
   } catch {
     return false;
   }
