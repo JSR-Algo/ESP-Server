@@ -9,7 +9,8 @@ const videoLayerSource = await readFile(new URL('src/components/lesson/Cinematic
 const exactPreviewSource = await readFile(new URL('src/components/lesson/RobotEspTftProjectionPreview.vue', root), 'utf8');
 const helperModuleUrl = `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`;
 const videoLayerScript = videoLayerSource.match(/<script>([\s\S]*?)<\/script>/)[1]
-  .replace("'./flattened-cinematic-preview'", JSON.stringify(helperModuleUrl));
+  .replace("'./flattened-cinematic-preview'", JSON.stringify(helperModuleUrl))
+  .replace("'./mjpeg-playback.mjs'", JSON.stringify(new URL('src/components/lesson/mjpeg-playback.mjs', root).href));
 const videoLayer = (await import(`data:text/javascript;base64,${Buffer.from(videoLayerScript).toString('base64')}`)).default;
 const flattenedComponentScript = componentSource.match(/<script>([\s\S]*?)<\/script>/)[1]
   .replace("'./flattened-cinematic-preview'", JSON.stringify(helperModuleUrl));

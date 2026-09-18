@@ -1,0 +1,27 @@
+{
+  "sha256": "97b42d55180e6f013b30f851ddb16678b7a91df7daf2cd54a97febae1e1c398d",
+  "bytes": 237496,
+  "metadata": {
+    "mediaKind": "video",
+    "mediaType": "video/mp4",
+    "codec": "mjpeg",
+    "hasAudio": false,
+    "width": 240,
+    "height": 240,
+    "fps": 15,
+    "frameCount": 48,
+    "durationMs": 3200,
+    "rect": {
+      "x": 240,
+      "y": 0,
+      "width": 240,
+      "height": 240
+    },
+    "chromaKey": {
+      "keyColor": "#00ff00",
+      "tolerance": 32,
+      "featherPx": 4
+    }
+  },
+  "provenance": "T09 run04 unregistered diagnostic derivative; not registration evidence"
+}

@@ -49,8 +49,10 @@
             :layer-id="layer.id"
             :data-asset-version-id="layer.assetVersionId"
             :data-source-sha256="layer.sha256"
+            :data-source-url="layer.src"
             :data-layer-id="layer.id"
             :src="layer.src"
+            :mjpeg-identity="isV5 ? layer.mediaIdentity : null"
             :chroma-key="layer.chromaKey"
             :layer-class="['stage-layer', `layer-${layer.id}`, layer.id === 'robotOverlay' ? (playing ? entranceClass : motionClass) : '']"
             :position-style="layerStyle(layer)"
@@ -485,9 +487,11 @@ export default {
           this.cinematicStartedAt = null;
           return;
         }
-        const master = this.cinematicLayerById('robotOverlay').mediaPlaybackState();
+        const robot = this.cinematicLayerById('robotOverlay');
+        if (typeof robot.advanceMediaClock === 'function') robot.advanceMediaClock(timestamp);
+        const master = robot.mediaPlaybackState();
         if (master.pending || master.seeking) return;
-        // The video owns elapsed time; wall time must not consume buffering or pending Play.
+        // The media transport owns elapsed time, including decode and pending Play.
         const elapsed = Math.max(0, master.currentTimeSec * 1000);
         const duration = this.cinematicDurationMs;
         if (this.cinematicPlaybackMode === 'loop' && duration > 0) this.cinematicClockMs = elapsed % duration;
