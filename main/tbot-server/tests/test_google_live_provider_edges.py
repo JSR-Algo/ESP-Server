@@ -233,7 +233,7 @@ class _Bridge:
     async def close(self):
         self.closed += 1
 
-    async def stop_output(self):
+    async def stop_output(self, *, playout_id=None):
         self.stop_calls += 1
 
     def allow_model_output(self):
@@ -269,7 +269,7 @@ class _FailingBridge(_Bridge):
     async def close(self):
         raise RuntimeError("bridge close failed")
 
-    async def stop_output(self):
+    async def stop_output(self, *, playout_id=None):
         raise RuntimeError("stop failed")
 
 

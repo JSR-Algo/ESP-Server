@@ -79,7 +79,7 @@ class LessonNudgeHandlerTest(unittest.IsolatedAsyncioTestCase):
         events = []
 
         class _Bridge:
-            async def stop_output(self):
+            async def stop_output(self, *, playout_id=None):
                 events.append("stop_output")
 
         class _Runtime:

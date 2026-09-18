@@ -1440,7 +1440,7 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
             def __init__(self):
                 self.stop_calls = 0
 
-            async def stop_output(self):
+            async def stop_output(self, *, playout_id=None):
                 self.stop_calls += 1
                 provider.conn.google_live_audio_out_started_at = None
 
@@ -1515,7 +1515,7 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
                 self.stop_calls = 0
                 self.blocked = False
 
-            async def stop_output(self):
+            async def stop_output(self, *, playout_id=None):
                 self.stop_calls += 1
                 self.blocked = True
 
@@ -1541,7 +1541,7 @@ class VietnameseLessonStartIntentTest(unittest.IsolatedAsyncioTestCase):
             def __init__(self):
                 self.blocked = False
 
-            async def stop_output(self):
+            async def stop_output(self, *, playout_id=None):
                 self.blocked = True
 
             def is_model_output_blocked(self):

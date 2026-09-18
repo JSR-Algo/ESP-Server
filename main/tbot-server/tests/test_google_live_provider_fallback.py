@@ -197,7 +197,7 @@ class _RecordingBridge:
     def current_response_id(self):
         return None
 
-    async def stop_output(self):
+    async def stop_output(self, *, playout_id=None):
         self.stop_output_calls += 1
 
     def allow_model_output(self):

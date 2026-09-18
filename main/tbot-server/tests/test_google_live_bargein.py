@@ -335,7 +335,7 @@ class EndAudioStreamGuardTest(unittest.IsolatedAsyncioTestCase):
         await provider.start_session()
 
         class _StopFailBridge:
-            async def stop_output(self):
+            async def stop_output(self, *, playout_id=None):
                 raise RuntimeError("Google Live client not connected")
 
             async def flush_pending_input_audio(self):
@@ -580,7 +580,7 @@ class _CapturingBridge(GoogleLiveAudioBridge):
     async def _send_tts_message(self, state):
         self.tts_states.append(state)
 
-    async def _send_tts_stop_now(self, *, continue_listening=True):
+    async def _send_tts_stop_now(self, *, continue_listening=True, playout_id=None):
         self.tts_states.append("stop_now")
 
     async def _flush_output_audio(self):
