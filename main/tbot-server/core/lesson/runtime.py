@@ -6417,12 +6417,17 @@ class LessonRuntime:
                 return
             self._complete_passive_step()
         else:
-            if not self._renderer_v2_enabled():
-                self._dispatch_step_motion("listen")
-                self._forward_phase("listening")
-            await self._open_child_response_window()
-            if self._child_response_window_still_current(step_id, step_seq):
-                self._start_child_response_timeout()
+            if self.course_mode is None:
+                # Course mode owns the child's turn: the orchestrator opens its assessment
+                # window per response plan and applies its own silence policy, so the
+                # legacy per-step window/inactivity timer must not run under a live
+                # course session (S17 run09 D3: it paused RUNNING course lessons).
+                if not self._renderer_v2_enabled():
+                    self._dispatch_step_motion("listen")
+                    self._forward_phase("listening")
+                await self._open_child_response_window()
+                if self._child_response_window_still_current(step_id, step_seq):
+                    self._start_child_response_timeout()
         await self._maybe_finish_step()
 
     async def _notify_lesson_terminal(self, reason: str) -> None:
@@ -7204,6 +7209,9 @@ class LessonRuntime:
 
     def _start_child_response_timeout(self) -> None:
         self._cancel_child_response_timeout()
+        if self.course_mode is not None:
+            # Never arm the legacy inactivity pause under a course-mode session (D3).
+            return
         step_id = self._step_id
         timeout_sec = self._child_response_timeout_sec()
 
