@@ -241,10 +241,21 @@ def validate_layered_cinematic_runtime_asset(asset: Any) -> dict[str, Any]:
     }
 
 
+def layered_cinematic_asset_key(layer: dict[str, Any]) -> str:
+    """Map either canonical phase reference form to the shared SD cache identity."""
+    key, version, version_id = layer.get('assetKey'), layer.get('version'), layer.get('assetVersionId')
+    if (not isinstance(key, str) or not key or not _positive_int(version)
+            or not isinstance(version_id, str)
+            or (version_id != f'{key}@v{version}' and _UUID_RE.fullmatch(version_id) is None)):
+        _fail('CINEMATIC_METADATA_MISMATCH', 'layered cinematic asset version is invalid')
+    return f'{key}@v{version}'
+
+
 def project_layered_cinematic_phase(
     phase: Any,
     pack: Any,
     *,
+    course_mode_compatibility: dict[str, Any] | None = None,
     course_mode_activity_ids: set[str] | None = None,
     fallback_activity_ids: set[str] | None = None,
 ) -> dict[str, Any]:
@@ -332,7 +343,9 @@ def project_layered_cinematic_phase(
             if layer_name == "robotOverlay"
             else _image_metadata(source.get("metadata"), background=layer_name == "background")
         )
-        asset = assets_by_key.get(asset_version_id)
+        asset = assets_by_key.get(layered_cinematic_asset_key(source))
+        if asset is None:
+            asset = assets_by_key.get(asset_version_id)
         if not isinstance(asset, dict):
             _fail("CINEMATIC_SD_PATH_MISSING", "layered cinematic asset is missing from the SD pack")
         if (
@@ -358,6 +371,9 @@ def project_layered_cinematic_phase(
             "height": metadata["height"],
             "rect": metadata["rect"],
         }
+        if course_mode_compatibility is not None:
+            # Firmware joins Course Mode layers to the verified pack key, not the published UUID.
+            item["assetVersionId"] = asset["key"]
         if layer_name != "robotOverlay":
             item["fit"] = metadata["fit"]
         else:

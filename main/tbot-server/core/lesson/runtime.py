@@ -3154,6 +3154,7 @@ class LessonRuntime:
                         project_layered_cinematic_phase(
                             phase,
                             pack,
+                            course_mode_compatibility=self._course_mode_compatibility,
                             course_mode_activity_ids=activity_ids,
                             fallback_activity_ids=fallback_activity_ids,
                         )

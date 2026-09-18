@@ -367,6 +367,8 @@ def test_exact_frozen_course_mode_mp4_cues_project_with_fail_closed_marker() -> 
     runtime.assignment_version = 1
     runtime.profile = "espTft"
     runtime.lesson_id = "course-mode-pilot-cat-ball"
+    runtime._retained_selection = None
+    runtime._selection_revision = 0
     runtime.lesson_version = 1
     runtime.manifest_checksum = MANIFEST_CHECKSUM
     runtime.manifest = manifest
@@ -465,6 +467,8 @@ def test_generic_cinematic_prepare_does_not_emit_course_mode_marker() -> None:
     runtime.assignment_version = 1
     runtime.profile = "espTft"
     runtime.lesson_id = "lesson-a"
+    runtime._retained_selection = None
+    runtime._selection_revision = 0
     runtime.lesson_version = 1
     runtime.manifest_checksum = "b" * 64
     runtime.manifest = {"assets": []}
