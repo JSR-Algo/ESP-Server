@@ -248,6 +248,10 @@ class SimpleHttpServer:
                             self.lesson_nudge_handler.handle_child_response_post,
                         ),
                         web.post(
+                            "/internal/devices/{deviceId}/course-tool",
+                            self.lesson_nudge_handler.handle_course_tool_post,
+                        ),
+                        web.post(
                             "/internal/devices/{deviceId}/lesson-assets/evict-cache-key",
                             self.lesson_sd_evict_handler.handle_post,
                         ),

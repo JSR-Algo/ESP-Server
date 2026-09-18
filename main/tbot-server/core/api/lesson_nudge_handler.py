@@ -215,6 +215,86 @@ class LessonNudgeHandler:
         handled = bool(await responder(text, source="internal_dev_endpoint"))
         return web.json_response({"data": {"handled": handled}}, status=202)
 
+    COURSE_TOOL_OPERATIONS = frozenset({
+        "context", "course_continue", "course_observe_child", "course_open_context",
+        "course_close_context", "course_apply_response_plan",
+        "mark_response_plan_delivery_attempted", "commit_course_response_plan",
+    })
+
+    async def handle_course_tool_post(self, request: web.Request) -> web.Response:
+        """Internal dev route (S17 run09): drive the course-mode tool operations of the
+        live lesson runtime from a simulated, voice-less driver. Off unless
+        TBOT_INTERNAL_COURSE_TOOL_ROUTE=1; X-Mint-Secret protected like lesson-child-response.
+        It never bypasses the runtime's own operation gating: every call goes through the
+        same LessonRuntime.course_* methods Google Live's tool path uses."""
+        if os.environ.get("TBOT_INTERNAL_COURSE_TOOL_ROUTE") != "1":
+            return web.json_response(
+                {"error": "COURSE_TOOL_ROUTE_DISABLED", "message": "Internal course tool route is disabled"},
+                status=404,
+            )
+        auth_error = self._authorize(request)
+        if auth_error is not None:
+            return auth_error
+
+        device_id = request.match_info.get("deviceId", "")
+        conn = await self._find_connection(device_id)
+        if conn is None:
+            return web.json_response(
+                {"data": {"handled": False, "reason": "device-offline"}},
+                status=202,
+            )
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        body = body if isinstance(body, dict) else {}
+        operation = str(body.get("operation") or "").strip()
+        arguments = body.get("arguments")
+        if operation not in self.COURSE_TOOL_OPERATIONS or (
+            arguments is not None and not isinstance(arguments, dict)
+        ):
+            return web.json_response(
+                {"error": "COURSE_TOOL_INVALID", "message": "Unknown operation or malformed arguments"},
+                status=400,
+            )
+
+        runtime = getattr(conn, "lesson_runtime", None)
+        course_mode = getattr(runtime, "course_mode", None)
+        if runtime is None or course_mode is None:
+            return web.json_response(
+                {"data": {"handled": False, "reason": "no-active-course-lesson"}},
+                status=202,
+            )
+        result = None
+        if operation != "context":
+            method = getattr(runtime, operation, None)
+            if not callable(method):
+                return web.json_response(
+                    {"data": {"handled": False, "reason": "operation-unavailable"}},
+                    status=202,
+                )
+            result = await method(arguments or {})
+        course_mode = getattr(runtime, "course_mode", None)
+        try:
+            context = course_mode.tool_context() if course_mode is not None else None
+        except Exception as exc:  # tool_context raises once the session has no active target
+            context = {"error": type(exc).__name__}
+        orchestrator = getattr(course_mode, "orchestrator", None)
+        session_state = getattr(getattr(orchestrator, "session_state", None), "value", None)
+        return web.json_response(
+            {
+                "data": {
+                    "handled": True,
+                    "operation": operation,
+                    "result": result,
+                    "toolContext": context,
+                    "state": getattr(runtime, "state", None),
+                    "sessionState": session_state,
+                }
+            },
+            status=202,
+        )
+
     async def _stop_live_output_before_internal_response(self, conn):
         provider = getattr(conn, "voice_provider", None)
         bridge = getattr(provider, "_bridge", None)
