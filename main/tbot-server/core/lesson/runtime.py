@@ -61,6 +61,7 @@ from core.lesson.layered_cinematic_contract import (
     KNOWN_PHASE_IDS as LAYERED_CINEMATIC_PHASE_IDS,
     LayeredCinematicContractError,
     RENDERER_V5,
+    layered_cinematic_asset_key,
     project_layered_cinematic_phase,
 )
 from core.lesson.conversation_contract import (
@@ -2174,7 +2175,15 @@ def _manifest_asset_cache_inputs(
                 metadata = layer.get("metadata")
                 if not isinstance(metadata, dict):
                     continue
-                key = layer.get("assetVersionId")
+                # The backend pins ``assetVersionId`` to the published visual-ref UUID
+                # while ``manifest.assets`` are keyed ``assetKey@vN``; join by the shared
+                # SD cache identity (either canonical reference form) so the manifest
+                # asset (path/url) is found and the runtime asset validates. A malformed
+                # reference keeps its raw key and is refused by the same later guards.
+                try:
+                    key = layered_cinematic_asset_key(layer)
+                except LayeredCinematicContractError:
+                    key = layer.get("assetVersionId")
                 generic = generic_by_key.get(key, {})
                 projected = {
                     "key": key,
