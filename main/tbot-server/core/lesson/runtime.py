@@ -2514,6 +2514,7 @@ class LessonRuntime:
         self._course_playout_id = 0
         self._course_playout_active = False
         self._course_playout_deferred_finish: dict[str, Any] | None = None
+        self._course_playout_deferred_phase: tuple[str, str | None] | None = None
         self._course_phase_task: Optional[asyncio.Task[None]] = None
         self._authored_cinematic_pending: dict[str, Any] | None = None
         self._conversation_contract_valid = False
@@ -3434,6 +3435,7 @@ class LessonRuntime:
     async def _close_runtime_resources(self) -> None:
         self._closed = True
         self._course_playout_deferred_finish = None
+        self._course_playout_deferred_phase = None
         phase_task = self._course_phase_task
         if phase_task is not None and phase_task is not asyncio.current_task():
             phase_task.cancel()
@@ -5610,15 +5612,27 @@ class LessonRuntime:
         return [phase_id]
 
     def _queue_course_cinematic_phase(
-        self, phase_id: str, *, activity_id: str | None = None
+        self, phase_id: str, *, activity_id: str | None = None, playout_driven: bool = False
     ) -> bool:
-        """Switch the character clip for a course visual transition without blocking the tool call."""
+        """Switch the character clip for a course visual transition without blocking the tool call.
+
+        ``playout_driven`` marks the two transitions the device's own audio boundaries
+        own: the confirmed playout start and its end/cancellation. While an owned
+        playout is active, any other caller (capture window, assessment, response-plan
+        dispatch) would take the talking clip off the screen with the audio still
+        playing, so its intent is deferred to the real audio end instead.
+        """
         if self._terminal_requested:
             return False
         if (not self._renderer_v5_enabled() or not self._is_active_runtime() or self._cinematic_cancel_sent
                 or self._completion_stop_sent or self._completion_visual_pending):
             return False
         if not self._activity_is_phase_bound(activity_id):
+            return False
+        if self._course_playout_active and not playout_driven:
+            self._course_playout_deferred_phase = (
+                phase_id, activity_id or self._current_cinematic_activity_id(),
+            )
             return False
         cue = self._course_cinematic_cue(phase_id, activity_id=activity_id)
         if not isinstance(cue, dict):
@@ -5698,11 +5712,14 @@ class LessonRuntime:
                 or type(step_sequence) is not int or step_sequence != self._step_seq
                 or type(playout_id) is not int or playout_id <= self._course_playout_id):
             return False
-        if not self._queue_course_cinematic_phase("teach", activity_id=activity_id):
+        if not self._queue_course_cinematic_phase(
+            "teach", activity_id=activity_id, playout_driven=True
+        ):
             return False
         self._course_playout_id = playout_id
         self._course_playout_active = True
         self._course_playout_deferred_finish = None
+        self._course_playout_deferred_phase = None
         return True
 
     def on_course_playout_finished(
@@ -5716,11 +5733,12 @@ class LessonRuntime:
 
     def on_course_playout_cancelled(self, *, restore_listen: bool = True, **identity: Any) -> bool:
         """Retire an interrupted visual; cancellation is not successful playout."""
-        return self._end_course_playout(restore_listen=restore_listen, **identity)
+        return self._end_course_playout(restore_listen=restore_listen, cancelled=True, **identity)
 
     def _end_course_playout(
         self, *, assignment_id: str, session_id: str, activity_id: str,
         step_sequence: int, playout_id: int, restore_listen: bool = True,
+        cancelled: bool = False,
     ) -> bool:
         if (not self._is_active_runtime() or self.state not in (S_RUNNING, S_PAUSED) or self._cinematic_cancel_sent
                 or self._completion_stop_sent or self._completion_visual_pending
@@ -5731,20 +5749,29 @@ class LessonRuntime:
                 or type(step_sequence) is not int or step_sequence != self._step_seq):
             return False
         self._course_playout_active = False
+        deferred = self._course_playout_deferred_phase
+        self._course_playout_deferred_phase = None
         if not restore_listen:
+            # Barge-in / interrupt retires an obsolete response: its deferred visual
+            # belongs to that retired response and must not replay.
             self._course_playout_deferred_finish = None
             task = self._course_phase_task
             if task is not None and not task.done():
                 task.cancel()
             return True
+        successor = "listen"
+        if not cancelled and deferred is not None and deferred[1] == activity_id:
+            successor = deferred[0]
         pending = self._cinematic_pending_command
         if self.state == S_PAUSED or (isinstance(pending, dict) and pending.get("command") == "pause"):
             self._course_playout_deferred_finish = {
                 "assignment_id": assignment_id, "session_id": session_id, "activity_id": activity_id,
-                "step_sequence": step_sequence, "playout_id": playout_id,
+                "step_sequence": step_sequence, "playout_id": playout_id, "phase_id": successor,
             }
             return True
-        return self._queue_course_cinematic_phase("listen", activity_id=activity_id)
+        return self._queue_course_cinematic_phase(
+            successor, activity_id=activity_id, playout_driven=True
+        )
 
     def _reconcile_course_playout_finish(self) -> None:
         finish = self._course_playout_deferred_finish
@@ -5753,7 +5780,10 @@ class LessonRuntime:
                 and finish["assignment_id"] == self.assignment_id and finish["session_id"] == self.session_id
                 and finish["activity_id"] == self._current_cinematic_activity_id()
                 and finish["step_sequence"] == self._step_seq and finish["playout_id"] == self._course_playout_id):
-            self._queue_course_cinematic_phase("listen", activity_id=finish["activity_id"])
+            self._queue_course_cinematic_phase(
+                finish.get("phase_id") or "listen",
+                activity_id=finish["activity_id"], playout_driven=True,
+            )
 
     async def _play_exit_phase_before_stop(self) -> bool:
         """Play the bound ``exit`` clip to its last frame; the display returns to chat only after it."""
@@ -7910,6 +7940,7 @@ class LessonRuntime:
 
     def _clear_cinematic_state(self) -> None:
         self._course_playout_deferred_finish = None
+        self._course_playout_deferred_phase = None
         self._cinematic_pending_command = None
         self._cinematic_deferred_step_ack = None
         self._retire_authored_cinematic_pending()

@@ -64,8 +64,11 @@ async def test_shared_phase_queue_waits_for_pause_and_resume_ack(phase):
         await runtime.resume()
         await runtime.on_lesson_ack(_control_ack(runtime, _frames(runtime)[-1], 4))
         # Force a queued transition even for teach, the phase already on screen.
+        # `paused_playout` leaves an owned playout active, so this stands in for the
+        # audio-boundary-owned transition; a non-playout-driven caller is deferred
+        # instead (tests/test_lesson_audio_boundary_sync.py).
         runtime._cinematic_phase_started_at = None
-        assert runtime._queue_course_cinematic_phase(phase)
+        assert runtime._queue_course_cinematic_phase(phase, playout_driven=True)
         await runtime.pause()
         pause = _frames(runtime)[-1]
         await settle_queue()
