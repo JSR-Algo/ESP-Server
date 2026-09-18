@@ -778,6 +778,7 @@ class LessonEventForwarderDurabilityTest(unittest.IsolatedAsyncioTestCase):
             post_fn=_post,
             retry_backoff_sec=0,
             max_reenqueue_attempts=0,
+            terminal_max_reenqueue_attempts=0,  # S17 run08: force immediate dead-letter; this test checks store/replay ordering, not the budget
         )
         terminal = {
             "assignmentId": "a1",
@@ -825,6 +826,7 @@ class LessonEventForwarderDurabilityTest(unittest.IsolatedAsyncioTestCase):
             terminal_store=store,
             retry_backoff_sec=0,
             max_reenqueue_attempts=0,
+            terminal_max_reenqueue_attempts=0,  # S17 run08: force immediate dead-letter; this test checks store/replay ordering, not the budget
         )
 
         forwarder.enqueue(terminal)
@@ -1036,3 +1038,120 @@ class LessonForwarderAssignmentTerminalRejectionTest(unittest.IsolatedAsyncioTes
         await forwarder._queue.join()
         await forwarder.aclose()
         self.assertTrue(any("on_assignment_terminal failed" in m for _, m in logger.messages))
+
+
+class LessonForwarderTerminalBatchRetryBudgetTest(unittest.IsolatedAsyncioTestCase):
+    """S17 run08 C18: a `lesson_completed` batch posted inside a backend 429
+    RATE_LIMIT_EXCEEDED burst was re-enqueued twice (1s/2s), dead-lettered and never
+    re-driven while the device stayed connected; the assignment sat RUNNING with no
+    reward. Terminal batches must survive a rate-limit window: a larger bounded retry
+    budget with capped backoff that honours Retry-After, while ordinary progress keeps
+    the small budget."""
+
+    def tearDown(self):
+        _PENDING_TERMINAL_BATCHES.clear()
+
+    async def test_terminal_batch_survives_429_burst_until_backend_accepts(self):
+        attempts = 0
+        slept = []
+
+        async def _post(_client, _base_url, _device_id, _batch, *, token=None):
+            nonlocal attempts
+            attempts += 1
+            if attempts <= 5:
+                raise _http_status_error(429)
+            return {"accepted": 1}
+
+        async def _sleep(delay):
+            slept.append(delay)
+
+        forwarder = LessonEventForwarder(
+            device_id="dev1", base_url="http://backend.test/v1", post_fn=_post,
+            retry_backoff_sec=1.0, retry_backoff_multiplier=2.0, max_reenqueue_attempts=2,
+            terminal_max_reenqueue_attempts=8, retry_backoff_cap_sec=30.0,
+        )
+        batch = {"assignmentId": "a1", "sessionId": "s1",
+                 "events": [{"type": "lesson_completed", "completedAt": "2026-09-18T03:12:11Z"}]}
+        with mock.patch.object(forwarder_module.asyncio, "sleep", _sleep):
+            forwarder.enqueue(batch)
+            await forwarder._queue.join()
+        await forwarder.aclose()
+
+        self.assertEqual(attempts, 6)
+        self.assertEqual(forwarder.dead_letters, [])
+        self.assertIsNone(forwarder.pending_terminal_batch)
+        self.assertEqual(slept, [1.0, 2.0, 4.0, 8.0, 16.0])
+
+    async def test_terminal_backoff_is_capped_and_honours_retry_after(self):
+        attempts = 0
+        slept = []
+
+        def _rate_limited(retry_after):
+            request = httpx.Request("POST", "http://backend.test/v1/devices/dev1/lesson-events")
+            response = httpx.Response(429, request=request, headers={"Retry-After": str(retry_after)},
+                                      json={"code": "RATE_LIMIT_EXCEEDED"})
+            return httpx.HTTPStatusError("slow down", request=request, response=response)
+
+        async def _post(_client, _base_url, _device_id, _batch, *, token=None):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise _rate_limited(7)      # header above the computed 1s backoff -> 7s
+            if attempts == 2:
+                raise _rate_limited(600)    # header above the cap -> cap
+            return {"accepted": 1}
+
+        async def _sleep(delay):
+            slept.append(delay)
+
+        forwarder = LessonEventForwarder(
+            device_id="dev1", base_url="http://backend.test/v1", post_fn=_post,
+            retry_backoff_sec=1.0, retry_backoff_multiplier=2.0, max_reenqueue_attempts=0,
+            terminal_max_reenqueue_attempts=8, retry_backoff_cap_sec=30.0,
+        )
+        with mock.patch.object(forwarder_module.asyncio, "sleep", _sleep):
+            forwarder.enqueue({"assignmentId": "a1", "sessionId": "s1",
+                               "events": [{"type": "lesson_failed"}]})
+            await forwarder._queue.join()
+        await forwarder.aclose()
+        self.assertEqual(attempts, 3)
+        self.assertEqual(slept, [7.0, 30.0])
+        self.assertEqual(forwarder.dead_letters, [])
+
+    async def test_progress_batches_keep_the_small_budget(self):
+        attempts = 0
+
+        async def _post(_client, _base_url, _device_id, _batch, *, token=None):
+            nonlocal attempts
+            attempts += 1
+            raise _http_status_error(429)
+
+        forwarder = LessonEventForwarder(
+            device_id="dev1", base_url="http://backend.test/v1", post_fn=_post,
+            retry_backoff_sec=0, max_reenqueue_attempts=2, terminal_max_reenqueue_attempts=8,
+        )
+        batch = {"assignmentId": "a1", "sessionId": "s1", "events": [{"type": "step_completed", "sequence": 3}]}
+        forwarder.enqueue(batch)
+        await forwarder._queue.join()
+        await forwarder.aclose()
+        self.assertEqual(attempts, 3)
+        self.assertEqual(forwarder.dead_letters, [batch])
+
+    async def test_terminal_budget_is_bounded(self):
+        attempts = 0
+
+        async def _post(_client, _base_url, _device_id, _batch, *, token=None):
+            nonlocal attempts
+            attempts += 1
+            raise _http_status_error(503)
+
+        forwarder = LessonEventForwarder(
+            device_id="dev1", base_url="http://backend.test/v1", post_fn=_post,
+            retry_backoff_sec=0, max_reenqueue_attempts=2, terminal_max_reenqueue_attempts=3,
+        )
+        batch = {"assignmentId": "a1", "sessionId": "s1", "events": [{"type": "lesson_completed"}]}
+        forwarder.enqueue(batch)
+        await forwarder._queue.join()
+        await forwarder.aclose()
+        self.assertEqual(attempts, 4)
+        self.assertEqual(forwarder.dead_letters, [batch])

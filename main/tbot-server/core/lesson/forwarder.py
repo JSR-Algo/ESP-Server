@@ -81,7 +81,19 @@ class LessonEventForwarder:
         max_queue_size: int = 512,
         terminal_store: Any = None,
         on_assignment_terminal: Optional[Callable[[Dict[str, Any], Exception], Any]] = None,
+        terminal_max_reenqueue_attempts: int = 8,
+        retry_backoff_cap_sec: float = 30.0,
     ) -> None:
+        # S17 run08 C18: terminal lifecycle batches (completed/failed/cancelled/abandoned)
+        # are the durable outcome of a lesson and only get replayed on the next lesson
+        # pull, so they must outlive a backend 429/5xx window instead of being
+        # dead-lettered after the small progress budget.
+        self.terminal_max_reenqueue_attempts = max(0, int(terminal_max_reenqueue_attempts))
+        self.retry_backoff_cap_sec = max(0.0, float(retry_backoff_cap_sec))
+        # S17 run08 C10: the backend answers a batch for a cancelled/terminal assignment
+        # with 409 ASSIGNMENT_CONFLICT. Cancellation has no fan-out to the ESP, so this
+        # rejection is the only signal a running lesson gets; surface it once per batch.
+
         # S17 run08 C10: the backend answers a batch for a cancelled/terminal assignment
         # with 409 ASSIGNMENT_CONFLICT. Cancellation has no fan-out to the ESP, so this
         # rejection is the only signal a running lesson gets; surface it once per batch.
@@ -170,15 +182,20 @@ class LessonEventForwarder:
         on_success=None, on_failure=None,
     ) -> None:
         detail = f"{type(exc).__name__}{self._failure_detail(exc)} {self._batch_events(batch)}"
-        if attempt < self.max_reenqueue_attempts and self._is_retryable(exc):
-            delay = self.retry_backoff_sec * (self.retry_backoff_multiplier ** attempt)
+        limit = (
+            self.terminal_max_reenqueue_attempts
+            if self._is_terminal_batch(batch)
+            else self.max_reenqueue_attempts
+        )
+        if attempt < limit and self._is_retryable(exc):
+            delay = self._retry_delay(attempt, exc)
             if delay > 0:
                 await asyncio.sleep(delay)
             self._queue.put_nowait((batch, attempt + 1, on_success, on_failure))
             self._log(
                 "warning",
                 "lesson-events POST failed; re-enqueued "
-                f"attempt={attempt + 1}/{self.max_reenqueue_attempts}: {detail}",
+                f"attempt={attempt + 1}/{limit}: {detail}",
                 batch,
             )
             return
@@ -218,6 +235,23 @@ class LessonEventForwarder:
         if code is None and isinstance(payload.get("error"), dict):
             code = payload["error"].get("code")
         return code == "ASSIGNMENT_CONFLICT"
+
+    def _retry_delay(self, attempt: int, exc: Exception) -> float:
+        """Exponential backoff, raised to the backend's Retry-After when it sends one,
+        and capped so a long rate-limit window cannot stall the queue indefinitely."""
+        delay = self.retry_backoff_sec * (self.retry_backoff_multiplier ** attempt)
+        response = getattr(exc, "response", None)
+        headers = getattr(response, "headers", None)
+        raw = headers.get("Retry-After") if headers is not None else None
+        try:
+            retry_after = float(raw) if raw is not None else None
+        except (TypeError, ValueError):
+            retry_after = None
+        if retry_after is not None and retry_after > delay:
+            delay = retry_after
+        if self.retry_backoff_cap_sec > 0:
+            delay = min(delay, self.retry_backoff_cap_sec)
+        return delay
 
     @staticmethod
     def _failure_detail(exc: Exception) -> str:
