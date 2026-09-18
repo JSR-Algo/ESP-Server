@@ -2915,7 +2915,14 @@ class LessonRuntime:
             return False
         committed = self.course_mode.commit_course_response_plan(arguments)
         if committed:
-            closing = self.course_mode.orchestrator.session_state is SessionState.CLOSING
+            # The orchestrator moves straight to COMPLETE on a COMPLETE_COURSE decision
+            # (last activity / `complete` outcome); that must close the lesson exactly
+            # like CLOSING as long as the completion stop has not been dispatched
+            # (S17 run09 D4: the assignment stayed RUNNING with no lesson_stop).
+            closing = self.course_mode.orchestrator.session_state is SessionState.CLOSING or (
+                self.course_mode.orchestrator.session_state is SessionState.COMPLETE
+                and not self.course_mode._completion_stop_dispatched
+            )
             try:
                 await self.persist_course_mode_snapshot()
             except Exception:
@@ -2946,9 +2953,10 @@ class LessonRuntime:
             self._completion_visual_pending = False
 
     async def _dispatch_course_mode_close(self) -> bool:
-        if self.course_mode.orchestrator.session_state is SessionState.COMPLETE:
+        session_state = self.course_mode.orchestrator.session_state
+        if session_state is SessionState.COMPLETE and self.course_mode._completion_stop_dispatched:
             return True
-        if self.course_mode.orchestrator.session_state is not SessionState.CLOSING:
+        if session_state not in (SessionState.CLOSING, SessionState.COMPLETE):
             return False
         if not self.course_mode._completion_stop_dispatched:
             exit_bound = self._activity_is_phase_bound(None) and self._course_cinematic_cue("exit") is not None
