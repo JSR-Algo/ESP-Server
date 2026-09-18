@@ -80,7 +80,12 @@ class LessonEventForwarder:
         dead_letter_limit: int = 100,
         max_queue_size: int = 512,
         terminal_store: Any = None,
+        on_assignment_terminal: Optional[Callable[[Dict[str, Any], Exception], Any]] = None,
     ) -> None:
+        # S17 run08 C10: the backend answers a batch for a cancelled/terminal assignment
+        # with 409 ASSIGNMENT_CONFLICT. Cancellation has no fan-out to the ESP, so this
+        # rejection is the only signal a running lesson gets; surface it once per batch.
+        self.on_assignment_terminal = on_assignment_terminal
         self.device_id = device_id
         self.base_url = base_url
         self.token = token
@@ -184,6 +189,35 @@ class LessonEventForwarder:
             if asyncio.iscoroutine(result):
                 await result
         self._log("warning", f"lesson-events POST dead-lettered: {detail}", batch)
+        if self._is_assignment_terminal_rejection(exc) and callable(self.on_assignment_terminal):
+            try:
+                result = self.on_assignment_terminal(batch, exc)
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception as hook_exc:  # the hook must never kill the worker
+                self._log(
+                    "warning",
+                    f"on_assignment_terminal failed: {type(hook_exc).__name__}",
+                    batch,
+                )
+
+    @staticmethod
+    def _is_assignment_terminal_rejection(exc: Exception) -> bool:
+        """True for the backend's 409 ``ASSIGNMENT_CONFLICT`` ("assignment is already
+        terminal") answer; every other status/code is an ordinary failure."""
+        response = getattr(exc, "response", None)
+        if getattr(response, "status_code", None) != 409:
+            return False
+        try:
+            payload = response.json()
+        except Exception:
+            return False
+        if not isinstance(payload, dict):
+            return False
+        code = payload.get("code")
+        if code is None and isinstance(payload.get("error"), dict):
+            code = payload["error"].get("code")
+        return code == "ASSIGNMENT_CONFLICT"
 
     @staticmethod
     def _failure_detail(exc: Exception) -> str:

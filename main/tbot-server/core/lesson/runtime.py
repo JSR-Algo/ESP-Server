@@ -7857,6 +7857,27 @@ class LessonRuntime:
                 self._completion_stop_sent = True
         return result
 
+    async def on_backend_assignment_terminal(self, batch: Dict[str, Any], exc: Exception | None = None) -> bool:
+        """The backend rejected one of our batches with 409 ASSIGNMENT_CONFLICT: the
+        assignment is terminal there (operator cancel has no fan-out to the ESP). A live
+        runtime for that assignment must stop teaching now instead of playing the rest
+        of a cancelled lesson and dead-lettering its completion (S17 run08 C10).
+        Returns True when a stop was requested."""
+        if not isinstance(batch, dict) or batch.get("assignmentId") != self.assignment_id:
+            return False
+        if (getattr(self, "_backend_terminal_stop_requested", False)
+                or getattr(self, "_terminal_requested", False) or self.state in (S_FAILED, S_COMPLETED)
+                or not self._is_active_runtime()):
+            return False
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        self._log(
+            "warning",
+            f"backend reports assignment terminal status={status}; stopping lesson to honour cancellation",
+        )
+        self._backend_terminal_stop_requested = True
+        await self.stop()
+        return True
+
     async def stop(self) -> None:
         superseding_completion = self._can_supersede_unsent_completion()
         if self._terminal_requested and not superseding_completion:
@@ -10019,6 +10040,12 @@ async def _maybe_start_lesson_on_connect_impl(conn: Any) -> Optional[LessonRunti
                 _log("warning", f"refused candidate cleanup failed: {type(close_exc).__name__}")
         await _cleanup_failed_start("lesson_start_refused")
         return republish_previous
+    # Reconciliation 2026-09-19: the candidate-identity refusal (S12/T14 lineage) and
+    # T18's backend-terminal wiring both land here. The refusal path always returns, so
+    # wiring the hook after the try/except keeps T18's C10 behaviour (a backend
+    # ASSIGNMENT_CONFLICT stops the live runtime) and still leaves a refused candidate
+    # with no hook on a forwarder that is being closed.
+    forwarder.on_assignment_terminal = runtime.on_backend_assignment_terminal
     # Terminal same-assignment rebuilds may already have closed their runtime. Live
     # current runtimes, including a different assignment, stay open as the fallback
     # until the candidate passes READY attestation below.

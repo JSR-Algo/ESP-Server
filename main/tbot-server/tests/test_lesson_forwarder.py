@@ -972,3 +972,67 @@ class LessonEventForwarderDurabilityTest(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LessonForwarderAssignmentTerminalRejectionTest(unittest.IsolatedAsyncioTestCase):
+    """S17 run08 C10: the backend answers 409 ASSIGNMENT_CONFLICT ("assignment is already
+    terminal") once an operator cancels an assignment. The forwarder used to dead-letter
+    that batch silently, so the runtime kept teaching a cancelled lesson. The rejection
+    must be surfaced to a caller-supplied ``on_assignment_terminal`` hook exactly once."""
+
+    def tearDown(self):
+        _PENDING_TERMINAL_BATCHES.clear()
+
+    async def _drive(self, status_code, code, *, hook_calls):
+        async def _post(_client, _base_url, _device_id, _batch, *, token=None):
+            raise _http_status_error(status_code, code=code)
+
+        async def _hook(batch, exc):
+            hook_calls.append((batch["assignmentId"], batch.get("sessionId"),
+                               getattr(getattr(exc, "response", None), "status_code", None)))
+
+        forwarder = LessonEventForwarder(
+            device_id="dev1",
+            base_url="http://backend.test/v1",
+            post_fn=_post,
+            retry_backoff_sec=0,
+            max_reenqueue_attempts=2,
+            on_assignment_terminal=_hook,
+        )
+        batch = {"assignmentId": "a1", "sessionId": "s1",
+                 "events": [{"type": "step_completed", "sequence": 7}]}
+        forwarder.enqueue(batch)
+        await forwarder._queue.join()
+        await forwarder.aclose()
+        return forwarder, batch
+
+    async def test_409_assignment_conflict_notifies_hook_once_and_dead_letters(self):
+        calls = []
+        forwarder, batch = await self._drive(409, "ASSIGNMENT_CONFLICT", hook_calls=calls)
+        self.assertEqual(calls, [("a1", "s1", 409)])
+        self.assertEqual(forwarder.dead_letters, [batch])
+
+    async def test_other_rejections_do_not_notify_hook(self):
+        for status_code, code in ((500, None), (409, "SOMETHING_ELSE"), (400, "VALIDATION_ERROR")):
+            calls = []
+            await self._drive(status_code, code, hook_calls=calls)
+            self.assertEqual(calls, [], f"{status_code}/{code} must not be treated as terminal")
+
+    async def test_hook_failure_is_contained(self):
+        async def _post(_client, _base_url, _device_id, _batch, *, token=None):
+            raise _http_status_error(409, code="ASSIGNMENT_CONFLICT")
+
+        async def _hook(_batch, _exc):
+            raise RuntimeError("hook exploded")
+
+        logger = _Logger()
+        forwarder = LessonEventForwarder(
+            device_id="dev1", base_url="http://backend.test/v1", post_fn=_post,
+            retry_backoff_sec=0, max_reenqueue_attempts=0, logger=logger,
+            on_assignment_terminal=_hook,
+        )
+        forwarder.enqueue({"assignmentId": "a1", "sessionId": "s1",
+                           "events": [{"type": "step_completed", "sequence": 1}]})
+        await forwarder._queue.join()
+        await forwarder.aclose()
+        self.assertTrue(any("on_assignment_terminal failed" in m for _, m in logger.messages))

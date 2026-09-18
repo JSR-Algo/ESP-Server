@@ -693,3 +693,43 @@ class LessonRuntimeAutoDisableTest(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LessonRuntimeBackendTerminalRejectionTest(unittest.IsolatedAsyncioTestCase):
+    """S17 run08 C10: an operator cancel is backend-only (no fan-out to the ESP). The
+    ESP learns about it on its next progress POST as 409 ASSIGNMENT_CONFLICT. A RUNNING
+    runtime must then stop teaching (documented ``CANCELLED`` lesson_stop) instead of
+    playing the whole cancelled lesson and dead-lettering its completion."""
+
+    def _runtime(self, **kwargs):
+        return LessonRuntimeTransitionTableTest._runtime(LessonRuntimeTransitionTableTest(), **kwargs)
+
+    @staticmethod
+    def _conflict():
+        import httpx
+        request = httpx.Request("POST", "http://backend.test/v1/devices/dev1/lesson-events")
+        response = httpx.Response(409, request=request,
+                                  json={"code": "ASSIGNMENT_CONFLICT", "message": "assignment is already terminal"})
+        return httpx.HTTPStatusError("conflict", request=request, response=response)
+
+    async def test_backend_terminal_rejection_stops_running_lesson_with_cancelled(self):
+        rt = self._runtime()
+        rt.state = S_RUNNING
+        handled = await rt.on_backend_assignment_terminal(
+            {"assignmentId": rt.assignment_id, "sessionId": rt.session_id}, self._conflict())
+        self.assertTrue(handled)
+        stops = _frames_of_type(rt.conn, "lesson_stop")
+        self.assertEqual(len(stops), 1)
+        self.assertEqual(stops[0]["body"]["reason"], "CANCELLED")
+        # idempotent: a second rejection (e.g. for the terminal batch itself) is a no-op
+        self.assertFalse(await rt.on_backend_assignment_terminal(
+            {"assignmentId": rt.assignment_id}, self._conflict()))
+        self.assertEqual(len(_frames_of_type(rt.conn, "lesson_stop")), 1)
+
+    async def test_rejection_for_another_assignment_or_terminal_runtime_is_ignored(self):
+        rt = self._runtime()
+        rt.state = S_RUNNING
+        self.assertFalse(await rt.on_backend_assignment_terminal({"assignmentId": "someone-else"}, self._conflict()))
+        rt.state = S_COMPLETED
+        self.assertFalse(await rt.on_backend_assignment_terminal({"assignmentId": rt.assignment_id}, self._conflict()))
+        self.assertEqual(_frames_of_type(rt.conn, "lesson_stop"), [])
