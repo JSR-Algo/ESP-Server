@@ -196,6 +196,33 @@ async def test_a_reconnect_onto_a_different_assignment_does_not_rescue_the_old_o
     assert len(posted) == 1
 
 
+def test_binding_a_runtime_to_a_session_claims_it_immediately() -> None:
+    """The reconnect path, at the point the real stack showed it has to happen.
+
+    A claim placed only in `start_protocol` is too late: a robot that reconnects and
+    then drops again while PRELOADING never reaches it, so the armed close survives and
+    kills the lesson the robot came back for. Measured, not theorised - see
+    runtime/traces/d8-p2-quick-reconnect-v1/.
+    """
+    reaper = get_disconnect_abandonment_reaper()
+    clock = _Clock()
+    reaper._clock = clock
+    runtime_a = _course_runtime()
+    reaper.register(
+        _intent(clock, assignment=str(runtime_a.assignment_id), session=str(runtime_a.session_id))
+    )
+    assert len(reaper.pending_keys()) == 1
+
+    # Binding a SECOND runtime to the same assignment+session (what a reconnect does)
+    # retires the close before anything can await.
+    runtime_b = _course_runtime()
+    runtime_b.assignment_id = runtime_a.assignment_id
+    runtime_b.session_id = runtime_a.session_id
+    runtime_b._claim_disconnect_abandonment()
+
+    assert reaper.pending_keys() == ()
+
+
 @pytest.mark.asyncio
 async def test_the_runtime_claims_its_own_session_when_it_starts() -> None:
     runtime = _course_runtime()

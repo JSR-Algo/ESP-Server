@@ -2385,6 +2385,14 @@ class LessonRuntime:
             if isinstance(snapshot_session_id, str) and snapshot_session_id
             else str(uuid.uuid4())
         )
+        # D8: the session is live again the moment a runtime is BOUND to it, not when
+        # start_protocol finishes preloading. Measured on the real stack: a robot that
+        # reconnected inside the grace window reached PRELOADING and dropped again
+        # before start_protocol ran, so a claim placed only there left the close armed
+        # and it killed a lesson the robot had come back for. Claiming at binding is
+        # what makes "reconnect resumes rather than dies" true for a reconnect that is
+        # itself interrupted. start_protocol claims again, harmlessly, as a backstop.
+        self._claim_disconnect_abandonment()
         self._course_mode_snapshot_store = course_mode_snapshot_store
         self._course_mode_snapshot_device_id = course_mode_snapshot_device_id
         self._queued_course_evidence_sequences: set[int] = set()
