@@ -475,6 +475,17 @@ lesson:
   sample_mode: interactive
   # Default child quiet-window when a step omits responseTimeoutSec (sample overrides).
   child_response_timeout_sec: 12.0
+  # Course Mode abandonment timeout (owner decision D2, 2026-09-19). How long the
+  # child's OWN turn may stay silent before the session is closed through the real
+  # terminal path (exit clip + CANCELLED lesson_stop, zero rewards) instead of
+  # sitting RUNNING forever. Derivation: the course flow already reprompts at ~12s
+  # and pauses at ~25s (T18 run-08 C11), so a close must sit WELL beyond a pause a
+  # returning child should still be able to resume from; 180s leaves ~2.5 minutes
+  # after that pause. A starting value chosen to be safe, not a researched one.
+  # Override without a rebuild: LESSON_COURSE_INACTIVITY_TIMEOUT_SEC, or this key in
+  # data/.config.yaml. Must be 30-1800; anything else refuses the boot rather than
+  # silently reverting to 180.
+  course_inactivity_timeout_sec: 180.0
   # Inbound-silence budget while a lesson runtime is RUNNING/PRELOADING. The
   # firmware pings the passive lesson channel every 2s (pong probe fails at 10s)
   # and refuses the silent SD-sync window while a lesson runs, so silence past

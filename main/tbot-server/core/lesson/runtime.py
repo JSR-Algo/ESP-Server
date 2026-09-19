@@ -76,6 +76,16 @@ from core.lesson.conversation_runtime import (
     SpeakingEvidence,
     inactive_conversation_decision,
 )
+from core.lesson.course_inactivity_policy import (
+    COURSE_INACTIVITY_TIMEOUT_CONFIG_KEY,
+    COURSE_INACTIVITY_TIMEOUT_DEFAULT_SEC,
+    COURSE_INACTIVITY_TIMEOUT_ENV_VAR,
+    COURSE_INACTIVITY_TIMEOUT_MAX_SEC,
+    COURSE_INACTIVITY_TIMEOUT_MIN_SEC,
+    CourseInactivityTimeoutConfigError,
+    assert_course_inactivity_timeout_in_range,
+    course_inactivity_timeout_sec,
+)
 from core.lesson.course_mode_contract import CourseModeContract
 from core.lesson.course_mode_compatibility import course_mode_compatibility_for_manifest
 from core.lesson.course_orchestrator import (
@@ -1411,6 +1421,11 @@ S_PAUSED = "PAUSED"
 _SD_PACK_BOOT_CLEANED_ROOTS: set[Path] = set()
 S_COMPLETED = "COMPLETED"
 S_FAILED = "FAILED"
+
+# D2 (owner-decisions-20260919.md): the course-mode abandonment timeout is a named,
+# configuration-driven value. It lives in core/lesson/course_inactivity_policy.py so
+# config_loader can validate an operator-supplied value at boot without importing this
+# module; it is re-exported here because this is where the policy is armed.
 
 # ── per-step completion semantics (P5 playability fix + L3 P1 author types) ──────
 # A step splits into one of two completion classes ON THE WIRE:
@@ -7296,14 +7311,16 @@ class LessonRuntime:
     #     and no second reward can follow.
 
     def _course_inactivity_timeout_sec(self) -> float:
+        """D2: the named, configuration-driven abandonment timeout.
+
+        Reads lesson.course_inactivity_timeout_sec from the connection's config -
+        the same lesson config mapping every other course knob uses - and raises
+        CourseInactivityTimeoutConfigError on an unusable value instead of
+        silently reverting to COURSE_INACTIVITY_TIMEOUT_DEFAULT_SEC. See the
+        derivation next to that constant.
+        """
         config = getattr(self.conn, "config", {}) or {}
-        lesson_cfg = _lesson_config(config)
-        raw = lesson_cfg.get("course_inactivity_timeout_sec") or 180.0
-        try:
-            parsed = float(raw)
-        except (TypeError, ValueError):
-            parsed = 180.0
-        return parsed if math.isfinite(parsed) and parsed > 0 else 180.0
+        return course_inactivity_timeout_sec(_lesson_config(config))
 
     def _course_playout_in_flight(self) -> bool:
         """True while the device owns the screen for the current response (T15 S4)."""
@@ -7324,7 +7341,15 @@ class LessonRuntime:
         self._cancel_course_inactivity_timeout()
         if self.course_mode is None or self._terminal_requested:
             return
-        timeout_sec = self._course_inactivity_timeout_sec()
+        try:
+            timeout_sec = self._course_inactivity_timeout_sec()
+        except CourseInactivityTimeoutConfigError as exc:
+            # D2 fail-closed. A boot-time config carrying an unusable value is
+            # refused by config_loader, so reaching here means the value arrived
+            # after boot (an API-pushed config). Refuse the child's turn loudly
+            # rather than arming an abandonment close on a number nobody chose.
+            self._log("error", f"course inactivity policy misconfigured: {exc}")
+            raise
 
         def _stale() -> bool:
             return (
@@ -7349,7 +7374,7 @@ class LessonRuntime:
                     # the window restarts instead of interrupting the playout.
             except asyncio.CancelledError:
                 return
-            await self._handle_course_inactivity_timeout(assessment_generation)
+            await self._handle_course_inactivity_timeout(assessment_generation, timeout_sec)
 
         self._course_inactivity_task = asyncio.create_task(_timeout())
 
@@ -7360,7 +7385,9 @@ class LessonRuntime:
             task.cancel()
         self._course_inactivity_task = None
 
-    async def _handle_course_inactivity_timeout(self, assessment_generation: int) -> None:
+    async def _handle_course_inactivity_timeout(
+        self, assessment_generation: int, timeout_sec: float
+    ) -> None:
         if (
             not self._is_active_runtime()
             or self.state != S_RUNNING
@@ -7372,7 +7399,8 @@ class LessonRuntime:
         self._log(
             "info",
             "course child inactive for "
-            f"{self._course_inactivity_timeout_sec()}s; ending the session through the terminal path",
+            f"{timeout_sec}s (lesson.{COURSE_INACTIVITY_TIMEOUT_CONFIG_KEY}); "
+            "ending the session through the terminal path",
         )
         self._course_inactivity_closed = True
         # Retire the child's turn before the terminal path runs, so a late answer

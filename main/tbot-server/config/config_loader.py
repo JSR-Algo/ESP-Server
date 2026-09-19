@@ -14,6 +14,12 @@ from config.manage_api_client import (
     get_server_config,
     init_service,
 )
+from core.lesson.course_inactivity_policy import (
+    COURSE_INACTIVITY_TIMEOUT_CONFIG_KEY,
+    COURSE_INACTIVITY_TIMEOUT_ENV_VAR,
+    assert_course_inactivity_timeout_in_range,
+    course_inactivity_timeout_sec,
+)
 from core.voice.google_live_credentials import (
     normalize_google_live_api_key,
     resolve_google_live_env_api_key,
@@ -510,6 +516,21 @@ def _parse_positive_float_env(name):
     return value
 
 
+def _parse_course_inactivity_timeout_env():
+    """LESSON_COURSE_INACTIVITY_TIMEOUT_SEC -> lesson.course_inactivity_timeout_sec.
+
+    D2 (owner-decisions-20260919.md): the Course Mode abandonment timeout must be
+    overridable without a rebuild, and an unusable override must FAIL CLOSED - the
+    boot is refused - rather than silently reverting to the 180 s default. Same
+    shape as LESSON_PRELOAD_TIMEOUT_SEC, plus the policy bounds.
+    """
+    raw = _clean_env(COURSE_INACTIVITY_TIMEOUT_ENV_VAR)
+    if raw is None:
+        return None
+    value = course_inactivity_timeout_sec({COURSE_INACTIVITY_TIMEOUT_CONFIG_KEY: raw})
+    return assert_course_inactivity_timeout_in_range(value)
+
+
 def _parse_percent_env(name):
     raw = _clean_env(name)
     if raw is None:
@@ -532,6 +553,10 @@ def _validate_lesson_rollout_file_config(lesson_cfg):
     ):
         if key in lesson_cfg and type(lesson_cfg[key]) is not bool:
             raise ValueError(f"lesson.{key} must be a boolean")
+    # D2: a config-volume value gets the same treatment as the env override - parsed,
+    # bounds-checked, and refused loudly instead of quietly becoming 180 s.
+    if lesson_cfg.get(COURSE_INACTIVITY_TIMEOUT_CONFIG_KEY) is not None:
+        assert_course_inactivity_timeout_in_range(course_inactivity_timeout_sec(lesson_cfg))
 
 
 def _normalize_storage_hil_device_allowlist(value):
@@ -571,7 +596,8 @@ def _apply_lesson_env_overrides(config):
     LESSON_MAX_TOTAL_ASSET_BYTES -> lesson.max_total_asset_bytes.
     LESSON_SD_CACHE_QUOTA_BYTES -> lesson.sd_cache_quota_bytes.
     LESSON_SD_GC_FREE_PERCENT -> lesson.sd_gc_free_percent.
-    LESSON_SD_PRELOAD_MIN_FREE_PERCENT -> lesson.sd_preload_min_free_percent."""
+    LESSON_SD_PRELOAD_MIN_FREE_PERCENT -> lesson.sd_preload_min_free_percent.
+    LESSON_COURSE_INACTIVITY_TIMEOUT_SEC -> lesson.course_inactivity_timeout_sec (D2)."""
     if not isinstance(config, Mapping):
         return config
 
@@ -599,6 +625,7 @@ def _apply_lesson_env_overrides(config):
     sd_cache_quota_bytes = _parse_positive_int_env("LESSON_SD_CACHE_QUOTA_BYTES")
     sd_gc_free_percent = _parse_percent_env("LESSON_SD_GC_FREE_PERCENT")
     sd_preload_min_free_percent = _parse_percent_env("LESSON_SD_PRELOAD_MIN_FREE_PERCENT")
+    course_inactivity_timeout_sec_env = _parse_course_inactivity_timeout_env()
     existing_lesson = config.get("lesson")
     existing_lesson = existing_lesson if isinstance(existing_lesson, Mapping) else {}
     _validate_lesson_rollout_file_config(existing_lesson)
@@ -647,6 +674,7 @@ def _apply_lesson_env_overrides(config):
         and sd_cache_quota_bytes is None
         and sd_gc_free_percent is None
         and sd_preload_min_free_percent is None
+        and course_inactivity_timeout_sec_env is None
         and sample_flag is None
         and not sample_asset_base
         and not sample_step_dwell
@@ -788,6 +816,8 @@ def _apply_lesson_env_overrides(config):
         lesson_cfg["sd_gc_free_percent"] = sd_gc_free_percent
     if sd_preload_min_free_percent is not None:
         lesson_cfg["sd_preload_min_free_percent"] = sd_preload_min_free_percent
+    if course_inactivity_timeout_sec_env is not None:
+        lesson_cfg[COURSE_INACTIVITY_TIMEOUT_CONFIG_KEY] = course_inactivity_timeout_sec_env
     if sample_flag is not None:
         lesson_cfg["sample_lesson"] = sample_flag
     if sample_asset_base:
