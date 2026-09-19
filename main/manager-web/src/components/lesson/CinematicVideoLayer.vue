@@ -1,6 +1,7 @@
 <template>
   <div :class="layerClass" :style="positionStyle">
     <video
+      v-if="!usesMjpeg"
       ref="video"
       :class="['cinematic-video', { hidden: usesChromaKey }]"
       :src="src"
@@ -15,12 +16,13 @@
       @seeked="handleSeeked"
       @error="handleMediaError"
     />
-    <canvas v-if="usesChromaKey" ref="canvas" class="cinematic-canvas" />
+    <canvas v-if="usesChromaKey || usesMjpeg" ref="canvas" class="cinematic-canvas" />
     <p v-if="errorMessage" class="cinematic-error" role="alert">{{ errorMessage }}</p>
   </div>
 </template>
 
 <script>
+import { MjpegPlayback } from './mjpeg-playback.mjs';
 import { applyChromaKey, shouldResyncVideo } from './flattened-cinematic-preview';
 
 export default {
@@ -28,6 +30,7 @@ export default {
   props: {
     layerId: { type: String, default: '' },
     src: { type: String, required: true },
+    mjpegIdentity: { type: Object, default: null },
     chromaKey: { type: Object, default: null },
     layerClass: { type: [String, Array, Object], default: '' },
     positionStyle: { type: Object, required: true },
@@ -53,13 +56,16 @@ export default {
     };
   },
   computed: {
+    usesMjpeg() { return Boolean(this.mjpegIdentity); },
     usesChromaKey() {
       const color = this.chromaKey && this.chromaKey.color;
       return !this.chromaUnavailable && Boolean(color && [color.r, color.g, color.b].every(Number.isFinite));
     }
   },
   watch: {
+    mjpegIdentity: { deep: true, handler() { if (this.usesMjpeg || this._mjpeg) this.loadMjpeg(); } },
     src() {
+      if (this.usesMjpeg || this._mjpeg) { this.loadMjpeg(); return; }
       this.stop();
       this.lastVideoTime = -1;
       this.chromaUnavailable = false;
@@ -80,10 +86,14 @@ export default {
       this.resetPlaybackGuards();
       this.syncPlayback();
     },
+    playbackMode() {
+      if (this._mjpeg) { this._mjpeg.mode = this.playbackMode; this.syncPlayback(true); }
+    },
     clockMs() {
       this.syncPlayback();
     },
     replayNonce() {
+      if (this.usesMjpeg && this.errorMessage) return;
       this.errorMessage = '';
       this.chromaUnavailable = false;
       this.lastVideoTime = -1;
@@ -92,10 +102,13 @@ export default {
     }
   },
   mounted() {
-    this.armLoadDeadline();
+    if (this.usesMjpeg) this.loadMjpeg();
+    else this.armLoadDeadline();
   },
   beforeDestroy() {
     this.destroyed = true;
+    this._mjpegGeneration = (this._mjpegGeneration || 0) + 1;
+    if (this._mjpeg) this._mjpeg.dispose();
     this.clearLoadDeadline();
     this.stop();
     this.resetPlaybackGuards();
@@ -107,6 +120,39 @@ export default {
     }
   },
   methods: {
+    async loadMjpeg() {
+      const generation = this._mjpegGeneration = (this._mjpegGeneration || 0) + 1;
+      const retired = this._mjpeg;
+      this._mjpeg = null;
+      this.stop();
+      this.clearLoadDeadline();
+      this.armLoadDeadline();
+      const retirement = Promise.allSettled([this._mjpegRetirement, retired && retired.dispose()]);
+      this._mjpegRetirement = retirement;
+      await retirement;
+      if (this.destroyed || generation !== this._mjpegGeneration) return;
+      this.errorMessage = '';
+      this.chromaUnavailable = false;
+      await this.$nextTick();
+      if (this.destroyed || generation !== this._mjpegGeneration) return;
+      if (!this.usesMjpeg) { this.armLoadDeadline(); return; }
+      const current = () => !this.destroyed && generation === this._mjpegGeneration;
+      const player = new MjpegPlayback({ src: this.src, identity: this.mjpegIdentity, mode: this.playbackMode,
+        present: bitmap => current() && this.renderFrame(bitmap, this.$refs.canvas),
+        onError: error => { if (current()) this.failMedia(error.message); }
+      });
+      this._mjpeg = player;
+      this.armLoadDeadline();
+      try {
+        await player.load();
+        if (!current()) return;
+        this.clearLoadDeadline();
+        this.syncPlayback(true);
+      } catch (error) { if (current()) this.failMedia(error.message); }
+    },
+    advanceMediaClock(timestamp) {
+      if (this._mjpeg) this._mjpeg.tick(timestamp);
+    },
     clearLoadDeadline() {
       if (this.loadTimer !== null) clearTimeout(this.loadTimer);
       this.loadTimer = null;
@@ -115,7 +161,8 @@ export default {
       this.clearLoadDeadline();
       const src = this.src;
       this.loadTimer = setTimeout(() => {
-        if (!this.destroyed && this.src === src && this.$refs.video && this.$refs.video.readyState < 2) {
+        if (!this.destroyed && this.src === src && (this.usesMjpeg
+          ? !this.mediaPlaybackState().ready : this.$refs.video && this.$refs.video.readyState < 2)) {
           this.failMedia('load timed out. Check the selected media origin.');
         }
       }, 15000);
@@ -125,6 +172,8 @@ export default {
       if (this.destroyed) return;
       this.clearLoadDeadline();
       this.errorMessage = `${this.layerId || 'Video'} ${message}`;
+      if (this.usesMjpeg) this._mjpegGeneration = (this._mjpegGeneration || 0) + 1;
+      if (this._mjpeg) this._mjpeg.dispose();
       this.stop();
       if (this.$refs.video) this.$refs.video.pause();
       if (this.$emit) this.$emit('media-error', { layerId: this.layerId, src: this.src, message: this.errorMessage });
@@ -134,6 +183,8 @@ export default {
       this.failMedia('failed to load/decode. A verified browser representation is required if this codec is unsupported.');
     },
     mediaPlaybackState() {
+      if (this.usesMjpeg) return { layerId: this.layerId, ...(this._mjpeg ? this._mjpeg.state()
+        : { ready: false, pending: true, seeking: false, ended: false, currentTimeSec: 0 }) };
       const video = this.$refs.video;
       const currentTimeSec = video ? Number(video.currentTime) : Number.NaN;
       return {
@@ -164,6 +215,16 @@ export default {
     },
     syncPlayback(force = false, externalClockMs = this.clockMs) {
       if (this.destroyed) return;
+      if (this.usesMjpeg) {
+        const player = this._mjpeg;
+        if (!player || player.disposed) return false;
+        if (force || (!this.transportMaster && shouldResyncVideo(externalClockMs / 1000, player.time))) {
+          player.seek(Math.max(0, Number(externalClockMs) || 0) / 1000);
+        }
+        if (this.playing) player.play();
+        else player.pause();
+        return force;
+      }
       if (!this.controlled || !this.$refs.video) return;
       const video = this.$refs.video;
       const targetSeconds = Math.max(0, Number(externalClockMs) || 0) / 1000;
@@ -215,6 +276,7 @@ export default {
       return didSeek;
     },
     start(forceFrame = false) {
+      if (this.usesMjpeg) { this.syncPlayback(); return; }
       this.stop();
       if (this.destroyed || this.errorMessage) return;
       if (!this.usesChromaKey || !this.$refs.video || !this.$refs.canvas) return;
@@ -260,7 +322,13 @@ export default {
         const context = canvas.getContext('2d', { willReadFrequently: true });
         if (!context) return false;
         context.clearRect(0, 0, width, height);
-        context.drawImage(video, 0, 0, width, height);
+        if (this.usesMjpeg) {
+          const fit = this.positionStyle.objectFit || 'contain';
+          const scale = fit === 'cover' ? Math.max(width / video.width, height / video.height)
+            : Math.min(width / video.width, height / video.height);
+          const drawWidth = video.width * scale, drawHeight = video.height * scale;
+          context.drawImage(video, (width - drawWidth) / 2, (height - drawHeight) / 2, drawWidth, drawHeight);
+        } else context.drawImage(video, 0, 0, width, height);
         const frame = context.getImageData(0, 0, width, height);
         // MP4 frames are opaque before chroma keying, including the green exit tail.
         let decoded = false;
@@ -271,7 +339,7 @@ export default {
           this.failMedia('has no decoded frame. A verified browser representation is required.');
           return false;
         }
-        applyChromaKey(frame.data, this.chromaKey);
+        if (this.usesChromaKey) applyChromaKey(frame.data, this.chromaKey);
         context.putImageData(frame, 0, 0);
         return true;
       } catch (error) {

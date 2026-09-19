@@ -405,6 +405,7 @@ export function projectEspTftPreview(manifest, stepIndex = 0, requestedPath = 'c
       id, z: index * 10, bounds: cinematicBounds(layer, bounds, asObject(asObject(layer).metadata).fit || fit),
       src: source, mediaType: layerMediaType(layer), chromaKey: id === 'robotOverlay' ? layerChromaKey(layer) : null,
       assetVersionId: asObject(layer).assetVersionId || '', sha256: asObject(layer).sha256 || '',
+      mediaIdentity: { bytes: asObject(layer).bytes, sha256: asObject(layer).sha256, metadata: asObject(layer).metadata },
       visible: Boolean(source) && !(id === 'robotOverlay' && hideRobotOverlay) && !(id === 'teachingObject' && optionalVisualMissing)
     };
   });

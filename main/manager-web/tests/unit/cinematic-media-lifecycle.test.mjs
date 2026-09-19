@@ -1,11 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { webcrypto } from 'node:crypto';
 
 const source = readFileSync(new URL('../../src/components/lesson/CinematicVideoLayer.vue', import.meta.url), 'utf8');
 const helpers = readFileSync(new URL('../../src/components/lesson/flattened-cinematic-preview.js', import.meta.url), 'utf8');
 const url = code => `data:text/javascript;base64,${Buffer.from(code).toString('base64')}`;
-const script = source.match(/<script>([\s\S]*?)<\/script>/)[1].replace("'./flattened-cinematic-preview'", JSON.stringify(url(helpers)));
+const parser = readFileSync(new URL('../../src/components/lesson/mjpeg-mp4.mjs', import.meta.url), 'utf8');
+const playback = readFileSync(new URL('../../src/components/lesson/mjpeg-playback.mjs', import.meta.url), 'utf8').replace("'./mjpeg-mp4.mjs'", JSON.stringify(url(parser)));
+const script = source.match(/<script>([\s\S]*?)<\/script>/)[1].replace("'./flattened-cinematic-preview'", JSON.stringify(url(helpers))).replace("'./mjpeg-playback.mjs'", JSON.stringify(url(playback)));
 const component = (await import(url(script))).default;
 const parentSource = readFileSync(new URL('../../src/components/lesson/RobotEspTftProjectionPreview.vue', import.meta.url), 'utf8');
 const parentScript = parentSource.match(/<script>([\s\S]*?)<\/script>/)[1]
@@ -163,4 +166,95 @@ test('stale play completion cannot settle a newer resumed play request', async (
   vm.playing = true; component.watch.playing.call(vm); assert.equal(completions.length, 2);
   completions[0](); await Promise.resolve(); assert.equal(vm.playPending, true);
   completions[1](); await Promise.resolve(); assert.equal(vm.playPending, false);
+});
+
+test('MJPEG clock advances through the actual parent clock owner only', () => {
+ const {vm,preview}=transportSetup();let ticks=0;vm.usesMjpeg=true;vm._mjpeg={tick(t){ticks++;this.time=t/1000;},time:0,state(){return{ready:true,pending:false,seeking:false,ended:false,currentTimeSec:this.time};}};
+ preview.advanceCinematicClock(250);assert.equal(ticks,1);assert.equal(preview.cinematicClockMs,250);
+});
+test('MJPEG source replacement retires fetch before starting the next identity',async()=>{
+ const {vm,events}=setup();const oldFetch=globalThis.fetch;let resolveOld,signal,calls=0;
+ vm.usesMjpeg=true;vm.mjpegIdentity={bytes:4,sha256:'a'.repeat(64),metadata:{codec:'mjpeg',mediaType:'video/mp4',hasAudio:false,fps:15}};
+ vm.$nextTick=async()=>{};
+ globalThis.fetch=async(_src,options)=>{calls++;signal=options.signal;return new Promise(r=>resolveOld=r);};
+ try{const first=vm.loadMjpeg();for(let i=0;i<15;i++)await Promise.resolve();assert.equal(calls,1);
+ const next=vm.loadMjpeg();for(let i=0;i<10;i++)await Promise.resolve();assert.ok(signal.aborted);assert.equal(calls,1);
+ resolveOld(new Response(new Uint8Array(4)));for(let i=0;i<30;i++)await Promise.resolve();assert.equal(calls,2);
+ component.beforeDestroy.call(vm);resolveOld(new Response(new Uint8Array(4)));await Promise.all([first,next]);assert.deepEqual(events,[]);
+ }finally{globalThis.fetch=oldFetch;component.beforeDestroy.call(vm);}
+});
+test('changing from MJPEG identity to legacy mode retires the old adapter',()=>{
+ const {vm}=setup();let reloads=0;vm.usesMjpeg=false;vm._mjpeg={};vm.loadMjpeg=()=>reloads++;component.watch.mjpegIdentity.handler.call(vm);assert.equal(reloads,1);
+});
+test('MJPEG timeout disposes its buffer and reports the selected URL',()=>{
+ const {vm,events}=setup();let disposed=0;vm._mjpeg={dispose(){disposed++;},state(){return{ready:false};}};vm.usesMjpeg=true;
+ const oldSet=globalThis.setTimeout,oldClear=globalThis.clearTimeout;let timeout;
+ globalThis.setTimeout=fn=>{timeout=fn;return 42;};globalThis.clearTimeout=()=>{};
+ try{vm.armLoadDeadline();timeout();assert.equal(disposed,1);assert.equal(events[0][1].src,vm.src);assert.match(events[0][1].message,/timed out/);}finally{globalThis.setTimeout=oldSet;globalThis.clearTimeout=oldClear;}
+});
+
+test('MJPEG canvas preserves contain and cover geometry for unequal source and rect',()=>{
+ for(const [fit,expected] of [['contain',[50,0,100,100]],['cover',[0,-50,200,200]]]){
+  const {vm}=setup();vm.usesMjpeg=true;vm.usesChromaKey=false;vm.positionStyle={objectFit:fit};vm.$el={clientWidth:200,clientHeight:100};
+  let draw;const canvas={getContext:()=>({clearRect(){},drawImage(...args){draw=args.slice(1);},getImageData(){return{data:new Uint8ClampedArray(200*100*4).fill(255)};},putImageData(){}})};
+  assert.ok(vm.renderFrame({width:100,height:100},canvas));assert.deepEqual(draw,expected);
+ }
+});
+test('MJPEG replay does not hide a failed source while waiting for explicit media retry',()=>{
+ const {vm}=setup();vm.usesMjpeg=true;vm.errorMessage='SHA-256 mismatch';vm._mjpeg={disposed:true};
+ component.watch.replayNonce.call(vm);assert.equal(vm.errorMessage,'SHA-256 mismatch');
+});
+
+async function completedMjpeg() {
+ const { MjpegPlayback } = await import(url(playback));
+ const identity = JSON.parse(readFileSync(new URL('../fixtures/mjpeg/current-flyIn.json', import.meta.url)));
+ const bytes = readFileSync(new URL('../fixtures/mjpeg/current-flyIn.mp4', import.meta.url));
+ let now = 0;
+ const player = new MjpegPlayback({ src: '/exact.mp4', identity, mode: 'once', crypto: webcrypto,
+   fetcher: async () => new Response(bytes), now: () => now,
+   decode: async () => ({ width: 240, height: 240, close() {} }), present: () => true });
+ await player.load(); player.seek(3.2); await player.settled(); assert.equal(player.ended, true);
+ const { vm } = setup();
+ Object.assign(vm, { usesMjpeg: true, _mjpeg: player, transportMaster: true, playing: true });
+ return { vm, player, tick: time => player.tick(now = time) };
+}
+
+for (const target of [0, 1000]) {
+ test(`completed MJPEG immediately seeks to ${target} and retains actual component Play intent`, async () => {
+   const { vm, player, tick } = await completedMjpeg();
+   try {
+     vm.clockMs = target; vm.syncPlayback(true);
+     await player.settled(); assert.equal(player.playing, true);
+     tick(100); tick(300); await player.settled();
+     assert.ok(player.time > target / 1000);
+   } finally { await player.dispose(); }
+ });
+}
+
+for (const action of ['pause', 'dispose', 'repeat', 'decode-error']) {
+ test(`completed MJPEG replay respects ${action} while seek is pending`, async () => {
+   const { vm, player, tick } = await completedMjpeg();
+   let settle, closes = 0;
+   player.decode = () => new Promise((resolve, reject) => { settle = { resolve, reject }; });
+   vm.clockMs = 1000; vm.syncPlayback(true);
+   while (!settle) await Promise.resolve();
+   if (action === 'pause') { vm.playing = false; vm.syncPlayback(); }
+   if (action === 'dispose') component.beforeDestroy.call(vm);
+   if (action === 'repeat') { vm.syncPlayback(); vm.syncPlayback(); }
+   if (action === 'decode-error') settle.reject(new Error('decode failed'));
+   else settle.resolve({ width: 240, height: 240, close() { closes++; } });
+   await player.settled();
+   assert.equal(player.playing, action === 'repeat');
+   if (action !== 'repeat') { const time = player.time; tick(100); tick(300); assert.equal(player.time, time); }
+   if (action === 'dispose' || action === 'decode-error') assert.equal(player.bytes, null);
+   assert.equal(closes, action === 'decode-error' ? 0 : 1);
+   await player.dispose();
+ });
+}
+
+test('Play alone preserves MJPEG once-final hold without an explicit seek', async () => {
+ const { vm, player, tick } = await completedMjpeg();
+ vm.syncPlayback(); tick(100); tick(300); await player.settled();
+ assert.equal(player.ended, true); assert.equal(player.playing, false); assert.equal(player.time, 3.2);
+ await player.dispose();
 });

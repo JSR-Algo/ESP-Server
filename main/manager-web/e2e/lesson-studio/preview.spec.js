@@ -129,34 +129,19 @@ test('@diagnostic @s08 saved v5 candidate exposes actual media failures (not vis
   const preview = page.locator('.robot-preview').first();
   await expect(preview).toContainText('image failed to load/decode');
   const evidence = {lessonId:lesson.id,checksum:response.checksum,manifest:response.manifest,persisted,transport:'direct selected HTTP media origin; no network interception',browserName,captures:[]};
-  if(browserName==='chromium') {
-    await expect(preview).toContainText('failed to load/decode. A verified browser representation is required');
-    await stage.screenshot({path:testInfo.outputPath('chromium-real-decode-error.png')});
-  } else {
-    const video = stage.locator('video');
+  const robotLayer = stage.locator('.layer-robotOverlay');
+  const mediaState = () => robotLayer.evaluate(el => el.__vue__.mediaPlaybackState());
     for (const phase of response.manifest.cinematicPhases.filter(p=>p.activityIds.includes(response.manifest.steps[0].activityId||response.manifest.steps[0].id))) {
       await preview.getByRole('button',{name:phase.phaseId,exact:true}).click();
       const robot = phase.layers.find(l=>l.slot==='robotOverlay');
       const asset = response.manifest.assets.find(a=>a.assetKey===robot.assetKey && a.version===robot.version && a.sha256===robot.sha256);
-      await expect(video).toHaveAttribute('src',asset.url);
-      await expect.poll(()=>video.evaluate(v=>v.readyState)).toBeGreaterThanOrEqual(2);
-      const rawPixels = await video.evaluate(v => {
-        const canvas = document.createElement('canvas'); canvas.width = v.videoWidth; canvas.height = v.videoHeight;
-        const context = canvas.getContext('2d'); context.drawImage(v,0,0);
-        return context.getImageData(0,0,canvas.width,canvas.height).data.some((value,index) => index % 4 === 3 && value > 0);
-      });
-      if (!rawPixels) {
-        await expect(preview).toContainText('has no decoded frame');
-        const file = `${phase.phaseId}-decode-error.png`;
-        await stage.screenshot({path:testInfo.outputPath(file)});
-        evidence.captures.push({phaseId:phase.phaseId,file,sourceSha256:robot.sha256,decoded:false});
-        continue;
-      }
+      await expect(robotLayer).toHaveAttribute('data-source-url',asset.url);
+      await expect.poll(async()=> (await mediaState()).ready).toBe(true);
       expect(await stage.locator('.layer-robotOverlay').evaluate(el=>getComputedStyle(el).animationName)).toBe('none');
       for(const [label,frame] of [['first',0],['middle',Math.floor(robot.metadata.frameCount/2)],['final',robot.metadata.frameCount-1]]) {
         const ms=Math.ceil(frame*1000/robot.metadata.fps);
         await preview.locator('input[type=range]').fill(String(ms));
-        await expect.poll(()=>video.evaluate(v=>v.currentTime)).toBeCloseTo(ms/1000,1);
+        await expect.poll(()=>mediaState().then(state=>state.currentTimeSec)).toBeCloseTo(ms/1000,1);
         await page.waitForTimeout(150);
         // A blank character canvas cannot qualify a decoded storyboard checkpoint.
         // The exact exit tail is intentionally green before chroma keying.
@@ -169,8 +154,7 @@ test('@diagnostic @s08 saved v5 candidate exposes actual media failures (not vis
       }
     }
     await preview.getByRole('button',{name:'Replay',exact:false}).click();
-    await expect.poll(()=>video.evaluate(v=>v.currentTime)).toBe(0);
-  }
+    await expect.poll(()=>mediaState().then(state=>state.currentTimeSec)).toBe(0);
   fs.writeFileSync(testInfo.outputPath('candidate-preview.json'),JSON.stringify(evidence,null,2));
   await page.goto('/#/courses');
   await page.unrouteAll({behavior:'wait'});
