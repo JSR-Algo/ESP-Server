@@ -3574,6 +3574,12 @@ class LessonRuntime:
             ),
             deadline=time.monotonic() + grace_sec,
             trace={"sessionEpoch": getattr(lease, "session_epoch", None)},
+            # D10 — the two fields that make the intent meaningful in ANOTHER
+            # process. The MAC lets a recovered close mint its own device token
+            # (a persisted JWT would likely have expired); the wall-clock deadline
+            # is what a monotonic one cannot be across a restart.
+            device_mac=str(getattr(self.conn, "device_id", "") or "").strip().lower(),
+            deadline_ms=int(time.time() * 1000) + int(grace_sec * 1000),
         )
         try:
             get_disconnect_abandonment_reaper(self.logger).register(intent)

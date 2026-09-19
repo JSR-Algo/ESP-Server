@@ -21,6 +21,7 @@ except ModuleNotFoundError:
 from config.config_loader import get_project_dir, load_config_async
 from config.logger import setup_logging
 from core.http_server import SimpleHttpServer
+from core.lesson.disconnect_abandonment import recover_disconnect_abandonment_intents
 from core.lesson.global_generation_poller import GlobalGenerationPoller
 from core.lesson.global_generation_sessions import GlobalGenerationSessions
 from core.lesson.global_generation_status import GlobalGenerationStatus
@@ -318,6 +319,19 @@ async def main():
     ws_task = asyncio.create_task(ws_server.start())
     ota_task = asyncio.create_task(ota_server.start())
 
+    # D10 (owner-decisions-20260919.md): re-arm every disconnect-abandonment close
+    # that was armed before this process started. D8's close lived in process memory,
+    # so a restart inside the grace window lost it and reopened the hole D8 closes.
+    #
+    # Deliberately a background task rather than an await: a Redis that is slow or
+    # down must delay no child's lesson, and `recover_with_retry` is explicitly
+    # designed to keep trying and to say so loudly if it never succeeds. It is
+    # started AFTER the websocket server so a robot that reconnects immediately
+    # claims its intent through the ordinary bind path rather than racing the boot.
+    recovery_task = asyncio.create_task(
+        recover_disconnect_abandonment_intents(logger)
+    )
+
     read_config_from_api = config.get("read_config_from_api", False)
     port = int(config["server"].get("http_port", 8003))
     if not read_config_from_api:
@@ -400,6 +414,7 @@ async def main():
         # Cancel all tasks.
         stdin_task.cancel()
         ws_task.cancel()
+        recovery_task.cancel()
         if ota_task:
             ota_task.cancel()
 

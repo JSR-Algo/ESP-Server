@@ -74,6 +74,47 @@ that, and none of them relies on the others:
    a cancelled assignment can never take one — which is D3's zero-reward rule
    holding by construction rather than by a second check.
 
+D10 — the intent must survive an esp32-server restart
+-----------------------------------------------------
+Owner decision D10 (2026-09-20). The four layers above are all correct and all live
+in `self._intents`, which is process memory: an esp32-server restart inside the grace
+window lost every armed close and reopened the hole D8 exists to close. D10 makes the
+intent durable **following `liveness_lease.py`'s precedent**, which solved the
+identical problem for the session-epoch counter and says so in its own docstring.
+
+What is reused, deliberately: the two-ledger shape (`InMemoryIntentLedger` /
+`RedisIntentLedger` with a `durable` class attribute), the `get_*` / `reset_*`
+process-wide resolution, the `REDIS_URL` + `TBOT_LIVE_REDIS_NAMESPACE` wiring, the
+`{namespace}:{subsystem}:{id}` key convention, the fall-back-to-memory-when-the-client
+-cannot-be-built behaviour, and the wall-clock `_now_ms()` stamp that makes a value
+meaningful in another process.
+
+What deviates, and why, each stated beside its constant: these keys carry a TTL (an
+intent is an event, not a counter, and a record that outlives every use is garbage);
+there is an index set (recovery must enumerate, a lease lookup never does); and there
+is a per-assignment binding guard (a session-keyed claim cannot tell a recovered close
+that a NEW session took the assignment over). The record also omits the device token
+on purpose — see `DisconnectAbandonmentIntent.to_record`.
+
+Two failure decisions are made explicitly rather than left to emerge, because "an
+armed close that silently vanishes because Redis blinked is the same defect in a new
+place":
+
+* **Redis unavailable at ARM time** — the close is armed in memory anyway and the
+  telemetry says `durable: false` (`persist`). Refusing to arm would leave the
+  assignment RUNNING forever, which is the D8 hole itself; "fail closed" here would
+  mean failing *into* the defect. The store is then retried on the reaper's own loop
+  while Redis stays configured, so a blink costs seconds of exposure, not the life of
+  the intent.
+* **Redis unavailable at RECOVERY time** — "read it and it was empty" and "could not
+  read it" are different events (`recover`). A failed read is retried on a bounded
+  schedule at ERROR, and the final line states that armed closes may have been lost.
+
+And two recovery guarantees: a recovered close goes through every fence an in-process
+one does (it is re-armed, never re-fired blind), and it additionally refuses an
+assignment a different session has since bound to — so a restart can neither
+double-close nor steal a live lesson.
+
 The stored reason
 -----------------
 `"disconnected"`, deliberately, and deliberately **not** `"child_inactive"`. The
@@ -94,6 +135,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Tuple
@@ -139,6 +181,63 @@ DISCONNECT_ABANDONMENT_GRACE_MAX_SEC = 1800.0
 #: retry would turn a backend outage into an unbounded in-memory intent set.
 DISCONNECT_ABANDONMENT_MAX_ATTEMPTS = 4
 DISCONNECT_ABANDONMENT_RETRY_BACKOFF_SEC = 5.0
+
+# ── D10: the durable ledger's constants ───────────────────────────────────────
+#
+# Owner decision D10 (owner-decisions-20260919.md): "make the armed intent durable,
+# following that precedent rather than inventing a second mechanism". The precedent
+# is `liveness_lease.py`, whose module docstring states the identical problem in the
+# identical words: "If the counter lived in this process's memory, a server restart
+# mid-lesson — one of the exact failures the lease is supposed to guard — would reset
+# it". An armed close that lives only in `self._intents` has exactly that defect.
+#
+# KEY CONVENTION, taken from RedisLeaseLedger._key
+# (`f"{namespace}:lesson-liveness-epoch:{device_id}"`): `{namespace}:{prefix}:{kind}:{id}`,
+# namespace from TBOT_LIVE_REDIS_NAMESPACE, default "prod".
+DISCONNECT_ABANDONMENT_LEDGER_PREFIX = "lesson-disconnect-abandonment"
+
+#: Record schema version. Written into every record so a future shape change can be
+#: recognised and skipped rather than half-read into a close.
+DISCONNECT_ABANDONMENT_RECORD_SCHEMA = 1
+
+# DELIBERATE DEVIATION FROM THE PRECEDENT, #1 — these keys DO expire.
+# `RedisLeaseLedger` says "The key is deliberately **not** given a TTL: expiring it
+# would silently restart the counter". That reasoning is correct for a monotonic
+# counter and wrong for an intent. An intent is an event with a deadline: once the
+# close has fired, been claimed or been skipped, its record is garbage, and garbage
+# that never expires accumulates without bound in a Redis this process shares with
+# other subsystems. Records are therefore deleted explicitly on every terminal
+# outcome AND carry a TTL as a backstop for the one case an explicit delete cannot
+# cover — a process that dies between firing and deleting.
+#
+# The TTL can never be the thing that loses a close, because it is set to the whole
+# grace window PLUS the entire retry budget PLUS this margin. A record is expired only
+# long after the last moment it could still have done any work.
+DISCONNECT_ABANDONMENT_RECORD_TTL_MARGIN_SEC = 3600.0
+
+# DELIBERATE DEVIATION #2 — an index key. The lease ledger only ever answers
+# "what is the epoch for THIS device", so a point lookup suffices. Recovery must
+# enumerate every armed intent with no idea what they are keyed on, so the ledger
+# keeps a SET of live record keys beside them. `load` prunes index members whose
+# record has expired, so the index cannot outgrow the records it points at.
+#
+# DELIBERATE DEVIATION #3 — a per-assignment binding guard, with its own TTL. D8's
+# claim is by `(assignmentId, sessionId)` and D10 must preserve that, so a claim
+# cannot by itself tell a recovered close that a DIFFERENT session has since taken
+# over the same assignment. The guard records the session a runtime last bound to an
+# assignment, and a recovered close refuses to fire when that is somebody else. Its
+# TTL is generous but finite: it is a safety interlock, not a record of truth.
+DISCONNECT_ABANDONMENT_BINDING_TTL_SEC = 7200.0
+
+#: Recovery retry schedule when the ledger cannot be read at boot. Bounded and
+#: explicit: a recovery that quietly reports "0 armed closes" because Redis was down
+#: is the D10 defect wearing a different hat, so each failure is logged at error and
+#: the last one says, in one line, that armed closes may have been lost.
+DISCONNECT_ABANDONMENT_RECOVERY_BACKOFF_SEC = (5.0, 15.0, 45.0, 120.0)
+
+#: How often the reaper retries persisting an intent that is armed but not yet
+#: durable (Redis was down at arm time and is configured, so it may come back).
+DISCONNECT_ABANDONMENT_REPERSIST_INTERVAL_SEC = 15.0
 
 
 class DisconnectAbandonmentGraceConfigError(ValueError):
@@ -221,9 +320,114 @@ class DisconnectAbandonmentIntent:
     registered_at: float = 0.0
     trace: Dict[str, Any] = field(default_factory=dict)
 
+    # ── D10 ───────────────────────────────────────────────────────────────────
+    #: The robot's MAC. Persisted so a RECOVERED intent can mint its own device
+    #: token instead of carrying one across a restart. See `to_record`.
+    device_mac: str = ""
+    #: The deadline in WALL-CLOCK epoch ms, beside the monotonic `deadline`.
+    #: `time.monotonic()` is undefined across processes — a restart would turn a
+    #: 90 s grace into an arbitrary one — so the durable copy uses the same
+    #: `_now_ms()` wall clock `liveness_lease.Lease.issued_at_ms` already uses for
+    #: exactly the cross-process case.
+    deadline_ms: int = 0
+    #: True when this intent came back from the ledger rather than from a teardown
+    #: in this process. Recovered intents take one extra fence (the binding guard)
+    #: and must mint a token, so the distinction is carried rather than inferred.
+    recovered: bool = False
+    #: True once the ledger has actually stored this intent. False means the close
+    #: is armed in memory ONLY and will not survive a restart — which is reported,
+    #: never silent. See `DisconnectAbandonmentReaper.persist`.
+    durable: bool = False
+    #: Whether the non-durable warning has already been emitted for this intent.
+    #: The store is retried on a timer, so without this one Redis outage would
+    #: produce one identical warning line per retry for every armed session — which
+    #: is how a real signal gets filtered out. Counted once, logged once, retried
+    #: silently; `persist_failed` still counts every attempt.
+    non_durable_reported: bool = False
+
     @property
     def key(self) -> Tuple[str, str]:
         return (self.assignment_id, self.session_id)
+
+    def to_record(self) -> Dict[str, Any]:
+        """The durable form. JSON-serialisable, and deliberately WITHOUT the token.
+
+        The device JWT is omitted on purpose, for two independent reasons:
+
+        1. **It would not work.** Backend device tokens are valid for 15 minutes
+           (`device_token_client._BACKEND_TOKEN_TTL_S`). A 90 s grace plus a restart
+           plus a retry budget can outlive that, so a persisted token is a token that
+           may already be dead when the close finally posts.
+        2. **A ledger is not a place for a bearer.** The MAC is a hardware identifier
+           the config already carries in plain text (`LESSON_ROLLOUT_DEVICE_ALLOWLIST`);
+           a JWT is a credential. A recovered intent mints a fresh one the way every
+           other recovery path in this tree does, through
+           `device_token_client.resolve_device_identity`.
+        """
+        return {
+            "schema": DISCONNECT_ABANDONMENT_RECORD_SCHEMA,
+            "assignmentId": self.assignment_id,
+            "sessionId": self.session_id,
+            "deviceId": self.device_id,
+            "deviceMac": self.device_mac,
+            "baseUrl": self.base_url,
+            "batch": self.batch,
+            "deadlineMs": int(self.deadline_ms),
+            "attempts": int(self.attempts),
+            "trace": self.trace or {},
+        }
+
+    @classmethod
+    def from_record(
+        cls,
+        record: Any,
+        *,
+        now_ms: Optional[int] = None,
+        now_monotonic: Optional[float] = None,
+    ) -> Optional["DisconnectAbandonmentIntent"]:
+        """Rebuild an intent from a ledger record, or ``None`` when it is unusable.
+
+        Returns ``None`` rather than raising for anything malformed or of an unknown
+        schema: one corrupt record must not stop recovery of the rest, and a record
+        this build cannot read is not a record it may act on.
+
+        The wall-clock deadline is translated back into this process's monotonic
+        clock. A deadline already in the past (the usual case after a restart that
+        outlasted the grace) becomes *now*, so the intent is due immediately and goes
+        straight through the ordinary pre-fire fences — it is never fired blind.
+        """
+        if not isinstance(record, dict):
+            return None
+        if int(record.get("schema") or 0) != DISCONNECT_ABANDONMENT_RECORD_SCHEMA:
+            return None
+        assignment_id = str(record.get("assignmentId") or "")
+        session_id = str(record.get("sessionId") or "")
+        batch = record.get("batch")
+        if not assignment_id or not session_id or not isinstance(batch, dict):
+            return None
+        deadline_ms = _coerce_int(record.get("deadlineMs")) or 0
+        now_ms_value = _now_ms() if now_ms is None else int(now_ms)
+        now_monotonic_value = (
+            time.monotonic() if now_monotonic is None else float(now_monotonic)
+        )
+        remaining_sec = max(0.0, (deadline_ms - now_ms_value) / 1000.0)
+        trace = record.get("trace")
+        return cls(
+            assignment_id=assignment_id,
+            session_id=session_id,
+            device_id=str(record.get("deviceId") or ""),
+            base_url=str(record.get("baseUrl") or ""),
+            token=None,
+            batch=batch,
+            deadline=now_monotonic_value + remaining_sec,
+            attempts=_coerce_int(record.get("attempts")) or 0,
+            registered_at=now_monotonic_value,
+            trace=trace if isinstance(trace, dict) else {},
+            device_mac=str(record.get("deviceMac") or ""),
+            deadline_ms=deadline_ms,
+            recovered=True,
+            durable=True,
+        )
 
 
 def build_disconnect_abandonment_batch(
@@ -263,6 +467,180 @@ def build_disconnect_abandonment_batch(
     return {key: value for key, value in batch.items() if value is not None}
 
 
+# ── D10: the ledgers ──────────────────────────────────────────────────────────
+#
+# Shaped on `liveness_lease.py`'s pair, because D10 says to follow that precedent
+# rather than invent a second mechanism. Same two classes, same `durable` class
+# attribute, same `get_*` / `reset_*` process-wide resolution, same REDIS_URL +
+# TBOT_LIVE_REDIS_NAMESPACE wiring, same "fall back to memory when the client cannot
+# be built" behaviour. The differences are the three deviations documented beside the
+# constants above (TTL, index, binding guard) plus the verb set: a counter needs
+# `issue`/`current`; an intent set needs put/drop/load.
+
+
+class InMemoryIntentLedger:
+    """Process-memory intent store. NOT restart-safe — which is the D10 defect.
+
+    Kept, exactly as `InMemoryLeaseLedger` is kept, as the dev/test fallback for a
+    deployment with no `REDIS_URL`. `durable` is ``False`` so the reaper can say so in
+    the armed telemetry instead of quietly offering theatre.
+    """
+
+    durable = False
+
+    def __init__(self) -> None:
+        self._records: Dict[str, Dict[str, Any]] = {}
+        self._bindings: Dict[str, str] = {}
+
+    @staticmethod
+    def _key(assignment_id: str, session_id: str) -> str:
+        return f"{assignment_id}\x1f{session_id}"
+
+    async def put(self, intent: "DisconnectAbandonmentIntent", *, ttl_sec: float) -> None:
+        self._records[self._key(intent.assignment_id, intent.session_id)] = intent.to_record()
+
+    async def drop(self, assignment_id: str, session_id: str) -> None:
+        self._records.pop(self._key(assignment_id, session_id), None)
+
+    async def load(self) -> Tuple[Dict[str, Any], ...]:
+        return tuple(self._records.values())
+
+    async def note_binding(self, assignment_id: str, session_id: str) -> None:
+        self._bindings[str(assignment_id)] = str(session_id)
+
+    async def binding(self, assignment_id: str) -> Optional[str]:
+        return self._bindings.get(str(assignment_id))
+
+
+class RedisIntentLedger:
+    """Redis-backed intent store — the durable arm of D10.
+
+    The same Redis `RedisLeaseLedger` already depends on: `--appendonly yes` over a
+    host-mounted volume, in a container separate from the server it guards, so the
+    ledger outlives both an esp32-server process restart and a full stack redeploy.
+
+    Three keys per namespace:
+
+    * ``{ns}:lesson-disconnect-abandonment:intent:{assignmentId}:{sessionId}``
+      — one JSON record, TTL'd far beyond its own usefulness (see the constants).
+    * ``{ns}:lesson-disconnect-abandonment:index`` — a SET of live record keys, so
+      recovery can enumerate without a `KEYS` scan over a shared database.
+    * ``{ns}:lesson-disconnect-abandonment:binding:{assignmentId}`` — the session a
+      runtime most recently bound to that assignment.
+
+    Every method is allowed to raise. The reaper, not the ledger, decides what a
+    Redis failure means at each call site, and those decisions are the explicit
+    behaviour D10 asks for rather than a swallowed exception.
+    """
+
+    durable = True
+
+    def __init__(self, redis: Any, *, namespace: str = "prod") -> None:
+        self.redis = redis
+        self.namespace = str(namespace or "prod")
+
+    def _record_key(self, assignment_id: str, session_id: str) -> str:
+        return (
+            f"{self.namespace}:{DISCONNECT_ABANDONMENT_LEDGER_PREFIX}:intent:"
+            f"{assignment_id}:{session_id}"
+        )
+
+    def _index_key(self) -> str:
+        return f"{self.namespace}:{DISCONNECT_ABANDONMENT_LEDGER_PREFIX}:index"
+
+    def _binding_key(self, assignment_id: str) -> str:
+        return (
+            f"{self.namespace}:{DISCONNECT_ABANDONMENT_LEDGER_PREFIX}:binding:{assignment_id}"
+        )
+
+    async def put(self, intent: "DisconnectAbandonmentIntent", *, ttl_sec: float) -> None:
+        key = self._record_key(intent.assignment_id, intent.session_id)
+        payload = json.dumps(
+            intent.to_record(), ensure_ascii=False, separators=(",", ":"), default=str
+        )
+        # Index first. An index member whose record is missing is pruned harmlessly by
+        # `load`; a record no index member points at would be invisible to recovery,
+        # which is the failure that matters.
+        await self.redis.sadd(self._index_key(), key)
+        await self.redis.set(key, payload, ex=max(1, int(ttl_sec)))
+
+    async def drop(self, assignment_id: str, session_id: str) -> None:
+        key = self._record_key(assignment_id, session_id)
+        await self.redis.delete(key)
+        await self.redis.srem(self._index_key(), key)
+
+    async def load(self) -> Tuple[Dict[str, Any], ...]:
+        members = await self.redis.smembers(self._index_key())
+        keys = sorted(_as_text(member) for member in (members or []))
+        records = []
+        stale = []
+        for key in keys:
+            raw = await self.redis.get(key)
+            if raw is None:
+                stale.append(key)
+                continue
+            try:
+                parsed = json.loads(_as_text(raw))
+            except (TypeError, ValueError):
+                stale.append(key)
+                continue
+            if isinstance(parsed, dict):
+                records.append(parsed)
+            else:
+                stale.append(key)
+        if stale:
+            await self.redis.srem(self._index_key(), *stale)
+        return tuple(records)
+
+    async def note_binding(self, assignment_id: str, session_id: str) -> None:
+        await self.redis.set(
+            self._binding_key(str(assignment_id)),
+            str(session_id),
+            ex=max(1, int(DISCONNECT_ABANDONMENT_BINDING_TTL_SEC)),
+        )
+
+    async def binding(self, assignment_id: str) -> Optional[str]:
+        raw = await self.redis.get(self._binding_key(str(assignment_id)))
+        return None if raw is None else _as_text(raw)
+
+
+_DEFAULT_LEDGER: Any = None
+
+
+def get_intent_ledger() -> Any:
+    """Resolve the process-wide ledger: Redis when configured, memory otherwise.
+
+    Byte-for-byte the same resolution `liveness_lease.get_lease_ledger` performs,
+    including the same environment variables, so a deployment that made the lease
+    durable has already made this durable and no second operational step exists.
+    """
+    global _DEFAULT_LEDGER
+    if _DEFAULT_LEDGER is not None:
+        return _DEFAULT_LEDGER
+    _DEFAULT_LEDGER = _build_intent_ledger()
+    return _DEFAULT_LEDGER
+
+
+def reset_intent_ledger(ledger: Any = None) -> None:
+    """Test seam — swap or clear the process-wide ledger."""
+    global _DEFAULT_LEDGER
+    _DEFAULT_LEDGER = ledger
+
+
+def _build_intent_ledger() -> Any:
+    url = os.getenv("REDIS_URL")
+    if not url:
+        return InMemoryIntentLedger()
+    try:
+        from redis import asyncio as redis_asyncio
+
+        client = redis_asyncio.from_url(url, decode_responses=True)
+    except Exception:
+        return InMemoryIntentLedger()
+    namespace = os.getenv("TBOT_LIVE_REDIS_NAMESPACE", "prod")
+    return RedisIntentLedger(client, namespace=namespace)
+
+
 # ── the reaper ────────────────────────────────────────────────────────────────
 
 
@@ -283,6 +661,9 @@ class DisconnectAbandonmentReaper:
         sleep: Any = None,
         max_attempts: int = DISCONNECT_ABANDONMENT_MAX_ATTEMPTS,
         retry_backoff_sec: float = DISCONNECT_ABANDONMENT_RETRY_BACKOFF_SEC,
+        ledger: Any = None,
+        token_fn: Any = None,
+        now_ms_fn: Any = None,
     ) -> None:
         self._logger = logger
         self._post_fn = post_fn
@@ -295,6 +676,18 @@ class DisconnectAbandonmentReaper:
         self._task: Optional[asyncio.Task] = None
         self._wake: Optional[asyncio.Event] = None
         self._closed = False
+        # D10 — the durable arm. Resolved lazily so importing this module never
+        # builds a Redis client, and injectable so every test drives a real ledger
+        # object rather than a patched global.
+        self._ledger = ledger
+        self._token_fn = token_fn
+        self._now_ms = now_ms_fn or _now_ms
+        self._side_tasks: set = set()
+        self._recovered = False
+        # Seeded from the clock, not from zero: otherwise the loop's very first
+        # iteration always retries a store that `register` has only just attempted,
+        # which doubles every persist failure in the counters for no benefit.
+        self._last_repersist = self._clock()
         # Observability without a parser per call site, mirroring liveness_lease.
         self.counters: Dict[str, int] = {
             "registered": 0,
@@ -302,7 +695,279 @@ class DisconnectAbandonmentReaper:
             "closed": 0,
             "skipped_already_terminal": 0,
             "failed": 0,
+            # D10
+            "armed_non_durable": 0,
+            "persisted": 0,
+            "persist_failed": 0,
+            "recovered": 0,
+            "recovery_failed": 0,
+            "skipped_superseded_session": 0,
         }
+
+    # -- D10: the durable arm ---------------------------------------------------
+
+    @property
+    def ledger(self) -> Any:
+        if self._ledger is None:
+            self._ledger = get_intent_ledger()
+        return self._ledger
+
+    def _spawn(self, coro: Any) -> None:
+        """Run a ledger coroutine beside the caller, or drop it with a reason.
+
+        `register` and `claim` are synchronous — they are called from a teardown and
+        from `LessonRuntime.__init__` respectively — so the ledger write cannot be
+        awaited inline. Without a running loop (a synchronous teardown in a test)
+        there is nothing to schedule onto, and that is reported as a non-durable arm
+        rather than swallowed.
+        """
+        try:
+            task = asyncio.ensure_future(coro)
+        except RuntimeError:
+            coro.close()
+            return
+        self._side_tasks.add(task)
+        task.add_done_callback(self._side_tasks.discard)
+
+    def _record_ttl_sec(self, intent: DisconnectAbandonmentIntent) -> float:
+        """Grace remaining + the whole retry budget + the margin. See the constants."""
+        remaining = max(0.0, intent.deadline - self._clock())
+        retry_budget = self._retry_backoff_sec * self._max_attempts * self._max_attempts
+        return remaining + retry_budget + DISCONNECT_ABANDONMENT_RECORD_TTL_MARGIN_SEC
+
+    async def persist(self, intent: DisconnectAbandonmentIntent) -> bool:
+        """Store one armed intent. Never raises; reports what happened.
+
+        **THE REDIS-UNAVAILABLE DECISION, AT ARM TIME.** This is deliberate, and it is
+        the opposite of the fail-closed choice D2 and D8 make for their configuration
+        values, for a reason that is worth stating rather than leaving to inference.
+
+        Refusing to arm when the ledger is unavailable would mean the assignment stays
+        RUNNING forever — which is precisely the hole D8 exists to close. "Fail closed"
+        there would be failing *into* the defect. So the close is always armed in
+        memory, and the ledger is best-effort **but never silent**:
+
+        * a successful store sets `intent.durable = True`;
+        * a failure, or a ledger that is in-memory to begin with, leaves it False,
+          increments `armed_non_durable`, and logs
+          `lesson_disconnect_abandonment_armed_non_durable` at WARNING naming the
+          session and the reason;
+        * while the ledger is durable-capable, the reaper keeps retrying the store on
+          its own loop (`_repersist_pending`), so an arm that lands during a Redis
+          blink becomes durable as soon as Redis returns instead of staying degraded
+          for the life of the intent.
+
+        The armed close therefore never vanishes because of Redis: at worst it loses
+        restart survival, and an operator can see exactly which sessions are exposed.
+        """
+        ledger = self.ledger
+        if not getattr(ledger, "durable", False):
+            if intent.durable:
+                return True
+            self._report_non_durable(intent, reason="ledger_not_durable",
+                                     ledger=type(ledger).__name__)
+            return False
+        try:
+            await ledger.put(intent, ttl_sec=self._record_ttl_sec(intent))
+        except Exception as exc:
+            intent.durable = False
+            self.counters["persist_failed"] += 1
+            self._report_non_durable(
+                intent, reason="ledger_unavailable", error=type(exc).__name__
+            )
+            return False
+        if not intent.durable:
+            intent.durable = True
+            intent.non_durable_reported = False
+            self.counters["persisted"] += 1
+            self._log("info", "lesson_disconnect_abandonment_persisted", intent)
+        return True
+
+    def _report_non_durable(self, intent: DisconnectAbandonmentIntent, **fields: Any) -> None:
+        """Say once, per intent, that this close will not survive a restart."""
+        intent.durable = False
+        if intent.non_durable_reported:
+            return
+        intent.non_durable_reported = True
+        self.counters["armed_non_durable"] += 1
+        self._log(
+            "warning", "lesson_disconnect_abandonment_armed_non_durable", intent, **fields
+        )
+
+    async def forget(self, intent: DisconnectAbandonmentIntent) -> None:
+        """Delete a record whose intent reached a terminal outcome. Never raises.
+
+        A delete that fails is harmless: the record's TTL removes it eventually, and a
+        record that outlives its intent is re-read by a later recovery and then
+        *skipped* by the pre-fire read-back, which is the same fence a duplicate
+        would have hit anyway.
+        """
+        try:
+            await self.ledger.drop(intent.assignment_id, intent.session_id)
+        except Exception as exc:
+            self._log(
+                "warning",
+                "lesson_disconnect_abandonment_forget_failed",
+                intent,
+                error=type(exc).__name__,
+            )
+
+    async def note_binding(self, assignment_id: Any, session_id: Any) -> None:
+        """Record that a runtime is bound to `(assignmentId, sessionId)`. Never raises.
+
+        This is the assignment-level interlock a session-keyed claim cannot provide.
+        D8's claim is by `(assignmentId, sessionId)` and D10 preserves that exactly; a
+        recovered close for an OLD session must additionally not fire when a NEW
+        session has taken the assignment over, and only an assignment-keyed marker can
+        say so.
+        """
+        if not assignment_id or not session_id:
+            return
+        try:
+            await self.ledger.note_binding(str(assignment_id), str(session_id))
+        except Exception:
+            # Best-effort. Losing the guard costs a recovered close one extra fence,
+            # never a wrong close: the pre-fire read-back still runs.
+            pass
+
+    async def recover(self) -> Dict[str, Any]:
+        """Re-arm every intent the ledger still holds. Idempotent; safe to call twice.
+
+        **THE REDIS-UNAVAILABLE DECISION, AT RECOVERY TIME.** A recovery that reports
+        "0 armed closes" because it could not read the ledger is the same defect D10
+        exists to remove, so "read it and it was empty" and "could not read it" are
+        different outcomes here and are logged as different events. A failed read is
+        retried on `DISCONNECT_ABANDONMENT_RECOVERY_BACKOFF_SEC`, at ERROR each time,
+        and if every attempt fails the final line says armed closes may have been lost.
+
+        Recovered intents are re-armed, never re-fired blind: each one passes through
+        the ordinary `_fire` path with the pre-fire read-back, plus the binding guard,
+        so a restart cannot close an assignment that completed, was cancelled, or was
+        taken over by a new runtime while the server was down.
+        """
+        ledger = self.ledger
+        summary: Dict[str, Any] = {
+            "durable": bool(getattr(ledger, "durable", False)),
+            "recovered": 0,
+            "skipped": 0,
+            "available": True,
+        }
+        if not summary["durable"]:
+            # Not a failure: a deployment with no REDIS_URL chose this. Said once, at
+            # info, so "no armed closes survived the restart" is never a surprise.
+            self._log_line(
+                "info",
+                "lesson_disconnect_abandonment_recovery_skipped "
+                + json.dumps(
+                    {
+                        "event": "lesson_disconnect_abandonment_recovery_skipped",
+                        "reason": "ledger_not_durable",
+                        "ledger": type(ledger).__name__,
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+            self._recovered = True
+            return summary
+        try:
+            records = await ledger.load()
+        except Exception as exc:
+            self.counters["recovery_failed"] += 1
+            summary["available"] = False
+            summary["error"] = type(exc).__name__
+            self._log_line(
+                "error",
+                "lesson_disconnect_abandonment_recovery_failed "
+                + json.dumps(
+                    {
+                        "event": "lesson_disconnect_abandonment_recovery_failed",
+                        "error": type(exc).__name__,
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+            return summary
+        now_ms = self._now_ms()
+        now_monotonic = self._clock()
+        for record in records or ():
+            intent = DisconnectAbandonmentIntent.from_record(
+                record, now_ms=now_ms, now_monotonic=now_monotonic
+            )
+            if intent is None:
+                summary["skipped"] += 1
+                continue
+            if intent.key in self._intents:
+                # A live teardown in THIS process already armed it. The in-memory one
+                # wins: it has a token and a fresher deadline.
+                summary["skipped"] += 1
+                continue
+            self._intents[intent.key] = intent
+            self.counters["recovered"] += 1
+            summary["recovered"] += 1
+            self._log(
+                "info",
+                "lesson_disconnect_abandonment_recovered",
+                intent,
+                dueInSec=round(max(0.0, intent.deadline - now_monotonic), 3),
+                attempts=intent.attempts,
+            )
+        self._recovered = True
+        if self._intents:
+            self._ensure_task()
+            self._notify()
+        self._log_line(
+            "info",
+            "lesson_disconnect_abandonment_recovery_complete "
+            + json.dumps(
+                {
+                    "event": "lesson_disconnect_abandonment_recovery_complete",
+                    **{k: v for k, v in summary.items() if k != "error"},
+                },
+                separators=(",", ":"),
+            ),
+        )
+        return summary
+
+    async def recover_with_retry(
+        self, *, backoff: Any = DISCONNECT_ABANDONMENT_RECOVERY_BACKOFF_SEC
+    ) -> Dict[str, Any]:
+        """`recover`, retried on a bounded schedule while the ledger is unreadable."""
+        summary = await self.recover()
+        if summary.get("available"):
+            return summary
+        for delay in backoff:
+            await self._sleep(delay)
+            if self._closed:
+                return summary
+            summary = await self.recover()
+            if summary.get("available"):
+                return summary
+        self._log_line(
+            "error",
+            "lesson_disconnect_abandonment_recovery_unavailable "
+            + json.dumps(
+                {
+                    "event": "lesson_disconnect_abandonment_recovery_unavailable",
+                    "attempts": 1 + len(tuple(backoff)),
+                    "consequence": "armed disconnect closes from before this restart "
+                    "may not have been recovered",
+                },
+                separators=(",", ":"),
+            ),
+        )
+        return summary
+
+    async def _repersist_pending(self) -> None:
+        """Retry the ledger store for intents armed while Redis was unreachable."""
+        if not getattr(self.ledger, "durable", False):
+            return
+        now = self._clock()
+        if now - self._last_repersist < DISCONNECT_ABANDONMENT_REPERSIST_INTERVAL_SEC:
+            return
+        self._last_repersist = now
+        for intent in list(self._intents.values()):
+            if not intent.durable:
+                await self.persist(intent)
 
     # -- registration / claim ---------------------------------------------------
 
@@ -318,10 +983,25 @@ class DisconnectAbandonmentReaper:
             return False
         existing = self._intents.get(intent.key)
         if existing is not None:
-            existing.deadline = min(existing.deadline, intent.deadline)
+            if intent.deadline < existing.deadline:
+                existing.deadline = intent.deadline
+                existing.deadline_ms = intent.deadline_ms
+                # The durable copy carries the deadline, so a deadline that moves
+                # must be re-stored or a restart would recover the old one.
+                existing.durable = False
+                self._spawn(self.persist(existing))
+            # A repeat of an EXISTING key never re-arms and never double-closes. It
+            # also re-asserts the record, so a first arm that failed to persist gets
+            # another chance from a second teardown of the same session.
+            elif not existing.durable:
+                self._spawn(self.persist(existing))
             self._notify()
             return False
         intent.registered_at = self._clock()
+        if not intent.deadline_ms:
+            intent.deadline_ms = self._now_ms() + int(
+                max(0.0, intent.deadline - intent.registered_at) * 1000
+            )
         self._intents[intent.key] = intent
         self.counters["registered"] += 1
         self._log(
@@ -329,7 +1009,12 @@ class DisconnectAbandonmentReaper:
             "lesson_disconnect_abandonment_armed",
             intent,
             graceSec=round(max(0.0, intent.deadline - intent.registered_at), 3),
+            durable=bool(getattr(self.ledger, "durable", False)),
         )
+        # D10: make it survive this process. Scheduled rather than awaited because
+        # `register` is called from a synchronous teardown; `persist` reports the
+        # outcome on the log either way, so an arm is never silently non-durable.
+        self._spawn(self.persist(intent))
         self._ensure_task()
         self._notify()
         return True
@@ -337,10 +1022,24 @@ class DisconnectAbandonmentReaper:
     def claim(self, assignment_id: Any, session_id: Any) -> bool:
         """A live runtime owns this session again — retire any armed close.
 
-        Called from `LessonRuntime.start_protocol`, which is the one place a session
-        becomes live, on a first start and on a reconnect alike.
+        Called when a `LessonRuntime` is BOUND to a session — a first start and a
+        reconnect alike — with `start_protocol` claiming again as a backstop.
+
+        D10 adds two durable effects, and neither changes what a claim IS: the claim
+        is still by `(assignmentId, sessionId)` exactly as D8 decided.
+
+        1. The ledger record is deleted, so the claim survives this process too.
+        2. The assignment-level binding guard is written, so a close recovered from
+           the ledger for an OLDER session of the same assignment can tell that a new
+           runtime owns it and refuse to fire.
+
+        The guard is written even when nothing was armed. A robot that reconnects
+        with a NEW session after a restart never had an intent to pop here, and the
+        recovered intent for its previous session is exactly the close that must not
+        steal it.
         """
         key = (str(assignment_id or ""), str(session_id or ""))
+        self._spawn(self.note_binding(key[0], key[1]))
         intent = self._intents.pop(key, None)
         if intent is None:
             return False
@@ -350,7 +1049,9 @@ class DisconnectAbandonmentReaper:
             "lesson_disconnect_abandonment_claimed",
             intent,
             afterSec=round(max(0.0, self._clock() - intent.registered_at), 3),
+            recovered=intent.recovered,
         )
+        self._spawn(self.forget(intent))
         return True
 
     def pending_keys(self) -> Tuple[Tuple[str, str], ...]:
@@ -375,6 +1076,10 @@ class DisconnectAbandonmentReaper:
         self._wake = asyncio.Event()
         try:
             while not self._closed and self._intents:
+                # D10: an arm that could not reach Redis retries here, so a blink
+                # costs restart-survival for seconds rather than for the intent's
+                # whole life.
+                await self._repersist_pending()
                 now = self._clock()
                 due = [i for i in self._intents.values() if i.deadline <= now]
                 for intent in due:
@@ -385,6 +1090,11 @@ class DisconnectAbandonmentReaper:
                 if not self._intents:
                     break
                 horizon = min(i.deadline for i in self._intents.values()) - self._clock()
+                if any(not i.durable for i in self._intents.values()):
+                    # D10: while anything is armed-but-not-durable, wake often enough
+                    # to retry the store. Otherwise a 90 s grace would sleep straight
+                    # through a Redis outage that ended in the first second of it.
+                    horizon = min(horizon, DISCONNECT_ABANDONMENT_REPERSIST_INTERVAL_SEC)
                 self._wake.clear()
                 if horizon > 0:
                     try:
@@ -422,6 +1132,32 @@ class DisconnectAbandonmentReaper:
 
     async def _fire(self, intent: DisconnectAbandonmentIntent) -> None:
         intent.attempts += 1
+        # D10 fence — the binding guard, for RECOVERED intents only.
+        #
+        # An in-process intent cannot need it: a runtime that bound to this session
+        # popped it synchronously at `claim`. A recovered one can, and this is the
+        # "must not steal a live lesson" case D10 names: the server restarted, the
+        # robot came back and started a NEW session on the SAME assignment, and the
+        # close armed for the OLD session is still holding a deadline. The assignment
+        # read-back cannot see that — the assignment is legitimately RUNNING — so only
+        # an assignment-keyed marker can refuse it.
+        if intent.recovered and await self._superseded_by_new_session(intent):
+            self._intents.pop(intent.key, None)
+            self.counters["skipped_superseded_session"] += 1
+            self._log(
+                "info",
+                "lesson_disconnect_abandonment_skipped",
+                intent,
+                observedState="SUPERSEDED_SESSION",
+            )
+            self._spawn(self.forget(intent))
+            return
+        # D10 — a recovered intent deliberately carries no token (see `to_record`).
+        # Mint one the way every other recovery path in this tree does. A mint that
+        # fails leaves `token` None, the post then 401s, and the ordinary retry
+        # budget applies: a close is never abandoned because one mint failed.
+        if intent.token is None and intent.recovered:
+            await self._resolve_token(intent)
         try:
             terminal_state = await self._already_terminal(intent)
         except Exception as exc:  # a failed read-back must not block the close
@@ -441,6 +1177,7 @@ class DisconnectAbandonmentReaper:
                 intent,
                 observedState=terminal_state,
             )
+            self._spawn(self.forget(intent))
             return
         try:
             await self._post(intent)
@@ -455,8 +1192,14 @@ class DisconnectAbandonmentReaper:
                     attempts=intent.attempts,
                     error=type(exc).__name__,
                 )
+                # D10: the record goes too. Keeping it would make every later restart
+                # re-attempt a close this process already gave up on, forever.
+                self._spawn(self.forget(intent))
                 return
             intent.deadline = self._clock() + self._retry_backoff_sec * intent.attempts
+            intent.deadline_ms = self._now_ms() + int(
+                self._retry_backoff_sec * intent.attempts * 1000
+            )
             self._log(
                 "warning",
                 "lesson_disconnect_abandonment_retry",
@@ -464,6 +1207,10 @@ class DisconnectAbandonmentReaper:
                 attempts=intent.attempts,
                 error=type(exc).__name__,
             )
+            # D10: persist the new deadline and the attempt count, so a restart mid
+            # retry resumes the retry rather than restarting the whole budget.
+            intent.durable = False
+            self._spawn(self.persist(intent))
             self._notify()
             return
         self._intents.pop(intent.key, None)
@@ -474,8 +1221,50 @@ class DisconnectAbandonmentReaper:
             intent,
             reason=DISCONNECT_ABANDONMENT_REASON,
             attempts=intent.attempts,
+            recovered=intent.recovered,
         )
+        self._spawn(self.forget(intent))
         self._emit_disposition(intent)
+
+    async def _superseded_by_new_session(self, intent: DisconnectAbandonmentIntent) -> bool:
+        """Has a DIFFERENT session bound to this assignment since the intent was armed?
+
+        Never raises: a guard that cannot be read is treated as absent, which costs
+        the close one fence rather than making it wrong — the pre-fire read-back and
+        the backend's own 409 both still apply.
+        """
+        try:
+            bound = await self.ledger.binding(intent.assignment_id)
+        except Exception:
+            return False
+        return bool(bound) and str(bound) != str(intent.session_id)
+
+    async def _resolve_token(self, intent: DisconnectAbandonmentIntent) -> None:
+        """Mint a device token for a recovered intent. Never raises."""
+        token_fn = self._token_fn
+        try:
+            if token_fn is not None:
+                intent.token = await token_fn(intent)
+                return
+            if not intent.device_mac or not intent.base_url:
+                return
+            import httpx
+
+            from config.device_token_client import resolve_device_identity
+
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                _device_uuid, token = await resolve_device_identity(
+                    client, intent.base_url, intent.device_mac
+                )
+            if token:
+                intent.token = token
+        except Exception as exc:
+            self._log(
+                "warning",
+                "lesson_disconnect_abandonment_token_unavailable",
+                intent,
+                error=type(exc).__name__,
+            )
 
     async def _already_terminal(self, intent: DisconnectAbandonmentIntent) -> Optional[str]:
         """Read the assignment back. Returns its state when the close must be skipped.
@@ -593,6 +1382,61 @@ def reset_disconnect_abandonment_reaper(
     """Test seam — swap or clear the process-wide reaper."""
     global _DEFAULT_REAPER
     _DEFAULT_REAPER = reaper
+
+
+async def recover_disconnect_abandonment_intents(logger: Any = None) -> Dict[str, Any]:
+    """D10 boot hook — re-arm every close the ledger survived a restart with.
+
+    Called once from `app.main()`, after the servers are built and before the process
+    settles into serving. It is safe to call on a stack with no Redis (it says so and
+    returns), safe to call twice, and it never raises: a recovery that cannot run must
+    not stop the server that would otherwise serve lessons.
+    """
+    reaper = get_disconnect_abandonment_reaper(logger)
+    try:
+        return await reaper.recover_with_retry()
+    except Exception as exc:  # pragma: no cover - boot must not die on recovery
+        try:
+            reaper._log_line(
+                "error",
+                "lesson_disconnect_abandonment_recovery_crashed "
+                + json.dumps({"error": type(exc).__name__}, separators=(",", ":")),
+            )
+        except Exception:
+            pass
+        return {"durable": False, "recovered": 0, "skipped": 0, "available": False}
+
+
+# ── helpers ────────────────────────────────────────────────────────────────────
+#
+# Local copies rather than imports of `liveness_lease`'s privates: the same values,
+# the same semantics, and no new import edge between two modules that are deliberately
+# independent of each other.
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _coerce_int(value: Any) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _as_text(value: Any) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    return str(value)
 
 
 def _wire_timestamp() -> str:
