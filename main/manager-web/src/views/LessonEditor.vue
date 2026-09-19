@@ -1463,8 +1463,10 @@ export default {
       if (!this.courseModeConflictSnapshot || this.courseModeLoading) return false;
       const id = this.lessonId;
       const snapshot = this.courseModeConflictSnapshot;
+      const revision = this.courseModeRevision;
       try { await this.$confirm('Discard your unsaved Course Mode edits and use the saved version?', 'Use saved version'); } catch { return false; }
-      if (id !== this.lessonId || snapshot !== this.courseModeConflictSnapshot) return false;
+      if (this.editorDestroying || id !== this.lessonId || snapshot !== this.courseModeConflictSnapshot
+        || revision !== this.courseModeRevision || this.courseModeLoading || this.courseModeSaving) return false;
       this.adoptCourseModeSnapshot(snapshot);
       this.courseModeConflict = false;
       this.courseModeConflictSnapshot = null;

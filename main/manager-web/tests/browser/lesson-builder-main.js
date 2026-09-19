@@ -1,5 +1,5 @@
 import Vue from 'vue';
-import ElementUI from 'element-ui';
+import ElementUI, { MessageBox } from 'element-ui';
 import VueRouter from 'vue-router';
 import LessonEditor from '@/views/LessonEditor.vue';
 import Api from '@/apis/api';
@@ -279,7 +279,19 @@ window.__MOUNT_COURSE_MODE_EDITOR__ = async () => {
   const pendingSave = calls.pendingCourseModeSaves.shift(); pendingSave.ok({ lessonId: pendingSave.id, checksum: pendingSave.contract.contractChecksum, visualChecksum: "c".repeat(64), contract: pendingSave.contract });
   await savePromise; await courseEditor.$nextTick();
   const newerRevisionPreserved = courseEditor.courseModeDraft.activities[0].contextId === 'newer-context' && courseEditor.courseModeDirty;
-  return { ...initial, targetCardCount: targetCards.length, targetLabels, meaningInputPresent: Boolean(meaningInput), meaningEditApplied, leakageWarning, adminCatalogObjectSelectable, draftCatalogObjectExcluded, selectedCatalogObjectKey, clearedObjectKey, disabledDuringSave, uiEditBlockedDuringSave, newerRevisionPreserved, saveCount: calls.courseModeSaves.length, savedChecksum: calls.courseModeSaves[0]?.contract.contractChecksum || '', savedObjectKey: calls.courseModeSaves[0]?.contract.activities[0].visual.objectAssetKey, savedFallback: calls.courseModeSaves[0]?.contract.activities[0].visual.fallback };
+  courseEditor.courseModeConflict = true;
+  courseEditor.courseModeConflictSnapshot = { lessonId: courseEditor.lessonId, checksum: pendingSave.contract.contractChecksum, visualChecksum: 'c'.repeat(64), contract: pendingSave.contract };
+  courseEditor.$confirm = MessageBox.confirm;
+  const discard = courseEditor.useSavedCourseModeAfterReview();
+  await courseEditor.$nextTick();
+  const latestDraft = JSON.parse(JSON.stringify(courseEditor.courseModeDraft));
+  latestDraft.activities[0].contextId = 'edit-after-discard-dialog';
+  courseEditor.onCourseModeDraftInput(latestDraft);
+  document.querySelector('.el-message-box__btns .el-button--primary').click();
+  const staleDiscardRejected = await discard === false
+    && courseEditor.courseModeDraft.activities[0].contextId === 'edit-after-discard-dialog'
+    && courseEditor.courseModeDirty && courseEditor.courseModeConflict;
+  return { ...initial, staleDiscardRejected, targetCardCount: targetCards.length, targetLabels, meaningInputPresent: Boolean(meaningInput), meaningEditApplied, leakageWarning, adminCatalogObjectSelectable, draftCatalogObjectExcluded, selectedCatalogObjectKey, clearedObjectKey, disabledDuringSave, uiEditBlockedDuringSave, newerRevisionPreserved, saveCount: calls.courseModeSaves.length, savedChecksum: calls.courseModeSaves[0]?.contract.contractChecksum || '', savedObjectKey: calls.courseModeSaves[0]?.contract.activities[0].visual.objectAssetKey, savedFallback: calls.courseModeSaves[0]?.contract.activities[0].visual.fallback };
 };
 window.__MOUNT_COURSE_MODE_LOAD_ERROR__ = async () => {
   vm.$destroy(); vm.$el.remove(); await new Promise((resolve) => setTimeout(resolve, 0));

@@ -84,7 +84,7 @@ public class SysUserTokenServiceImpl extends BaseServiceImpl<SysUserTokenDao, Sy
     @Override
     public SysUserDTO getUserByToken(String token) {
         SysUserTokenEntity userToken = baseDao.getByToken(token);
-        if (null == userToken) {
+        if (userToken == null || userToken.getUserId() == null || userToken.getExpireDate() == null) {
             throw new RenException(ErrorCode.TOKEN_INVALID);
         }
 
@@ -94,6 +94,9 @@ public class SysUserTokenServiceImpl extends BaseServiceImpl<SysUserTokenDao, Sy
         }
 
         SysUserDTO userDTO = sysUserService.getByUserId(userToken.getUserId());
+        if (userDTO == null) {
+            throw new RenException(ErrorCode.TOKEN_INVALID);
+        }
         userDTO.setPassword("");
         return userDTO;
     }

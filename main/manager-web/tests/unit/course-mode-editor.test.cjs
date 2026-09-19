@@ -34,6 +34,39 @@ test('delayed save after lesson switch cannot replace data or notification', asy
 for (const response of [undefined, {}, {contract:{}}, {...snap(), visualChecksum:undefined}]) test(`incomplete read ${JSON.stringify(response)} settles into an explicit error`, () => {const {e,reads}=setup();e.resetCourseModeState();e.loadCourseModeContract();assert.doesNotThrow(()=>reads.at(-1)[1](response));assert.equal(e.courseModeLoading,false);assert.equal(e.courseModeContract,null);assert.ok(e.courseModeError);});
 test('conflict readback is separate until explicit comparison acceptance', async () => {const {e,reads,writes,edit}=setup();edit();await e.saveCourseModeContract();writes[0].at(-1)('Conflict',{status:409});e.reviewCourseModeConflict();reads.at(-1)[1](snap('A','c'));assert.equal(e.courseModeDraft.activities[0].contextId,'local');assert.equal(e.courseModeExpectedChecksum,'a'.repeat(64));e.keepCourseModeDraftAfterReview();assert.equal(e.courseModeDraft.activities[0].contextId,'local');assert.equal(e.courseModeExpectedChecksum,'c'.repeat(64));assert.equal(e.courseModeDirty,true);assert.equal(writes.length,1);});
 test('undo affects current draft only', async()=>{const {e,edit}=setup();edit();await e.undoCourseModeDraft();assert.equal(e.courseModeDraft.activities[0].contextId,'saved');assert.equal(e.courseModeDirty,false);});
+test('accepting an older discard confirmation preserves edits made while it was open', async () => {
+  const { e, reads, edit } = setup();
+  edit();
+  e.reviewCourseModeConflict();
+  reads.at(-1)[1](snap('A', 'c'));
+  let confirm;
+  e.$confirm = () => new Promise(resolve => { confirm = resolve; });
+  const pending = e.useSavedCourseModeAfterReview();
+  const newerDraft = clone(e.courseModeDraft);
+  newerDraft.activities[0].contextId = 'newer edit';
+  e.onCourseModeDraftInput(newerDraft);
+  confirm();
+  assert.equal(await pending, false);
+  assert.deepEqual(e.courseModeDraft, newerDraft);
+  assert.equal(e.courseModeDirty, true);
+  assert.equal(e.courseModeExpectedChecksum, 'a'.repeat(64));
+  assert.equal(e.courseModeConflict, true);
+});
+for (const action of ['cancel', 'replace snapshot', 'switch lesson']) {
+  test(`pending discard confirmation preserves state on ${action}`, async () => {
+    const { e, reads, edit } = setup();
+    edit(); e.reviewCourseModeConflict(); reads.at(-1)[1](snap('A', 'c'));
+    let resolve, reject;
+    e.$confirm = () => new Promise((yes, no) => { resolve = yes; reject = no; });
+    const pending = e.useSavedCourseModeAfterReview();
+    if (action === 'replace snapshot') e.courseModeConflictSnapshot = snap('A', 'd');
+    if (action === 'switch lesson') { e.lessonId = 'B'; e.resetCourseModeState(); }
+    const before = clone({ draft: e.courseModeDraft, token: e.courseModeExpectedChecksum });
+    if (action === 'cancel') reject(new Error('cancel')); else resolve();
+    assert.equal(await pending, false);
+    assert.deepEqual({ draft: e.courseModeDraft, token: e.courseModeExpectedChecksum }, before);
+  });
+}
 test('malformed lesson response does not hang the editor',()=>{
  const body=source.slice(source.indexOf('    fetchAll() {'),source.indexOf('    clearPreviewProofState() {'));
  let success;

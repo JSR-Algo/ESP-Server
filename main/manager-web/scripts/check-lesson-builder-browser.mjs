@@ -202,6 +202,7 @@ try {
   assert.equal(courseModeResult.disabledDuringSave, true);
   assert.equal(courseModeResult.uiEditBlockedDuringSave, true);
   assert.equal(courseModeResult.newerRevisionPreserved, true);
+  assert.equal(courseModeResult.staleDiscardRejected, true);
   assert.equal(courseModeResult.saveCount, 1);
   assert.match(courseModeResult.savedChecksum, /^[a-f0-9]{64}$/);
   const courseModeMobileAudit = await auditLayoutAt(390);

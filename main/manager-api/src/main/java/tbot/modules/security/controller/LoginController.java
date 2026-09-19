@@ -190,6 +190,10 @@ public class LoginController {
             return ResponseEntity.noContent().build();
         } catch (RenException error) {
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+        } catch (Exception error) {
+            // nginx auth_request trusts the HTTP status, not a Result error body.
+            log.error("Manager proxy authentication lookup failed", error);
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).build();
         }
     }
 
