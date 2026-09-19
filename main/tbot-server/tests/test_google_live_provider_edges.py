@@ -8102,5 +8102,87 @@ class GoogleLiveProviderEdgeTest(unittest.IsolatedAsyncioTestCase):
         finally:
             google_live_module.product_tool_names = original_product_tool_names
 
+class GoogleLiveProviderAecReleaseTest(unittest.IsolatedAsyncioTestCase):
+    """T19 F9 regression: a discarded bridge must have its echo canceller freed.
+
+    One bridge - and so one native Speex EchoCanceller - is built per live
+    session open, and Course Mode opens a session per prompt. The speexdsp SWIG
+    proxy does not own the native object, so a bridge that is merely dropped
+    leaks 91.5 kB every time; T19 run-12 measured +98 MB per ESP over a 65.6 min
+    lesson soak because of it.
+    """
+
+    class _AecBridge(_Bridge):
+        def __init__(self, fail_close=False):
+            super().__init__()
+            self._aec_processor = GoogleLiveProviderAecReleaseTest._Aec()
+            self.fail_close = fail_close
+
+        async def close(self):
+            await super().close()
+            if self.fail_close:
+                raise RuntimeError("bridge close failed")
+
+    class _Aec:
+        def __init__(self):
+            self.closes = 0
+
+        def close(self):
+            self.closes += 1
+
+    def make_provider(self, conn=None):
+        self.provider = GoogleLiveProvider(
+            conn or _Conn(), client_factory=lambda *_args: _Client()
+        )
+        return self.provider
+
+    async def asyncTearDown(self):
+        provider = getattr(self, "provider", None)
+        if provider is not None:
+            await provider.close()
+
+    async def test_close_live_resources_releases_the_bridge_aec(self):
+        provider = self.make_provider()
+        bridge = self._AecBridge()
+        aec = bridge._aec_processor
+        provider._bridge = bridge
+
+        await provider._close_live_resources()
+
+        self.assertEqual(bridge.closed, 1)
+        self.assertEqual(
+            aec.closes, 1, msg="the native echo canceller was not destroyed"
+        )
+        self.assertIsNone(bridge._aec_processor)
+        self.assertIsNone(provider._bridge)
+
+    async def test_bridge_without_close_still_releases_its_aec(self):
+        provider = self.make_provider()
+
+        class _NoCloseBridge:
+            def __init__(self):
+                self._aec_processor = GoogleLiveProviderAecReleaseTest._Aec()
+
+        bridge = _NoCloseBridge()
+        aec = bridge._aec_processor
+        provider._bridge = bridge
+
+        await provider._close_live_resources()
+
+        self.assertEqual(aec.closes, 1)
+        self.assertIsNone(provider._bridge)
+
+    async def test_repeated_close_does_not_double_destroy(self):
+        provider = self.make_provider()
+        bridge = self._AecBridge()
+        aec = bridge._aec_processor
+        provider._bridge = bridge
+
+        await provider._close_live_resources()
+        await provider._close_live_resources()
+
+        self.assertEqual(aec.closes, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

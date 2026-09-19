@@ -22,6 +22,7 @@ voice provider.
 from __future__ import annotations
 
 import logging
+import threading
 
 try:  # the wheel is only built when libspeexdsp-dev is present on the host
     from speexdsp import EchoCanceller_create as _create_speex_ec
@@ -33,6 +34,41 @@ except Exception:  # pragma: no cover - environments without the dep
 
 
 log = logging.getLogger(__name__)
+
+
+def release_aec_processor(owner, attr: str = "_aec_processor", logger=None) -> bool:
+    """Detach and close the AEC processor held by ``owner``. Idempotent.
+
+    A Google Live audio bridge builds one :class:`AecProcessor` per live
+    session open and keeps it in ``_aec_processor``. Dropping the bridge does
+    NOT free the native echo canceller (see :meth:`AecProcessor.close`), so
+    whoever discards a bridge must call this. Returns True when a processor
+    was closed.
+    """
+    if owner is None:
+        return False
+    processor = getattr(owner, attr, None)
+    try:
+        setattr(owner, attr, None)
+    except Exception:  # pragma: no cover - read-only attribute on a test double
+        pass
+    if processor is None:
+        return False
+    close = getattr(processor, "close", None)
+    if not callable(close):
+        return False
+    try:
+        close()
+    except Exception as exc:  # pragma: no cover - defensive
+        # Pre-format: the caller's logger may be loguru (brace style), not stdlib.
+        message = f"AEC release failed to close the processor: {exc!r}"
+        target = logger if logger is not None else log
+        try:
+            target.warning(message)
+        except Exception:
+            pass
+        return False
+    return True
 
 
 class AecProcessor:
@@ -65,6 +101,11 @@ class AecProcessor:
         self._max_ref_bytes = int(self.sample_rate * reference_buffer_sec) * 2
         self._silence_frame = bytes(self._frame_bytes)
         self._ref_buffer = bytearray()
+        # Guards ``self._ec`` against a close() racing an in-flight process_mic:
+        # the Live pipeline runs process_mic on the bridge's audio executor
+        # thread while close() is driven from the event loop.
+        self._lock = threading.Lock()
+        self._closed = False
         self.bypassed = not enabled or not AEC_AVAILABLE
         self._reason = None
         if not enabled:
@@ -99,6 +140,55 @@ class AecProcessor:
         """Reason the processor is in bypass mode, or None when active."""
         return self._reason
 
+    def close(self) -> None:
+        """Release the native Speex echo canceller. Idempotent.
+
+        speexdsp 0.1.1 ships a SWIG 2.0.11 binding in which ``EchoCanceller``
+        is created through a *static factory* (``EchoCanceller_create``). SWIG
+        only transfers ownership for a factory when the interface declares
+        ``%newobject``; this one does not, so the returned proxy reports
+        ``proxy.this.own() is False`` and the generated ``__swig_destroy__``
+        (``delete_EchoCanceller``) is never invoked when the proxy is garbage
+        collected. The native ``EchoCanceller`` — 91.5 kB of Speex echo state
+        per instance at 16 kHz / 200 ms, measured in T19 run-13 — therefore
+        lives for the lifetime of the process.
+
+        One processor is built per Google Live session open, and lesson churn
+        opens a session per prompt, so without this explicit destroy the
+        server's RSS grows without bound (finding F9). Nothing else frees it:
+        the Python side stays flat, which is exactly why the object counters
+        in the T19 run-12 soak saw nothing.
+        """
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            self.bypassed = True
+            if self._reason is None:
+                self._reason = "closed"
+            ec, self._ec = self._ec, None
+            self._ref_buffer = bytearray()
+        if ec is None:
+            return
+        destroy = getattr(type(ec), "__swig_destroy__", None)
+        if not callable(destroy):
+            log.warning(
+                "AEC close: speexdsp binding exposes no __swig_destroy__;"
+                " the native echo canceller cannot be released."
+            )
+            return
+        try:
+            destroy(ec)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning("AEC close failed to release the echo canceller: %s", exc)
+
+    def __del__(self):  # pragma: no cover - interpreter-shutdown dependent
+        """Best-effort release for any construction site that forgets close()."""
+        try:
+            self.close()
+        except Exception:
+            pass
+
     def push_reference(self, pcm_bytes: bytes) -> None:
         """Append a chunk of far-end (speaker) audio at the configured rate.
 
@@ -108,12 +198,15 @@ class AecProcessor:
         """
         if self.bypassed or not pcm_bytes:
             return
-        self._ref_buffer.extend(pcm_bytes)
-        if len(self._ref_buffer) > self._max_ref_bytes:
-            # Drop oldest to retain a fresh tail; this can introduce a delay
-            # mismatch but only when the speaker has been running far ahead
-            # of the mic — typically right after a long model utterance.
-            self._ref_buffer = self._ref_buffer[-self._max_ref_bytes :]
+        with self._lock:
+            if self._closed:
+                return
+            self._ref_buffer.extend(pcm_bytes)
+            if len(self._ref_buffer) > self._max_ref_bytes:
+                # Drop oldest to retain a fresh tail; this can introduce a delay
+                # mismatch but only when the speaker has been running far ahead
+                # of the mic — typically right after a long model utterance.
+                self._ref_buffer = self._ref_buffer[-self._max_ref_bytes :]
 
     def process_mic(self, pcm_bytes: bytes) -> bytes:
         """Return echo-cancelled near-end audio.
@@ -130,23 +223,29 @@ class AecProcessor:
             # do not feed garbage into Speex which assumes int16-aligned data.
             return pcm_bytes
         out = bytearray()
-        for offset in range(0, len(pcm_bytes), self._frame_bytes):
-            near = pcm_bytes[offset : offset + self._frame_bytes]
-            if len(near) < self._frame_bytes:
-                # Partial frame at end — pass through unchanged so we do not
-                # silently truncate audio. The upstream resampler usually
-                # emits exact multiples but stitching across reconnects can
-                # cause this.
-                out.extend(near)
-                break
-            far = self._pop_reference_frame()
-            cleaned = self._ec.process(bytes(near), far)
-            out.extend(cleaned)
+        with self._lock:
+            if self._closed or self._ec is None:
+                # close() won the race with this chunk; pass audio through
+                # rather than touching a destroyed native canceller.
+                return pcm_bytes
+            for offset in range(0, len(pcm_bytes), self._frame_bytes):
+                near = pcm_bytes[offset : offset + self._frame_bytes]
+                if len(near) < self._frame_bytes:
+                    # Partial frame at end — pass through unchanged so we do not
+                    # silently truncate audio. The upstream resampler usually
+                    # emits exact multiples but stitching across reconnects can
+                    # cause this.
+                    out.extend(near)
+                    break
+                far = self._pop_reference_frame()
+                cleaned = self._ec.process(bytes(near), far)
+                out.extend(cleaned)
         return bytes(out)
 
     def reset(self) -> None:
         """Drop buffered reference audio (e.g. on session re-init)."""
-        self._ref_buffer.clear()
+        with self._lock:
+            self._ref_buffer.clear()
 
     # ------------------------------------------------------------------
     # Internals

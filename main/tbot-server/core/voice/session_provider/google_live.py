@@ -13,6 +13,7 @@ from contextvars import ContextVar
 from core.activity_lease import ActivityOperation
 from core.lesson.log_context import with_lesson_log_context
 from core.providers.tools.product_toolset import LESSON_SEMANTIC_TOOLS, product_tool_names
+from core.voice.aec import release_aec_processor
 from core.voice.google_live import GoogleLiveAudioBridge, GoogleLiveClientFactory
 from core.voice.google_live.interaction_controller import (
     GoogleLiveInteractionController,
@@ -4109,6 +4110,7 @@ class GoogleLiveProvider(VoiceSessionProvider):
             except asyncio.CancelledError:
                 pass
 
+        discarded_bridge = None
         if self._bridge is not None and hasattr(self._bridge, "close"):
             try:
                 await self._bridge.close()
@@ -4116,12 +4118,21 @@ class GoogleLiveProvider(VoiceSessionProvider):
                 cleanup_failure_code = "EVIDENCE_BRIDGE_CLOSE_FAILED"
                 self._evidence_cleanup_failure_code = cleanup_failure_code
                 if self._evidence_scope() is None:
+                    discarded_bridge = self._bridge
                     self._bridge = None
             else:
                 self._evidence_cleanup_failure_code = None
+                discarded_bridge = self._bridge
                 self._bridge = None
         elif self._bridge is not None:
+            discarded_bridge = self._bridge
             self._bridge = None
+        # T19 F9: a bridge holds a native Speex echo canceller whose speexdsp
+        # SWIG proxy does not own it, so dropping the bridge leaks 91.5 kB per
+        # live session open. One session is opened per Course Mode prompt, so
+        # without this the server's RSS grows without bound under lesson churn.
+        if discarded_bridge is not None:
+            release_aec_processor(discarded_bridge, logger=self.conn.logger)
 
         await self._record_live_session_usage()
 

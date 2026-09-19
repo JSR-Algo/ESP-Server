@@ -9,6 +9,6 @@ loop". This package provides a Speex DSP based AEC stage that hooks into
 the Google Live pipeline (and any other voice-mode that wants it).
 """
 
-from .aec_processor import AecProcessor, AEC_AVAILABLE
+from .aec_processor import AecProcessor, AEC_AVAILABLE, release_aec_processor
 
-__all__ = ["AecProcessor", "AEC_AVAILABLE"]
+__all__ = ["AecProcessor", "AEC_AVAILABLE", "release_aec_processor"]
