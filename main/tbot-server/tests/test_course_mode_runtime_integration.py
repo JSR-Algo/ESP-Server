@@ -490,7 +490,12 @@ async def test_curriculum_shared_activity_exposes_and_protects_all_active_target
         "embodiedIntent": protected["embodiedIntent"], "targetFactsUsed": [],
         "praiseLevel": "engagement", "safetyMode": False, "normalMiss": False,
     })
-    assert rejected == {"accepted": False, "code": "INVALID_RESPONSE_PLAN"}
+    # D9: the refusal now names the rule that fired. This one is the target-leak
+    # guard, which is exactly what this test is about.
+    assert rejected == {
+        "accepted": False, "code": "INVALID_RESPONSE_PLAN",
+        "reason": "TARGET_MODELLING_NOT_AUTHORIZED",
+    }
 
 
 @pytest.mark.asyncio
@@ -1514,6 +1519,7 @@ async def test_rejected_consuming_operation_identity_survives_restart() -> None:
     }
     assert await runtime.course_apply_response_plan(invalid) == {
         "accepted": False, "code": "INVALID_RESPONSE_PLAN",
+        "reason": "PROHIBITED_WORDING",  # D9: "Try harder." is the banned wording
     }
     snapshot = await store.load("device-1", "a1")
     restarted = LessonRuntime(
@@ -1783,7 +1789,9 @@ async def test_response_plan_must_pass_fail_closed_validator() -> None:
         "targetFactsUsed": ["invented.fact"], "praiseLevel": "mastery",
         "safetyMode": False, "normalMiss": True,
     })
-    assert result == {"accepted": False, "code": "INVALID_RESPONSE_PLAN"}
+    assert result == {
+        "accepted": False, "code": "INVALID_RESPONSE_PLAN", "reason": "UNAPPROVED_FACT",
+    }  # D9: the invented fact code
 
 
 @pytest.mark.asyncio
@@ -1833,7 +1841,9 @@ async def test_response_plan_cannot_leak_target_when_decision_forbids_modeling()
         "praiseLevel": "engagement", "safetyMode": False, "normalMiss": False,
     })
 
-    assert result == {"accepted": False, "code": "INVALID_RESPONSE_PLAN"}
+    assert result == {
+        "accepted": False, "code": "INVALID_RESPONSE_PLAN", "reason": "TARGET_MODELLING_NOT_AUTHORIZED",
+    }  # D9: "The answer is cat." models a protected target
     assert runtime.orchestrator.active_mastery.answer_leakage.last_full_model_at_ms is None
 
 
@@ -1858,7 +1868,9 @@ async def test_response_plan_cannot_leak_authored_target_meaning_during_assessme
         "praiseLevel": "engagement", "safetyMode": False, "normalMiss": False,
     })
 
-    assert result == {"accepted": False, "code": "INVALID_RESPONSE_PLAN"}
+    assert result == {
+        "accepted": False, "code": "INVALID_RESPONSE_PLAN", "reason": "TARGET_MODELLING_NOT_AUTHORIZED",
+    }  # D9: the authored Vietnamese meaning is protected too
 
 
 @pytest.mark.asyncio
@@ -1883,7 +1895,9 @@ async def test_safety_disclosure_and_authored_meaning_remain_in_protected_pause(
 
     assert decision["nextState"] == "SAFETY_PAUSED"
     assert decision["branchId"] is None
-    assert result == {"accepted": False, "code": "INVALID_RESPONSE_PLAN"}
+    assert result == {
+        "accepted": False, "code": "INVALID_RESPONSE_PLAN", "reason": "UNAPPROVED_FACT_WORDING",
+    }  # D9: the safety plan cites a target fact in its wording
 
 
 @pytest.mark.asyncio
@@ -1925,7 +1939,9 @@ async def test_response_plan_rejects_rejected_decision_and_inactive_target_facts
     })
 
     assert rejected_plan == {"accepted": False, "code": "COURSE_OPERATION_NOT_ALLOWED"}
-    assert inactive_fact_plan == {"accepted": False, "code": "INVALID_RESPONSE_PLAN"}
+    assert inactive_fact_plan == {
+        "accepted": False, "code": "INVALID_RESPONSE_PLAN", "reason": "UNAPPROVED_FACT",
+    }  # D9: toys.ball is not among THIS activity's active targets
 
 
 @pytest.mark.asyncio
@@ -1950,7 +1966,11 @@ async def test_safety_decision_rejects_plan_that_claims_normal_teaching_mode() -
         "embodiedIntent": decision["embodiedIntent"], "targetFactsUsed": ["animals.cat"],
         "praiseLevel": "engagement", "safetyMode": False, "normalMiss": False,
     })
-    assert result == {"accepted": False, "code": "INVALID_RESPONSE_PLAN"}
+    assert result == {
+        "accepted": False, "code": "INVALID_RESPONSE_PLAN", "reason": "TARGET_MODELLING_NOT_AUTHORIZED",
+    }  # D9: D9 surfaced the real rule: "Look at cat." trips the target-leak guard
+    # BEFORE the safetyMode mismatch this test was named for. The behaviour is
+    # unchanged and correct - the ordering was simply invisible until now.
 
 
 @pytest.mark.asyncio

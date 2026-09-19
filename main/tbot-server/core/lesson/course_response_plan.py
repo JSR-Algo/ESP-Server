@@ -73,6 +73,80 @@ class CourseResponsePlanError(ValueError):
     pass
 
 
+# ── D9: which cause fired, without leaking the whitelist ───────────────────────
+#
+# Owner decision D9 (coordination/owner-decisions-20260919.md): a caller refused
+# with INVALID_RESPONSE_PLAN must be able to identify the cause, "without leaking
+# child-safety whitelist contents into a response a client could mine".
+#
+# THE TENSION, AND HOW IT IS RESOLVED. The refusal channel is already an oracle: a
+# caller learns accepted/refused for any wording it sends, one query per candidate
+# string. What a sub-code adds is WHICH RULE refused — never which term, clause,
+# pattern or field value triggered it. That distinction is the whole design:
+#
+#   * the sub-code names a RULE. The rule set below is a compile-time constant,
+#     identical for every child, every session and every contract version, and
+#     carries no session state whatsoever. Knowing "the fact-wording rule refused
+#     this" does not narrow the approved-term set by one term.
+#   * it does not reduce the NUMBER of queries needed to enumerate the whitelist.
+#     Probing was one boolean query per candidate wording before, and is exactly one
+#     boolean query per candidate wording after. The cost of PROBING is unchanged;
+#     only the cost of DEBUGGING falls, which is what D9 asked for.
+#   * the projection below is an ALLOW-LIST, not a pass-through. A reason that is not
+#     in this frozen set becomes `UNSPECIFIED`. That is the load-bearing safety
+#     property: a future validator that raises `CourseResponsePlanError(f"...{term}")`
+#     cannot leak that term through this channel, because the channel can only ever
+#     emit one of these constants.
+#
+# What must therefore NEVER be added to a refusal payload, and is asserted against in
+# tests/test_course_response_plan_refusal_detail.py: the offending clause, any plan
+# field's text, any approved fact term or target word, any regex fragment, and any
+# count or position that would let a caller bisect the whitelist faster than one
+# query per wording.
+COURSE_RESPONSE_PLAN_REFUSAL_CODES = frozenset({
+    # raised by CourseResponsePlan.from_mapping
+    "INVALID_FIELDS",
+    "TOO_MANY_QUESTIONS",
+    "UNAPPROVED_FACT",
+    "INVALID_RESPONSE_TEXT",
+    "EMPTY_RESPONSE_TEXT",
+    "RESPONSE_TEXT_TOO_LONG",
+    "QUESTION_COUNT_MISMATCH",
+    "PROHIBITED_WORDING",
+    "MASTERY_PRAISE_NOT_AUTHORIZED",
+    "UNAPPROVED_FACT_WORDING",
+    "UNSUPPORTED_INTENT",
+    "DISAPPOINTED_MISS_FEEDBACK",
+    "UNSAFE_SAFETY_INTENT",
+    "SAFETY_REDIRECTION",
+    # raised by LessonRuntime.course_apply_response_plan AFTER from_mapping accepts,
+    # where the plan is structurally legal but disagrees with the live decision
+    "INTENT_DOES_NOT_MATCH_DECISION",
+    "TARGET_MODELLING_NOT_AUTHORIZED",
+    "SAFETY_MODE_DOES_NOT_MATCH_DECISION",
+})
+
+#: What an unrecognised reason projects to. Fail-closed: an unknown reason is
+#: reported as unknown rather than echoed.
+COURSE_RESPONSE_PLAN_REFUSAL_UNSPECIFIED = "UNSPECIFIED"
+
+
+def course_response_plan_refusal_code(reason: Any) -> str:
+    """Project a refusal reason onto the closed, leak-free sub-code set.
+
+    Deliberately total and deliberately narrow: anything not in
+    :data:`COURSE_RESPONSE_PLAN_REFUSAL_CODES` becomes
+    :data:`COURSE_RESPONSE_PLAN_REFUSAL_UNSPECIFIED`, including a
+    `CourseResponsePlanError` whose message a future edit made informative.
+    """
+    if isinstance(reason, CourseResponsePlanError):
+        args = reason.args
+        reason = args[0] if args else None
+    if isinstance(reason, str) and reason in COURSE_RESPONSE_PLAN_REFUSAL_CODES:
+        return reason
+    return COURSE_RESPONSE_PLAN_REFUSAL_UNSPECIFIED
+
+
 @dataclass(frozen=True)
 class CourseResponsePlan:
     acknowledgment: str
