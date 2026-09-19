@@ -14,6 +14,12 @@ from config.manage_api_client import (
     get_server_config,
     init_service,
 )
+from core.lesson.disconnect_abandonment import (
+    DISCONNECT_ABANDONMENT_GRACE_CONFIG_KEY,
+    DISCONNECT_ABANDONMENT_GRACE_ENV_VAR,
+    assert_disconnect_abandonment_grace_in_range,
+    disconnect_abandonment_grace_sec,
+)
 from core.lesson.course_inactivity_policy import (
     COURSE_INACTIVITY_TIMEOUT_CONFIG_KEY,
     COURSE_INACTIVITY_TIMEOUT_ENV_VAR,
@@ -531,6 +537,21 @@ def _parse_course_inactivity_timeout_env():
     return assert_course_inactivity_timeout_in_range(value)
 
 
+def _parse_disconnect_abandonment_grace_env():
+    """LESSON_DISCONNECT_ABANDONMENT_GRACE_SEC -> lesson.disconnect_abandonment_grace_sec.
+
+    D8 (owner-decisions-20260919.md): the grace a disconnected robot gets to come
+    back before its mid-flight lesson is closed. Same contract as D2's timeout -
+    overridable without a rebuild, and FAILING CLOSED on an unusable value rather
+    than silently reverting to the 90 s default.
+    """
+    raw = _clean_env(DISCONNECT_ABANDONMENT_GRACE_ENV_VAR)
+    if raw is None:
+        return None
+    value = disconnect_abandonment_grace_sec({DISCONNECT_ABANDONMENT_GRACE_CONFIG_KEY: raw})
+    return assert_disconnect_abandonment_grace_in_range(value)
+
+
 def _parse_percent_env(name):
     raw = _clean_env(name)
     if raw is None:
@@ -557,6 +578,11 @@ def _validate_lesson_rollout_file_config(lesson_cfg):
     # bounds-checked, and refused loudly instead of quietly becoming 180 s.
     if lesson_cfg.get(COURSE_INACTIVITY_TIMEOUT_CONFIG_KEY) is not None:
         assert_course_inactivity_timeout_in_range(course_inactivity_timeout_sec(lesson_cfg))
+    # D8: the disconnect grace gets the identical treatment.
+    if lesson_cfg.get(DISCONNECT_ABANDONMENT_GRACE_CONFIG_KEY) is not None:
+        assert_disconnect_abandonment_grace_in_range(
+            disconnect_abandonment_grace_sec(lesson_cfg)
+        )
 
 
 def _normalize_storage_hil_device_allowlist(value):
@@ -597,7 +623,8 @@ def _apply_lesson_env_overrides(config):
     LESSON_SD_CACHE_QUOTA_BYTES -> lesson.sd_cache_quota_bytes.
     LESSON_SD_GC_FREE_PERCENT -> lesson.sd_gc_free_percent.
     LESSON_SD_PRELOAD_MIN_FREE_PERCENT -> lesson.sd_preload_min_free_percent.
-    LESSON_COURSE_INACTIVITY_TIMEOUT_SEC -> lesson.course_inactivity_timeout_sec (D2)."""
+    LESSON_COURSE_INACTIVITY_TIMEOUT_SEC -> lesson.course_inactivity_timeout_sec (D2).
+    LESSON_DISCONNECT_ABANDONMENT_GRACE_SEC -> lesson.disconnect_abandonment_grace_sec (D8)."""
     if not isinstance(config, Mapping):
         return config
 
@@ -626,6 +653,7 @@ def _apply_lesson_env_overrides(config):
     sd_gc_free_percent = _parse_percent_env("LESSON_SD_GC_FREE_PERCENT")
     sd_preload_min_free_percent = _parse_percent_env("LESSON_SD_PRELOAD_MIN_FREE_PERCENT")
     course_inactivity_timeout_sec_env = _parse_course_inactivity_timeout_env()
+    disconnect_abandonment_grace_sec_env = _parse_disconnect_abandonment_grace_env()
     existing_lesson = config.get("lesson")
     existing_lesson = existing_lesson if isinstance(existing_lesson, Mapping) else {}
     _validate_lesson_rollout_file_config(existing_lesson)
@@ -675,6 +703,7 @@ def _apply_lesson_env_overrides(config):
         and sd_gc_free_percent is None
         and sd_preload_min_free_percent is None
         and course_inactivity_timeout_sec_env is None
+        and disconnect_abandonment_grace_sec_env is None
         and sample_flag is None
         and not sample_asset_base
         and not sample_step_dwell
@@ -818,6 +847,8 @@ def _apply_lesson_env_overrides(config):
         lesson_cfg["sd_preload_min_free_percent"] = sd_preload_min_free_percent
     if course_inactivity_timeout_sec_env is not None:
         lesson_cfg[COURSE_INACTIVITY_TIMEOUT_CONFIG_KEY] = course_inactivity_timeout_sec_env
+    if disconnect_abandonment_grace_sec_env is not None:
+        lesson_cfg[DISCONNECT_ABANDONMENT_GRACE_CONFIG_KEY] = disconnect_abandonment_grace_sec_env
     if sample_flag is not None:
         lesson_cfg["sample_lesson"] = sample_flag
     if sample_asset_base:

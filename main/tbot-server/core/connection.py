@@ -3906,8 +3906,32 @@ class ConnectionHandler:
             return None
         return budget
 
+    def _lesson_terminal_unconfirmed(self) -> bool:
+        """A lesson that asked for a terminal and has not had it confirmed yet.
+
+        D8 (owner-decisions-20260919.md), fixing the interaction the course-inactivity
+        sweep found. `_lesson_runtime_active()` is true only in PRELOADING/RUNNING, so
+        a terminal control leaving those states used to DISARM the watchdog below - a
+        fired abandonment timeout, or any close whose `lesson_stop` the device never
+        acks, silently suppressed the socket close that would otherwise have happened
+        at the peer-silence budget. That made a short abandonment timeout strictly
+        worse than no timeout at all on a robot that is gone: it removed a cleanup and
+        replaced it with nothing.
+
+        The window between "a terminal was requested" and "the runtime finished
+        closing" is exactly when a half-open socket most needs reaping, so the
+        watchdog stays armed across it.
+        """
+        runtime = getattr(self, "lesson_runtime", None)
+        if runtime is None:
+            return False
+        return bool(
+            getattr(runtime, "_terminal_requested", False)
+            and not getattr(runtime, "_closed", False)
+        )
+
     def _lesson_peer_silence_watchdog_armed(self) -> bool:
-        if not self._lesson_runtime_active():
+        if not (self._lesson_runtime_active() or self._lesson_terminal_unconfirmed()):
             return False
         # The robot stops answering on purpose while it hashes an SD pack; only
         # the global idle timeout governs that window.

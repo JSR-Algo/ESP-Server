@@ -86,6 +86,12 @@ from core.lesson.course_inactivity_policy import (
     assert_course_inactivity_timeout_in_range,
     course_inactivity_timeout_sec,
 )
+from core.lesson.disconnect_abandonment import (
+    DisconnectAbandonmentIntent,
+    build_disconnect_abandonment_batch,
+    disconnect_abandonment_grace_sec,
+    get_disconnect_abandonment_reaper,
+)
 from core.lesson.course_mode_contract import CourseModeContract
 from core.lesson.course_mode_compatibility import course_mode_compatibility_for_manifest
 from core.lesson.course_orchestrator import (
@@ -202,7 +208,11 @@ def _course_mode_v5_activity_authority(
         if isinstance(visual, dict) and visual.get("objectAssetKey") is None:
             fallback_ids.add(activity_id)
     return (activity_ids, fallback_ids) if activity_aware else (None, None)
-from core.lesson.course_response_plan import CourseResponsePlan, CourseResponsePlanError
+from core.lesson.course_response_plan import (
+    CourseResponsePlan,
+    CourseResponsePlanError,
+    course_response_plan_refusal_code,
+)
 from core.lesson.course_snapshot_store import get_course_mode_snapshot_store
 from core.lesson.embodied_intent import EmbodiedIntent
 from core.lesson.embodied_dispatcher import (
@@ -782,6 +792,26 @@ class CourseModeRuntimeAdapter:
             child_detail_code=arguments["childDetailCode"],
         ))
 
+    @staticmethod
+    def _invalid_response_plan(reason: Any) -> Dict[str, Any]:
+        """D9 — the one opaque refusal, now carrying which cause fired.
+
+        `code` is unchanged, so every existing caller and test keeps working: this is
+        additive. `reason` is the new machine-readable sub-code, projected through
+        `course_response_plan_refusal_code`, which is an ALLOW-LIST over a frozen set
+        of rule names and can therefore only ever emit one of those constants.
+
+        It names the RULE, never the content. No plan text, no approved fact term, no
+        target word, no clause and no pattern reaches this payload — see the design
+        note beside `COURSE_RESPONSE_PLAN_REFUSAL_CODES` for why that is what keeps
+        the child-safety whitelist unminable while still telling a caller what to fix.
+        """
+        return {
+            "accepted": False,
+            "code": "INVALID_RESPONSE_PLAN",
+            "reason": course_response_plan_refusal_code(reason),
+        }
+
     async def course_apply_response_plan(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         operation = "course_apply_response_plan"
         replay = self._replay_operation(operation, arguments)
@@ -829,20 +859,20 @@ class CourseModeRuntimeAdapter:
                 safety_forbidden_terms=safety_terms,
                 approved_fact_terms=approved_fact_terms,
             )
-        except CourseResponsePlanError:
-            return {"accepted": False, "code": "INVALID_RESPONSE_PLAN"}
+        except CourseResponsePlanError as exc:
+            return self._invalid_response_plan(exc)
         if plan.embodied_intent is not decision.embodied_intent:
-            return {"accepted": False, "code": "INVALID_RESPONSE_PLAN"}
+            return self._invalid_response_plan("INTENT_DOES_NOT_MATCH_DECISION")
         protected_target_terms = set(safety_terms)
         if not decision.may_model_target and any(
             plan.contains_target_word(term) for term in protected_target_terms
         ):
-            return {"accepted": False, "code": "INVALID_RESPONSE_PLAN"}
+            return self._invalid_response_plan("TARGET_MODELLING_NOT_AUTHORIZED")
         protected_decision = decision.next_state in {
             SessionState.SAFETY_PAUSED, SessionState.REGULATION_BREAK,
         }
         if plan.safety_mode is not protected_decision:
-            return {"accepted": False, "code": "INVALID_RESPONSE_PLAN"}
+            return self._invalid_response_plan("SAFETY_MODE_DOES_NOT_MATCH_DECISION")
         result = {
             "accepted": True, "code": "RESPONSE_PLAN_APPLIED", "planId": plan_id,
             "responseText": plan.response_text(),
@@ -3318,6 +3348,10 @@ class LessonRuntime:
         return True
 
     async def start_protocol(self, *, preloaded: bool = False) -> None:
+        # D8: this session is live again. Retire any deferred disconnect close armed
+        # for it by a previous teardown BEFORE anything else can await, so a fast
+        # reconnect can never race its own abandonment.
+        self._claim_disconnect_abandonment()
         if await self._resume_terminal_lifecycle():
             return
         if not preloaded and not await self.preload_only():
@@ -3467,6 +3501,93 @@ class LessonRuntime:
         except Exception:  # pragma: no cover - telemetry must never break teardown
             pass
 
+    def _disconnect_abandonment_grace_sec(self) -> float:
+        """D8: the named, configuration-driven grace before a gone robot's close.
+
+        Mirrors `_course_inactivity_timeout_sec`: the same lesson config mapping, the
+        same fail-closed parse. Unusable values raise, and the caller below refuses to
+        arm on a number nobody chose rather than inventing the default.
+        """
+        config = getattr(self.conn, "config", {}) or {}
+        return disconnect_abandonment_grace_sec(_lesson_config(config))
+
+    def _arm_disconnect_abandonment(self) -> None:
+        """D8 — arm the deferred close for a session whose robot went away.
+
+        Called from `_close_runtime_resources`, immediately after the teardown
+        disposition that already classifies this exact case. `_teardown_disposition`
+        returns SCRAP for "the run died mid-flight: this connection's session is gone
+        while the backend assignment is still non-terminal", and until D8 that
+        classification was only *counted*. This turns it into a close.
+
+        Three narrowings, each deliberate:
+
+        * **SCRAP only.** A run that reached a terminal state (RESTOCK) has already
+          forwarded its own terminal event; a run that never started (REFURBISH) is
+          recoverable by re-pulling on the next connect. Neither is the hole.
+        * **S_RUNNING only, not S_PAUSED.** A PAUSED assignment is a state the backend
+          entered on purpose so a returning child can resume. D8's hole is specifically
+          RUNNING-forever, and converting a deliberate pause into a cancel on a network
+          blip would be the same category of mistake as storing `child_inactive` here.
+        * **Course mode only.** D8 is a course-mode decision and the measurement behind
+          it is a course-mode sweep. The same hole plausibly exists for non-course
+          lessons; widening the close to them is a separate decision with its own
+          blast radius, and is recorded as unproven rather than taken quietly.
+        """
+        if self.course_mode is None or self.state != S_RUNNING:
+            return
+        forwarder = self.forwarder
+        base_url = getattr(forwarder, "base_url", None)
+        device_id = getattr(forwarder, "device_id", None)
+        if not base_url or not device_id or not self.assignment_id or not self.session_id:
+            return
+        try:
+            grace_sec = self._disconnect_abandonment_grace_sec()
+        except Exception as exc:
+            # Fail closed the same way D2 does: refuse to arm on an unusable number,
+            # loudly, rather than closing a child's lesson on a value nobody chose.
+            self._log("error", f"disconnect abandonment policy misconfigured: {exc}")
+            return
+        lease = getattr(self.conn, "liveness_lease", None)
+        intent = DisconnectAbandonmentIntent(
+            assignment_id=str(self.assignment_id),
+            session_id=str(self.session_id),
+            device_id=str(device_id),
+            base_url=str(base_url),
+            token=getattr(forwarder, "token", None),
+            batch=build_disconnect_abandonment_batch(
+                assignment_id=self.assignment_id,
+                lesson_id=self.lesson_id,
+                lesson_version=self.lesson_version,
+                session_id=self.session_id,
+                step_id=self._step_id,
+                step_type=(self._step or {}).get("type"),
+                trace_context=self._trace_context,
+            ),
+            deadline=time.monotonic() + grace_sec,
+            trace={"sessionEpoch": getattr(lease, "session_epoch", None)},
+        )
+        try:
+            get_disconnect_abandonment_reaper(self.logger).register(intent)
+        except Exception as exc:  # pragma: no cover - arming must never break teardown
+            self._log("warning", f"disconnect abandonment arm failed: {type(exc).__name__}")
+
+    def _claim_disconnect_abandonment(self) -> None:
+        """This session is live again — retire any armed close for it.
+
+        Called from `start_protocol`, the single place a session becomes live, so it
+        covers a first start and a reconnect-resume alike. A robot that comes back
+        inside the grace window resumes its lesson instead of being killed by it.
+        """
+        if not self.assignment_id or not self.session_id:
+            return
+        try:
+            get_disconnect_abandonment_reaper(self.logger).claim(
+                self.assignment_id, self.session_id
+            )
+        except Exception as exc:  # pragma: no cover - a claim must never break a start
+            self._log("warning", f"disconnect abandonment claim failed: {type(exc).__name__}")
+
     async def close(self) -> None:
         try:
             await self._close_runtime_resources()
@@ -3487,6 +3608,7 @@ class LessonRuntime:
         self._retire_authored_cinematic_pending()
         await self._interrupt_course_embodied_action("runtimeClosed")
         self._emit_teardown_disposition()
+        self._arm_disconnect_abandonment()
         self._clear_conversation_fallback_ack()
         self._cancel_visual_waiters(increment_generation=True, reason="runtimeClosed")
         visual_transition_task = self._visual_transition_task
