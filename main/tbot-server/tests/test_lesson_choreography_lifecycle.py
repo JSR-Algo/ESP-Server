@@ -195,15 +195,30 @@ async def test_entrance_snapshot_survives_runtime_replacement_with_manifest_fenc
 
 
 @pytest.mark.asyncio
-async def test_processing_routes_to_orchestrator_activity_and_fences_replaced_activity():
+async def test_processing_routes_to_served_step_activity_and_fences_replaced_activity():
+    # Renamed and re-pointed by the 2026-09-19 runtime.py reconciliation. It was
+    # `test_processing_routes_to_orchestrator_activity_and_fences_replaced_activity`
+    # and asserted the orchestrator's activity is the authority. T19 run-12 F4
+    # (8a45b167) measured the opposite on the real wire (S18 run12,
+    # w01-greetings-politeness v5): the orchestrator's active_activity_id lags behind
+    # the served steps when activities complete through the passive dwell or the
+    # internal child-response path, so preferring it bound the first activity's clips
+    # to every later step and hid the last activity's exit clip - no lesson_stop, no
+    # reward. The served step is now the authority.
+    #
+    # The fencing intent this test was written for is unchanged and still proven: a
+    # queued phase belonging to a replaced activity must never render. It is simply
+    # fenced on the authority that now governs, so the activity is replaced here by
+    # moving the served step's activityId rather than the orchestrator's.
     runtime = _phase_bound_runtime()
     _activate_v5(runtime, 0)
     runtime._entrance_completed = True
     first, last = [s['id'] for s in runtime._steps]
     runtime.course_mode = SimpleNamespace(orchestrator=SimpleNamespace(active_activity_id=last))
-    assert runtime._current_cinematic_activity_id() == last
+    assert runtime._current_cinematic_activity_id() == first
     assert runtime._queue_course_cinematic_phase('thinking')
-    runtime.course_mode.orchestrator.active_activity_id = first
+    runtime._step['activityId'] = last
+    assert runtime._current_cinematic_activity_id() == last
     await asyncio.sleep(0.02)
     assert _frames(runtime) == []
 
