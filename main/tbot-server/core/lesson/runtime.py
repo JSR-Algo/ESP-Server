@@ -2463,6 +2463,9 @@ class LessonRuntime:
         self._passive_dwell_task: Optional[asyncio.Task] = None
         self._child_response_timeout_task: Optional[asyncio.Task] = None
         self._child_response_timeout_count = 0
+        # Variant B: the course-mode-aware inactivity policy (S17 run09 N2').
+        self._course_inactivity_task: Optional[asyncio.Task] = None
+        self._course_inactivity_closed = False
         self._safe_speaking_session: Optional[SafeSpeakingSession] = None
         self._motion_task: Optional[asyncio.Task] = None
         self._motion_generation = 0
@@ -2775,6 +2778,9 @@ class LessonRuntime:
             self._child_response_window_open = True
             # The child-response window is open: listening clip, no talking animation.
             self._queue_course_cinematic_phase("listen")
+            # Variant B: the child's turn is the only place a course session can be
+            # abandoned, so it is the only place the inactivity policy arms.
+            self._start_course_inactivity_timeout(assessment_generation)
             return True
         except Exception as exc:
             self._course_assessment_window_open = False
@@ -2783,6 +2789,9 @@ class LessonRuntime:
             return False
 
     def _close_course_assessment_window(self) -> None:
+        # The child's turn is over (answered, superseded, interrupted or closed): the
+        # inactivity policy only measures an OPEN turn, so it retires with the window.
+        self._cancel_course_inactivity_timeout()
         self._course_assessment_window_open = False
         self._child_response_window_open = False
         provider = getattr(self.conn, "voice_provider", None)
@@ -3452,6 +3461,7 @@ class LessonRuntime:
 
     async def _close_runtime_resources(self) -> None:
         self._closed = True
+        self._cancel_course_inactivity_timeout()
         self._course_playout_deferred_finish = None
         self._course_playout_deferred_phase = None
         phase_task = self._course_phase_task
@@ -6166,6 +6176,9 @@ class LessonRuntime:
             self._step_timeout_task,
             self._passive_dwell_task,
             self._child_response_timeout_task,
+            # Variant B's course inactivity policy also always ends in a terminal
+            # verdict (exit clip + CANCELLED lesson_stop), so it counts here too.
+            self._course_inactivity_task,
         ):
             if task is not None and not task.done():
                 return True
@@ -7262,6 +7275,125 @@ class LessonRuntime:
 
         self._child_response_timeout_task = asyncio.create_task(_timeout())
 
+    # ── course-mode inactivity policy (Variant B) ─────────────────────────────
+    #
+    # S17 run09 D3 correctly stopped the legacy per-step timer from arming under a
+    # live course session: it was pausing healthy RUNNING lessons. This is the
+    # replacement S17 run09 N2' asked for, and it differs from the legacy timer in
+    # the three ways that made the legacy one wrong here:
+    #
+    #  1. It arms on the COURSE child's turn (the assessment window), not on a step
+    #     ack. Course answers arrive through the course tools, which close that
+    #     window, so answering always retires the timer.
+    #  2. It can never fire while audio or clip playout is in flight. T15's S4 says
+    #     nothing may take the talking clip off the screen while that response's
+    #     audio is still playing, and S1/S2 say the child's turn only begins at the
+    #     real audio boundary - so an in-flight playout restarts the whole window
+    #     rather than being interrupted by it.
+    #  3. It does not pause. It ends the session through the real terminal path -
+    #     T18's D4 exit dispatch followed by the documented CANCELLED lesson_stop -
+    #     so the assignment leaves RUNNING, exactly one terminal stop is emitted,
+    #     and no second reward can follow.
+
+    def _course_inactivity_timeout_sec(self) -> float:
+        config = getattr(self.conn, "config", {}) or {}
+        lesson_cfg = _lesson_config(config)
+        raw = lesson_cfg.get("course_inactivity_timeout_sec") or 180.0
+        try:
+            parsed = float(raw)
+        except (TypeError, ValueError):
+            parsed = 180.0
+        return parsed if math.isfinite(parsed) and parsed > 0 else 180.0
+
+    def _course_playout_in_flight(self) -> bool:
+        """True while the device owns the screen for the current response (T15 S4)."""
+        if self._course_playout_active:
+            return True
+        if self._course_playout_deferred_phase is not None:
+            return True
+        if self._course_playout_deferred_finish is not None:
+            return True
+        # A clip command the device has not acknowledged yet is also playout in flight.
+        # It is bounded by the frame-ACK timeout, which drives its own terminal verdict,
+        # so waiting on it cannot strand the session.
+        if isinstance(self._cinematic_pending_command, dict):
+            return True
+        return False
+
+    def _start_course_inactivity_timeout(self, assessment_generation: int) -> None:
+        self._cancel_course_inactivity_timeout()
+        if self.course_mode is None or self._terminal_requested:
+            return
+        timeout_sec = self._course_inactivity_timeout_sec()
+
+        def _stale() -> bool:
+            return (
+                not self._is_active_runtime()
+                or self.state != S_RUNNING
+                or self._terminal_requested
+                or self.course_mode is None
+                or self._course_assessment_generation != assessment_generation
+                or not self._course_assessment_window_open
+            )
+
+        async def _timeout() -> None:
+            try:
+                while True:
+                    await self._sleep(timeout_sec)
+                    if _stale():
+                        return
+                    if not self._course_playout_in_flight():
+                        break
+                    # The device is still playing this response. The child's silence is
+                    # only measurable from the real audio boundary (T15 S1/S2/S4), so
+                    # the window restarts instead of interrupting the playout.
+            except asyncio.CancelledError:
+                return
+            await self._handle_course_inactivity_timeout(assessment_generation)
+
+        self._course_inactivity_task = asyncio.create_task(_timeout())
+
+    def _cancel_course_inactivity_timeout(self) -> None:
+        current = asyncio.current_task()
+        task = self._course_inactivity_task
+        if task is not None and task is not current and not task.done():
+            task.cancel()
+        self._course_inactivity_task = None
+
+    async def _handle_course_inactivity_timeout(self, assessment_generation: int) -> None:
+        if (
+            not self._is_active_runtime()
+            or self.state != S_RUNNING
+            or self._terminal_requested
+            or self.course_mode is None
+            or self._course_assessment_generation != assessment_generation
+        ):
+            return
+        self._log(
+            "info",
+            "course child inactive for "
+            f"{self._course_inactivity_timeout_sec()}s; ending the session through the terminal path",
+        )
+        self._course_inactivity_closed = True
+        # Retire the child's turn before the terminal path runs, so a late answer
+        # cannot re-open a session that is already closing.
+        self._course_assessment_generation += 1
+        self._close_course_assessment_window()
+        if self._renderer_v5_enabled():
+            try:
+                # T18 D4: the bound exit clip plays to its last frame before the stop,
+                # so an abandoned session leaves the screen the same way a completed
+                # one does instead of cutting to chat mid-scene.
+                await self._play_exit_phase_before_stop()
+            except Exception as exc:  # pragma: no cover - exit clip is best-effort
+                self._log("warning", f"course inactivity exit phase failed: {type(exc).__name__}")
+        if self._terminal_requested or not self._is_active_runtime():
+            return
+        # The documented CANCELLED lesson_stop - the same terminal path T18's D1 uses
+        # for an operator cancel. It projects lesson_abandoned (not lesson_failed) on
+        # the ack path, takes the assignment out of RUNNING, and is idempotent.
+        await self.stop()
+
     def _cancel_child_response_timeout(self) -> None:
         current = asyncio.current_task()
         if (
@@ -7987,6 +8119,7 @@ class LessonRuntime:
         self._cancel_step_timeout()
         self._cancel_passive_dwell()
         self._cancel_child_response_timeout()
+        self._cancel_course_inactivity_timeout()
         self._close_child_response_window()
         self._retire_authored_cinematic_pending()
         # Discard semantic work while preserving known late ACK transport sequencing.
