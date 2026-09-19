@@ -471,13 +471,14 @@ TASK4_FIRMWARE_MOUNT_INPUTS = (
 PLAYWRIGHT_FIXED_CONTRACT = {
     "testDir": "./e2e/lesson-studio",
     "globalSetup": "./e2e/lesson-studio/global-setup.cjs",
-    "outputDir": "./output/playwright-e2e/results",
+    "outputDir": "./output/playwright-course-mode/results",
+    "outputRootEnvironment": "LESSON_STUDIO_E2E_OUTPUT_ROOT",
     "timeout": 60000,
     "expectTimeout": 10000,
     "fullyParallel": False,
     "workers": 1,
     "retries": 0,
-    "reporter": [["list"], ["html", {"outputFolder": "./output/playwright-e2e/report", "open": "never"}]],
+    "reporter": [["list"], ["html", {"outputFolder": "./output/playwright-course-mode/report", "open": "never"}]],
     "use": {
         "baseUrlHelper": "lessonStudioWebOrigin",
         "trace": "retain-on-failure",
@@ -3147,16 +3148,18 @@ def generate_playwright_config(contract: object) -> str:
             "    },",
         ])
     test_matches = ", ".join(_js_string(value) for value in contract["testMatch"])
-    reporter = json.dumps(fixed["reporter"], sort_keys=True, separators=(", ", ": "))
+    reporter = '[["list"], ["html", {"open": "never", "outputFolder": path.join(outputRoot, \'report\')}]]'
     return "\n".join([
         "const { defineConfig, devices } = require('@playwright/test');",
+        "const path = require('node:path');",
         "const { lessonStudioWebOrigin } = require('./scripts/lesson-studio-e2e-environment.cjs');",
+        f"const outputRoot = path.resolve(process.env.{fixed['outputRootEnvironment']} || './output', 'playwright-course-mode');",
         "",
         "module.exports = defineConfig({",
         f"  testDir: {_js_string(fixed['testDir'])},",
         f"  globalSetup: {_js_string(fixed['globalSetup'])},",
         f"  testMatch: [{test_matches}],",
-        f"  outputDir: {_js_string(fixed['outputDir'])},",
+        "  outputDir: path.join(outputRoot, 'results'),",
         f"  timeout: {fixed['timeout']},",
         f"  expect: {{ timeout: {fixed['expectTimeout']} }},",
         f"  fullyParallel: {str(fixed['fullyParallel']).lower()},",

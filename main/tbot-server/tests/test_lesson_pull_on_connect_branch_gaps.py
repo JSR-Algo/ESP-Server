@@ -154,6 +154,9 @@ async def _run_impl(conn, patches):
 class _HealthyRuntime:
     instances = []
 
+    async def on_backend_assignment_terminal(self, *_args, **_kwargs):
+        return None
+
     def __init__(self, conn, **kw):
         self.conn = conn
         self.kwargs = kw
@@ -316,6 +319,9 @@ class StartFailureBranchTest(unittest.IsolatedAsyncioTestCase):
         class _FailingSwapRuntime:
             instances = []
 
+            async def on_backend_assignment_terminal(self, *_args, **_kwargs):
+                return None
+
             def __init__(self, conn, **kw):
                 self.conn = conn
                 self.state = "RUNNING"
@@ -349,6 +355,9 @@ class StartFailureBranchTest(unittest.IsolatedAsyncioTestCase):
 
         class _ErroringSwapRuntime:
             instances = []
+
+            async def on_backend_assignment_terminal(self, *_args, **_kwargs):
+                return None
 
             def __init__(self, conn, **kw):
                 self.conn = conn

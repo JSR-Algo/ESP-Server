@@ -95,6 +95,9 @@ class _FakeNewRuntime:
     instances = []
     start_raises = None  # set to a LessonError to drive the refused branch
 
+    async def on_backend_assignment_terminal(self, *_args, **_kwargs):
+        return None
+
     def __init__(self, conn, **kw):
         self.conn = conn
         self.kwargs = kw

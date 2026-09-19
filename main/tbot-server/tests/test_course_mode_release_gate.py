@@ -209,13 +209,14 @@ def _valid_playwright_contract() -> dict:
         "fixed": {
             "testDir": "./e2e/lesson-studio",
             "globalSetup": "./e2e/lesson-studio/global-setup.cjs",
-            "outputDir": "./output/playwright-e2e/results",
+            "outputDir": "./output/playwright-course-mode/results",
+            "outputRootEnvironment": "LESSON_STUDIO_E2E_OUTPUT_ROOT",
             "timeout": 60000,
             "expectTimeout": 10000,
             "fullyParallel": False,
             "workers": 1,
             "retries": 0,
-            "reporter": [["list"], ["html", {"outputFolder": "./output/playwright-e2e/report", "open": "never"}]],
+            "reporter": [["list"], ["html", {"outputFolder": "./output/playwright-course-mode/report", "open": "never"}]],
             "use": {
                 "baseUrlHelper": "lessonStudioWebOrigin",
                 "trace": "retain-on-failure",

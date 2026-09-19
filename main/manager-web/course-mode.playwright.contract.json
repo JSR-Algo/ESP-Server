@@ -33,33 +33,47 @@
   "specs": [
     "e2e/lesson-studio/course-mode-authoring.spec.js",
     "e2e/lesson-studio/course-mode-insights.spec.js",
-    "e2e/lesson-studio/course-mode-lifecycle.spec.js"
+    "e2e/lesson-studio/course-mode-lifecycle.spec.js",
+    "e2e/lesson-studio/course-mode-real-journey.spec.js"
   ],
   "testMatch": [
     "course-mode-authoring.spec.js",
     "course-mode-insights.spec.js",
-    "course-mode-lifecycle.spec.js"
+    "course-mode-lifecycle.spec.js",
+    "course-mode-real-journey.spec.js"
   ],
   "projects": [
     {
       "name": "course-mode-chromium-desktop",
       "device": "Desktop Chrome",
-      "viewport": { "width": 1440, "height": 900 }
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
     },
     {
       "name": "course-mode-webkit-desktop",
       "device": "Desktop Safari",
-      "viewport": { "width": 1440, "height": 900 }
+      "viewport": {
+        "width": 1440,
+        "height": 900
+      }
     },
     {
       "name": "course-mode-chromium-mobile",
       "device": "Pixel 7",
-      "viewport": { "width": 390, "height": 844 }
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
     },
     {
       "name": "course-mode-webkit-mobile",
       "device": "iPhone 13",
-      "viewport": { "width": 390, "height": 844 }
+      "viewport": {
+        "width": 390,
+        "height": 844
+      }
     }
   ],
   "assignmentPhases": {
@@ -83,15 +97,23 @@
   "fixed": {
     "testDir": "./e2e/lesson-studio",
     "globalSetup": "./e2e/lesson-studio/global-setup.cjs",
-    "outputDir": "./output/playwright-e2e/results",
+    "outputDir": "./output/playwright-course-mode/results",
     "timeout": 60000,
     "expectTimeout": 10000,
     "fullyParallel": false,
     "workers": 1,
     "retries": 0,
     "reporter": [
-      ["list"],
-      ["html", { "outputFolder": "./output/playwright-e2e/report", "open": "never" }]
+      [
+        "list"
+      ],
+      [
+        "html",
+        {
+          "outputFolder": "./output/playwright-course-mode/report",
+          "open": "never"
+        }
+      ]
     ],
     "use": {
       "baseUrlHelper": "lessonStudioWebOrigin",
@@ -99,6 +121,7 @@
       "screenshot": "only-on-failure",
       "video": "retain-on-failure",
       "serviceWorkers": "block"
-    }
+    },
+    "outputRootEnvironment": "LESSON_STUDIO_E2E_OUTPUT_ROOT"
   }
 }

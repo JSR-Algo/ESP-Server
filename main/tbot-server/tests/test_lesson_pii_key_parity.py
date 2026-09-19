@@ -1,4 +1,5 @@
 import ast
+import os
 import re
 from pathlib import Path
 
@@ -11,6 +12,10 @@ ROBOT_MANAGE_API_CLIENT = TBOT_SERVER_ROOT / "config/manage_api_client.py"
 
 
 def _backend_ingest_logic() -> Path:
+    if selected := os.environ.get("TBOT_BACKEND_WORKTREE"):
+        candidate = Path(selected) / "src/lessons/lesson-event-ingest.logic.ts"
+        assert candidate.is_file(), f"backend ingest authority is missing: {candidate}"
+        return candidate
     for root in Path(__file__).resolve().parents:
         candidate = root / "tbot-backend/src/lessons/lesson-event-ingest.logic.ts"
         if candidate.exists():

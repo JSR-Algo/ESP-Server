@@ -89,7 +89,14 @@ def test_signing_guide_keeps_private_material_outside_repo_and_signs_canonical_b
     assert "Never place" in guide
 
 
-def test_runtime_remains_fail_closed_until_operator_public_key_is_reviewed():
-    source = (SERVER / "scripts/course_mode_physical_tft_preflight.py").read_text()
-    assert "PINNED_APPROVAL_PUBLIC_KEY_RAW: bytes | None = None" in source
-    assert 'PINNED_APPROVAL_KEY_FINGERPRINT = "unprovisioned"' in source
+def test_runtime_rejects_untrusted_signatures_with_provisioned_operator_key():
+    import hashlib
+
+    from scripts import course_mode_physical_tft_preflight as preflight
+
+    raw = preflight.PINNED_APPROVAL_PUBLIC_KEY_RAW
+    assert isinstance(raw, bytes) and len(raw) == 32
+    assert hashlib.sha256(raw).hexdigest() == preflight.PINNED_APPROVAL_KEY_FINGERPRINT
+    accepted, fingerprint = preflight._verify_pinned_identity_signature(b"{}", bytes(64))
+    assert accepted is False
+    assert fingerprint == preflight.PINNED_APPROVAL_KEY_FINGERPRINT
