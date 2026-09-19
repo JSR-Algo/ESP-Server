@@ -105,7 +105,11 @@ place":
   assignment RUNNING forever, which is the D8 hole itself; "fail closed" here would
   mean failing *into* the defect. The store is then retried on the reaper's own loop
   while Redis stays configured, so a blink costs seconds of exposure, not the life of
-  the intent.
+  the intent. **"Unavailable" includes HUNG, not only refused** — every ledger call is
+  bounded by `DISCONNECT_ABANDONMENT_LEDGER_TIMEOUT_SEC`, because a paused Redis
+  answers nothing rather than raising and would otherwise leave an intent silently
+  non-durable for the length of the outage. That was found on the stack, not in the
+  tests; the constant carries the measurement.
 * **Redis unavailable at RECOVERY time** — "read it and it was empty" and "could not
   read it" are different events (`recover`). A failed read is retried on a bounded
   schedule at ERROR, and the final line states that armed closes may have been lost.
@@ -238,6 +242,24 @@ DISCONNECT_ABANDONMENT_RECOVERY_BACKOFF_SEC = (5.0, 15.0, 45.0, 120.0)
 #: How often the reaper retries persisting an intent that is armed but not yet
 #: durable (Redis was down at arm time and is configured, so it may come back).
 DISCONNECT_ABANDONMENT_REPERSIST_INTERVAL_SEC = 15.0
+
+#: Bound on every ledger call. FOUND ON THE STACK, NOT IN THE TESTS.
+#:
+#: The "Redis is unavailable" story above assumes an unavailable Redis RAISES. A Redis
+#: that is *hung* rather than dead does not: the socket is connected and simply never
+#: answers, and `redis.asyncio` has no default socket timeout, so `put` blocks forever
+#: instead of failing. Measured on this lane's own stack with `docker pause`
+#: (`runtime/traces/d10-d2-redis-blink-at-arm-v3/`): the arm landed one second before
+#: the unpause, the store blocked across the whole outage, and NO
+#: `armed_non_durable` warning was emitted — the intent was silently non-durable for
+#: the length of the hang. That is precisely the defect D10 names, in a new place, and
+#: it survived every unit test because a fake ledger either answers or raises.
+#:
+#: So every ledger call is bounded. A timeout takes the same path a refusal takes: the
+#: close stays armed, the telemetry says `durable: false` with a reason, and the
+#: re-persist loop keeps trying. 5 s is well above a healthy local round trip and well
+#: below the shortest grace the operator contract allows (45 s).
+DISCONNECT_ABANDONMENT_LEDGER_TIMEOUT_SEC = 5.0
 
 
 class DisconnectAbandonmentGraceConfigError(ValueError):
@@ -664,6 +686,7 @@ class DisconnectAbandonmentReaper:
         ledger: Any = None,
         token_fn: Any = None,
         now_ms_fn: Any = None,
+        ledger_timeout_sec: float = DISCONNECT_ABANDONMENT_LEDGER_TIMEOUT_SEC,
     ) -> None:
         self._logger = logger
         self._post_fn = post_fn
@@ -682,6 +705,7 @@ class DisconnectAbandonmentReaper:
         self._ledger = ledger
         self._token_fn = token_fn
         self._now_ms = now_ms_fn or _now_ms
+        self._ledger_timeout_sec = max(0.001, float(ledger_timeout_sec))
         self._side_tasks: set = set()
         self._recovered = False
         # Seeded from the clock, not from zero: otherwise the loop's very first
@@ -729,6 +753,17 @@ class DisconnectAbandonmentReaper:
         self._side_tasks.add(task)
         task.add_done_callback(self._side_tasks.discard)
 
+    async def _bounded(self, coro: Any) -> Any:
+        """Await one ledger call under a hard timeout. See the constant's note.
+
+        A hung Redis is indistinguishable from a very slow one at the socket, and
+        `redis.asyncio` sets no default socket timeout, so without this a store can
+        block for the whole outage and leave the intent silently non-durable. The
+        timeout is raised as `TimeoutError`, which every caller already treats the same
+        way it treats a refusal.
+        """
+        return await asyncio.wait_for(coro, timeout=self._ledger_timeout_sec)
+
     def _record_ttl_sec(self, intent: DisconnectAbandonmentIntent) -> float:
         """Grace remaining + the whole retry budget + the margin. See the constants."""
         remaining = max(0.0, intent.deadline - self._clock())
@@ -768,7 +803,7 @@ class DisconnectAbandonmentReaper:
                                      ledger=type(ledger).__name__)
             return False
         try:
-            await ledger.put(intent, ttl_sec=self._record_ttl_sec(intent))
+            await self._bounded(ledger.put(intent, ttl_sec=self._record_ttl_sec(intent)))
         except Exception as exc:
             intent.durable = False
             self.counters["persist_failed"] += 1
@@ -803,7 +838,7 @@ class DisconnectAbandonmentReaper:
         would have hit anyway.
         """
         try:
-            await self.ledger.drop(intent.assignment_id, intent.session_id)
+            await self._bounded(self.ledger.drop(intent.assignment_id, intent.session_id))
         except Exception as exc:
             self._log(
                 "warning",
@@ -824,7 +859,7 @@ class DisconnectAbandonmentReaper:
         if not assignment_id or not session_id:
             return
         try:
-            await self.ledger.note_binding(str(assignment_id), str(session_id))
+            await self._bounded(self.ledger.note_binding(str(assignment_id), str(session_id)))
         except Exception:
             # Best-effort. Losing the guard costs a recovered close one extra fence,
             # never a wrong close: the pre-fire read-back still runs.
@@ -870,7 +905,7 @@ class DisconnectAbandonmentReaper:
             self._recovered = True
             return summary
         try:
-            records = await ledger.load()
+            records = await self._bounded(ledger.load())
         except Exception as exc:
             self.counters["recovery_failed"] += 1
             summary["available"] = False
@@ -1234,7 +1269,7 @@ class DisconnectAbandonmentReaper:
         the backend's own 409 both still apply.
         """
         try:
-            bound = await self.ledger.binding(intent.assignment_id)
+            bound = await self._bounded(self.ledger.binding(intent.assignment_id))
         except Exception:
             return False
         return bool(bound) and str(bound) != str(intent.session_id)

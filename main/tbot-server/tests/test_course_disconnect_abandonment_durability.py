@@ -784,3 +784,77 @@ def _recording_logger(sink: list):
             sink.append(("error", message))
 
     return _Bound()
+
+
+# ── 8. a HUNG ledger, which is not the same as a refusing one ─────────────────
+#
+# Found on the real stack (runtime/traces/d10-d2-redis-blink-at-arm-v3/), not here: a
+# `docker pause`d Redis keeps its socket open and simply never answers, and
+# `redis.asyncio` sets no default socket timeout. The store blocked across the whole
+# outage, no exception was ever raised, and the intent was silently non-durable with
+# NO warning — the exact defect D10 names, in a new place. Every unit ledger before
+# these cases either answered or raised, which is why nothing here caught it.
+
+
+class HangingLedger(InMemoryIntentLedger):
+    """A ledger that accepts the call and never answers."""
+
+    durable = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.hanging = True
+
+    async def put(self, intent, *, ttl_sec):
+        if self.hanging:
+            await asyncio.Event().wait()
+        return await super().put(intent, ttl_sec=ttl_sec)
+
+    async def load(self):
+        if self.hanging:
+            await asyncio.Event().wait()
+        return await super().load()
+
+
+@pytest.mark.asyncio
+async def test_a_hung_ledger_is_reported_exactly_like_a_refusing_one():
+    lines: list = []
+    ledger = HangingLedger()
+    r = reaper(ledger, logger=_recording_logger(lines), ledger_timeout_sec=0.02)
+    intent = make_intent(deadline=1045.0)
+    assert r.register(intent) is True
+    await drain_side_tasks(r)
+    assert intent.durable is False
+    assert r.counters["persist_failed"] == 1
+    assert r.counters["armed_non_durable"] == 1
+    warned = [l for l in lines if "armed_non_durable" in l[1]]
+    assert warned and warned[0][0] == "warning"
+    assert "ledger_unavailable" in warned[0][1]
+    assert "TimeoutError" in warned[0][1]
+    # And the close is still armed, which is the whole point.
+    assert r.pending_keys() == ((ASSIGNMENT, SESSION),)
+
+
+@pytest.mark.asyncio
+async def test_a_hung_ledger_becomes_durable_once_it_answers_again():
+    ledger = HangingLedger()
+    r = reaper(ledger, ledger_timeout_sec=0.02)
+    intent = make_intent(deadline=1045.0)
+    r.register(intent)
+    await drain_side_tasks(r)
+    assert intent.durable is False
+    ledger.hanging = False
+    r._last_repersist = 0.0
+    await r._repersist_pending()
+    assert intent.durable is True
+
+
+@pytest.mark.asyncio
+async def test_a_hung_ledger_at_recovery_is_unavailable_not_empty():
+    lines: list = []
+    r = reaper(HangingLedger(), logger=_recording_logger(lines), ledger_timeout_sec=0.02)
+    summary = await r.recover()
+    assert summary["available"] is False
+    assert r.counters["recovery_failed"] == 1
+    failed = [l for l in lines if "recovery_failed" in l[1]]
+    assert failed and "TimeoutError" in failed[0][1]
