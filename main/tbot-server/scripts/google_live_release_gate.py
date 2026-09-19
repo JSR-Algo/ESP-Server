@@ -97,7 +97,7 @@ IDENTITY_FIELDS = (
 )
 SHA256 = re.compile(r"[0-9a-f]{64}")
 TAGGED_SHA256 = re.compile(r"sha256:[0-9a-f]{64}")
-CANONICAL_DETERMINISTIC_NODE_COUNT = 783
+CANONICAL_DETERMINISTIC_NODE_COUNT = 786
 APPROVED_RUNTIME_PLATFORM = "darwin-arm64-cp314"
 CANONICAL_DETERMINISTIC_MANIFEST = Path(
     "main/tbot-server/tests/fixtures/google_live_deterministic_nodes.txt"
