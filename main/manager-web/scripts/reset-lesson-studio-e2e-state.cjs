@@ -69,8 +69,21 @@ function composeEnvironment(env = process.env) {
   };
 }
 
+function stateModeFromEnvironment(env = process.env) {
+  const mode = env.LESSON_STUDIO_E2E_STATE_MODE ?? 'reset';
+  if (mode !== 'reset' && mode !== 'preserve') {
+    throw new Error('LESSON_STUDIO_E2E_STATE_MODE must be reset or preserve');
+  }
+  return mode;
+}
+
 function resetLessonStudioE2EState(options = resetOptionsFromEnvironment()) {
+  stateModeFromEnvironment();
   preflightLessonStudioE2EStack({ projectName: options.projectName, composeFile: options.composeFile, composeExecutable: options.composeExecutable });
+  // Both modes clear only the fixture accounts' login throttling (Redis rate-limit keys and
+  // admin_login_attempts for the e2e emails). Preserve mode differs solely by never requiring
+  // or re-running the seed jobs, so recovered lesson data stays untouched while every real
+  // login can still obtain a fresh captcha.
   for (const [command, ...args] of buildResetCommands(options)) {
     const result = spawnSync(command, args, {
       encoding: 'utf8',
@@ -92,10 +105,14 @@ function preflightLessonStudioE2EStack({ env = process.env, projectName, compose
   if (result.status !== 0) throw new Error(result.stderr || `command failed: ${command}`);
   return result.stdout.trim();
 } } = {}) {
+  const stateMode = stateModeFromEnvironment(env);
   const compose = composeExecutable || composeExecutableFromEnvironment(env, { requireExplicit: env.CI === '1' || env.CI === 'true' });
   const project = projectName || env.COMPOSE_PROJECT_NAME || env.LESSON_STUDIO_E2E_COMPOSE_PROJECT_NAME || 'tbot-ls-e2e';
   const file = composeFile || DEFAULT_COMPOSE_FILE;
-  const services = ['redis', 'postgres', 'mysql', 'backend', 'seed-postgres', 'web', 'seed-mysql'];
+  // Existing fixture data is checked by the real journeys, not by rerunning seed jobs.
+  const services = stateMode === 'preserve'
+    ? ['redis', 'postgres', 'mysql', 'backend', 'web']
+    : ['redis', 'postgres', 'mysql', 'backend', 'seed-postgres', 'web', 'seed-mysql'];
   const backendRoot = env.TBOT_LESSON_STUDIO_BACKEND_MOUNT_ROOT || env.TBOT_BACKEND_WORKTREE;
   const firmwareRoot = env.TBOT_LESSON_STUDIO_FIRMWARE_MOUNT_ROOT || env.TBOT_FIRMWARE_WORKTREE;
   for (const service of services) {

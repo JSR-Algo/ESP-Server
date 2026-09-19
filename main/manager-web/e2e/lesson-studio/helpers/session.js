@@ -78,7 +78,12 @@ async function loginAsLessonAuthor(page, credentials = {}) {
     return response.status;
   })).toBe(200);
 
-  require('./real-service-evidence').expectObservedFault(page, 'GET', '/nestjs/v1/admin/courses', 401, 'real author sign-in challenge');
+  // The course-management view issues three authoring requests before an author session exists;
+  // each real 401 challenge is registered explicitly so no other HTTP failure is tolerated.
+  const { expectObservedFault } = require('./real-service-evidence');
+  expectObservedFault(page, 'GET', '/nestjs/v1/admin/lesson-rollout-capabilities', 401, 'real author sign-in challenge');
+  expectObservedFault(page, 'GET', '/nestjs/v1/admin/courses', 401, 'real author sign-in challenge');
+  expectObservedFault(page, 'GET', '/nestjs/v1/admin/course-insights/course-quality', 401, 'real author sign-in challenge');
   await page.goto('/login#/course-management');
 
   const authorDialog = page.getByRole('dialog', { name: /sign in as author/i });

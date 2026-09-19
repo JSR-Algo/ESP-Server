@@ -6,9 +6,15 @@ function observeJourney(page) {
   const evidence = { pageErrors: [], consoleErrors: [], requestFailures: [], httpFailures: [], expectedFaults: [], checkpoints: [] };
   const allowed = [];
   page.on('pageerror', error => evidence.pageErrors.push(error.message));
-  page.on('requestfailed', request => evidence.requestFailures.push({
-    method: request.method(), url: request.url(), error: request.failure()?.errorText || 'unknown',
-  }));
+  page.on('requestfailed', request => {
+    // Browser-cancelled same-origin media probes (nginx 206 range fetches the <video> element
+    // abandons after buffering) and navigation-cancelled Google web fonts are not service faults.
+    const { isExpectedNavigationAbort } = require('./page-errors');
+    if (isExpectedNavigationAbort(request)) return;
+    evidence.requestFailures.push({
+      method: request.method(), url: request.url(), error: request.failure()?.errorText || 'unknown',
+    });
+  });
   page.on('console', message => {
     if (message.type() === 'error') evidence.consoleErrors.push({ text: message.text(), url: message.location().url || '' });
   });

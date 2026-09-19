@@ -1,5 +1,92 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
+const { readFileSync } = require('node:fs');
+const vm = require('node:vm');
+
+// Subprocess doubles exercise preparation control flow, never real service readiness.
+function recoveryHarness(mode = 'preserve', fault, seedsRunning = false) {
+  const env = {
+    LESSON_STUDIO_E2E_STATE_MODE: mode,
+    COMPOSE_PROJECT_NAME: 'isolated-recovery',
+    TBOT_DOCKER_COMPOSE_EXECUTABLE: '/trusted/compose',
+    TBOT_BACKEND_WORKTREE: '/candidate/backend',
+    TBOT_FIRMWARE_WORKTREE: '/candidate/firmware',
+    TBOT_LESSON_STUDIO_BACKEND_IMAGE_ID: 'sha256:backend',
+    TBOT_LESSON_STUDIO_WEB_IMAGE_ID: 'sha256:web',
+  };
+  const calls = [];
+  const spawnSync = (command, args) => {
+    calls.push({ command, args });
+    if (args.includes('ps')) {
+      const service = args.at(-1);
+      return { status: 0, stdout: service.startsWith('seed-') && !seedsRunning ? '' : `${service}-container` };
+    }
+    if (args.includes('inspect')) {
+      const service = args.at(-1).replace('-container', '');
+      if (args.some(arg => arg.includes('.NetworkSettings.Ports'))) return { status: 0, stdout: JSON.stringify({
+        [service === 'backend' ? '3000/tcp' : '8002/tcp']: [{ HostIp: fault === 'port' ? '0.0.0.0' : '127.0.0.1', HostPort: service === 'backend' ? '3100' : '8102' }],
+      }) };
+      if (args.some(arg => arg.includes('.Mounts'))) return { status: 0, stdout: JSON.stringify([
+        ['asset-manifest.json', '/candidate/backend/src/lessons/fixtures/tvideo-raw-code/assets/asset-manifest.json'],
+        ['admin', '/candidate/backend/src/lessons/fixtures/tvideo-raw-code/assets/admin'],
+        ['esp-tft', '/candidate/backend/src/lessons/fixtures/tvideo-raw-code/assets/esp-tft'],
+        ['assets', '/candidate/firmware/lesson/assets'],
+      ].map(([suffix, source]) => ({ Type: 'bind', Source: fault === 'mount' ? '/stale' : source, Destination: `/usr/share/nginx/html/tvideo-demo/${suffix}`, RW: false }))) };
+      return { status: 0, stdout: `${fault === 'health' ? 'unhealthy' : 'healthy'} sha256:${fault === 'image' ? 'stale' : service}` };
+    }
+    if (args.includes('exec')) return { status: 0, stdout: '' };
+    throw new Error(`unexpected mutating command: ${args.join(' ')}`);
+  };
+  const fixtureCleanupOnly = () => calls.filter(call => call.args.includes('exec')).every(call =>
+    (call.args.includes('redis') && call.args.some(arg => /^rate_limit:|redis\.call\('keys','rl:\*'\)/.test(arg)))
+    || (call.args.includes('postgres') && call.args.some(arg => /^DELETE FROM admin_login_attempts WHERE email IN \('lesson-author-e2e@local\.invalid'/.test(arg))));
+  const module = { exports: {} };
+  const sandbox = { module, __dirname, process: { env }, require: id => id === 'node:child_process' ? { spawnSync } : require(id) };
+  vm.runInNewContext(readFileSync(require.resolve('./reset-lesson-studio-e2e-state.cjs'), 'utf8'), sandbox);
+  return { api: module.exports, calls, env, fixtureCleanupOnly };
+}
+
+test('preserve mode prepares both global setup and each real login with fixture throttle cleanup only and no seed jobs', async () => {
+  const harness = recoveryHarness();
+  const load = relative => {
+    const filename = require.resolve(relative);
+    const localRequire = require('node:module').createRequire(filename);
+    const module = { exports: {} };
+    vm.runInNewContext(readFileSync(filename, 'utf8'), { module, process: { env: harness.env }, require: id => id.includes('reset-lesson-studio-e2e-state') ? harness.api : localRequire(id) });
+    return module.exports;
+  };
+  await load('../e2e/lesson-studio/global-setup.cjs')();
+  const atLogin = new Error('actual login navigation reached');
+  await assert.rejects(load('../e2e/lesson-studio/helpers/session.js').loginAsLessonAuthor({ goto: async url => {
+    assert.equal(url, '/login'); throw atLogin;
+  } }), error => error === atLogin);
+  assert.equal(harness.calls.filter(call => call.args.includes('ps')).length, 10);
+  assert.equal(harness.calls.filter(call => call.args.includes('exec')).length, 6);
+  assert.ok(harness.fixtureCleanupOnly());
+  assert.ok(harness.calls.every(call => !call.args.some(arg => arg.startsWith('seed-'))));
+});
+
+test('invalid state mode fails before any service subprocess', () => {
+  const harness = recoveryHarness('perserve');
+  assert.throws(() => harness.api.resetLessonStudioE2EState(), /STATE_MODE.*reset.*preserve/);
+  assert.equal(harness.calls.length, 0);
+});
+
+test('preserve mode runs only fixture throttle cleanup even when legacy seed jobs remain running', () => {
+  const harness = recoveryHarness('preserve', undefined, true);
+  assert.doesNotThrow(() => harness.api.resetLessonStudioE2EState());
+  assert.equal(harness.calls.filter(call => call.args.includes('exec')).length, 3);
+  assert.ok(harness.fixtureCleanupOnly());
+  assert.ok(harness.calls.every(call => !call.args.some(arg => arg.startsWith('seed-'))));
+});
+
+for (const [fault, message] of [['image', /image ID mismatch/], ['mount', /asset mounts mismatch/], ['port', /port binding mismatch/], ['health', /not healthy/]]) {
+  test(`preserve mode still rejects ${fault} mismatch without resetting state`, () => {
+    const harness = recoveryHarness('preserve', fault);
+    assert.throws(() => harness.api.resetLessonStudioE2EState(), message);
+    assert.ok(harness.calls.every(call => !call.args.includes('exec')));
+  });
+}
 
 const {
   buildResetCommands,

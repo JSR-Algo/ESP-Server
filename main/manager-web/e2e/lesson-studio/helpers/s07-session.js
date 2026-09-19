@@ -33,9 +33,16 @@ async function s07Api(page, method, route, data) {
   return (await response.json()).data;
 }
 async function s07Draft(page) {
-  // Without a session file the caller already completed the real manager+author login; the
-  // manager login page redirects to /home while a token exists, so a second real login is impossible.
-  if (!process.env.CPR_S07_SESSION_FILE) return require('./admin-api').createCourseModeDraft(page);
+  // Without a session file the draft is created through the real manager+author session held in
+  // the page's localStorage. A test whose first action is s07Draft still has its page on
+  // about:blank, and that opaque origin denies every localStorage access, so adminAuthHeaders
+  // throws SecurityError before any request is made. Open the session first: openS07Session is
+  // idempotent, and the manager login page redirects to /home while a token exists, so a second
+  // real login is neither attempted nor possible.
+  if (!process.env.CPR_S07_SESSION_FILE) {
+    await openS07Session(page);
+    return require('./admin-api').createCourseModeDraft(page);
+  }
   const config=await openS07Session(page);
   const original=await s07Api(page,'GET',`/lessons/${config.source}/course-mode`);
   const key=`cpr-s07-${Date.now()}-${Math.random().toString(36).slice(2,7)}`;
