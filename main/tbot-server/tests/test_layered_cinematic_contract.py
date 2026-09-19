@@ -139,8 +139,11 @@ def test_uuid_phase_refs_project_to_canonical_shared_cache_keys():
     assert all(AssetState(a).renderer_v5_media for a in projected)
     assert project_layered_cinematic_phase(phase, _pack())['phaseId'] == 'teach'
     phase['layers'][0]['assetVersionId'] = 'unrelated@v9'
+    malformed = _manifest_asset_cache_inputs(manifest)
     with pytest.raises(LayeredCinematicContractError):
-        _manifest_asset_cache_inputs(manifest)
+        validate_layered_cinematic_runtime_asset(malformed[0])
+    with pytest.raises(LayeredCinematicContractError):
+        project_layered_cinematic_phase(phase, _pack())
 
 
 def test_course_mode_v5_fixture_preserves_reviewed_layered_identity() -> None:
