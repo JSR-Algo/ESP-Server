@@ -613,6 +613,7 @@ class ConnectionHandler:
         if isinstance(message, str) and (
             self._is_hello_message(message)
             or self._is_ping_message(message)
+            or self._is_system_ack_message(message)
             or self._is_mcp_message(message)
             or self._is_abort_message(message)
         ):
@@ -1084,6 +1085,14 @@ class ConnectionHandler:
         except (TypeError, json.JSONDecodeError):
             return False
         return isinstance(payload, dict) and payload.get("type") == "mcp"
+
+    def _is_system_ack_message(self, message):
+        # Device command ACKs must not wait for binding or voice readiness.
+        try:
+            payload = json.loads(message)
+        except (TypeError, json.JSONDecodeError):
+            return False
+        return isinstance(payload, dict) and payload.get("type") == "system_ack"
 
     def _is_listen_control_message(self, message):
         return self._listen_control_state(message) is not None

@@ -28,8 +28,12 @@ async function visitPersistedPhases(page, manifest, onPhase) {
         const asset = manifest.assets.find(item => item.assetKey === layer.assetKey
           && item.version === layer.version && item.sha256 === layer.sha256);
         expect(asset, `${activityId}/${phase.phaseId}/${slot} persisted source`).toBeTruthy();
-        const media = layer.metadata.mediaType.startsWith('video/') ? rendered.locator('video') : rendered;
-        await expect(media).toHaveAttribute('src', asset.url);
+        if (layer.metadata.mediaType.startsWith('video/')) {
+          // The MJPEG adapter renders a canvas; source identity belongs to the layer.
+          await expect(rendered).toHaveAttribute('data-source-url', asset.url);
+        } else {
+          await expect(rendered).toHaveAttribute('src', asset.url);
+        }
       }
       visited.add(phase.phaseId);
       await onPhase({ stage, phase, activityId, stepIndex });

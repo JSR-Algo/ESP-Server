@@ -39,24 +39,11 @@ REPO="$TBOT_REPRO_REPO_ROOT"
 WORKTREE="$(pwd)"
 cd "$WORKTREE/main/manager-web"
 
-# Materialize the lesson-studio checks. `main` carries them after the merge and,
-# unlike a task branch, is never deleted — and unlike a pinned SHA it never drifts
-# behind a later fix that deliberately changes the asserted source shape. If the
-# ref is unavailable, fall back to the checkout's own copy; if there is none
-# either, fail loudly rather than report a vacuous pass.
-for rel in \
-  main/manager-web/scripts/check-lesson-builder-logic.cjs \
-  main/manager-web/scripts/check-lesson-visual-selection.cjs \
-  main/manager-web/scripts/check-lesson-step-editor-state.cjs
-do
-  dest="scripts/$(basename "$rel")"
-  if ! git -C "$REPO" show "main:$rel" > "$dest" 2>/dev/null; then
-    rm -f "$dest"
-    git -C "$REPO" checkout main -- "$rel" 2>/dev/null || true
-    if [ ! -s "$dest" ]; then
-      echo "FATAL: cannot materialize $dest from main or the checkout" >&2
-      exit 2
-    fi
+# Exercise this candidate's assertions without replacing them from another ref.
+for script in check-lesson-builder-logic.cjs check-lesson-visual-selection.cjs check-lesson-step-editor-state.cjs; do
+  if [ ! -s "scripts/$script" ]; then
+    echo "FATAL: candidate check missing: $script" >&2
+    exit 2
   fi
 done
 

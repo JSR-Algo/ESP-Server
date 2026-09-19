@@ -132,6 +132,16 @@ class GoogleLiveAudioBridge:
         self._moderation_block_active = False
         self._fallback_emotion_index = 0
         self._last_emotion_sent = None
+        # Model transcript presentation is throttled: the robot LCD redraw costs
+        # ~125 ms per JSON message, so per-chunk display/emotion frames starve
+        # the firmware main loop (START admission, audio) during playback.
+        self._display_text = ""
+        self._display_pending = False
+        self._display_last_sent_at = 0.0
+        self._display_flush_task = None
+        self._emotion_sent_for_response = False
+        self._gesture_fired_for_response = False
+        self._gesture_task = None
         self._audio_executor = ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix=f"google-live-audio-{id(self):x}",
@@ -232,7 +242,11 @@ class GoogleLiveAudioBridge:
                 await self._send_llm_message(transcript_text)
                 return True
             if event.get("source") == "model":
-                await self._send_emotion_message(transcript_text)
+                if not self._emotion_sent_for_response:
+                    self._emotion_sent_for_response = True
+                    await self._send_emotion_message(transcript_text)
+                await self._queue_model_display_text(transcript_text)
+                return True
             await self._send_display_message(transcript_text)
             return True
 
@@ -296,6 +310,7 @@ class GoogleLiveAudioBridge:
             self._output_chunk_count = 0
             self._output_byte_count = 0
             self._evidence_first_chunk_logged = False
+            self._reset_model_presentation()
             self.logger.bind(tag="GoogleLive").info("Google Live audio_start")
             await self._send_tts_message("start")
             return True
@@ -359,6 +374,10 @@ class GoogleLiveAudioBridge:
                 self._active_response_id = None
                 self._clear_lesson_prompt_output_gate()
                 return True
+            playout_getter = getattr(
+                getattr(self.conn, "voice_provider", None), "current_course_playout_id", None
+            )
+            origin_playout_id = playout_getter() if callable(playout_getter) else None
             flush_failed = False
             try:
                 flushed_packets = await self._flush_output_audio()
@@ -366,6 +385,8 @@ class GoogleLiveAudioBridge:
                 flushed_packets = 0
                 flush_failed = True
             delivery_ok = await self._wait_for_output_deliveries()
+            if origin_playout_id is not None and playout_getter() != origin_playout_id:
+                return True
             chunks = self._output_chunk_count
             byte_count = self._output_byte_count
             self.logger.bind(tag="GoogleLive").info(
@@ -378,6 +399,9 @@ class GoogleLiveAudioBridge:
             self._output_byte_count = 0
             self.conn.google_live_audio_out_started_at = None
             self._active_response_id = None
+            await self._flush_model_display()
+            if origin_playout_id is not None and playout_getter() != origin_playout_id:
+                return True
             await self._send_tts_message("stop")
             if flush_failed or not delivery_ok:
                 raise RuntimeError("Google Live model output delivery failed")
@@ -509,13 +533,13 @@ class GoogleLiveAudioBridge:
 
         return False
 
-    async def stop_output(self):
-        await self._stop_output(continue_listening=True)
+    async def stop_output(self, *, playout_id=None):
+        await self._stop_output(continue_listening=True, playout_id=playout_id)
 
-    async def stop_output_for_lesson(self):
-        await self._stop_output(continue_listening=False)
+    async def stop_output_for_lesson(self, *, playout_id=None):
+        await self._stop_output(continue_listening=False, playout_id=playout_id)
 
-    async def _stop_output(self, *, continue_listening):
+    async def _stop_output(self, *, continue_listening, playout_id=None):
         output_age = self._current_output_age_sec()
         self.conn.google_live_audio_out_started_at = None
         self._mark_active_response_cancelled()
@@ -539,7 +563,7 @@ class GoogleLiveAudioBridge:
             round(output_age * 1000, 1) if output_age is not None else 0.0,
         )
         self._schedule_unblock_timeout()
-        await self._send_tts_stop_now(continue_listening=continue_listening)
+        await self._send_tts_stop_now(continue_listening=continue_listening, playout_id=playout_id)
 
     def current_response_id(self):
         return self._active_response_id
@@ -864,6 +888,99 @@ class GoogleLiveAudioBridge:
 
         await send_display_message(self.conn, text)
 
+    _DISPLAY_THROTTLE_SEC = 1.0
+    _DISPLAY_MAX_CHARS = 160
+    _GESTURE_KEYWORDS = (
+        "giơ tay",
+        "dơ tay",
+        "giơ hai tay",
+        "nâng tay",
+        "raise your hand",
+        "raise your hands",
+        "hands up",
+        "hand up",
+    )
+    _GESTURE_HOLD_SEC = 4.0
+
+    def _reset_model_presentation(self):
+        self._display_text = ""
+        self._display_pending = False
+        self._emotion_sent_for_response = False
+        self._gesture_fired_for_response = False
+        task = self._display_flush_task
+        self._display_flush_task = None
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def _queue_model_display_text(self, text):
+        self._display_text += text
+        self._display_pending = True
+        self._maybe_trigger_speech_gesture(self._display_text)
+        now = time.monotonic()
+        if now - self._display_last_sent_at >= self._DISPLAY_THROTTLE_SEC:
+            await self._flush_model_display()
+            return
+        if self._display_flush_task is None or self._display_flush_task.done():
+            self._display_flush_task = asyncio.create_task(
+                self._delayed_display_flush()
+            )
+
+    async def _delayed_display_flush(self):
+        try:
+            await asyncio.sleep(self._DISPLAY_THROTTLE_SEC)
+            await self._flush_model_display()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.logger.bind(tag="GoogleLive").warning(
+                "Google Live display flush failed: {}", exc
+            )
+
+    async def _flush_model_display(self):
+        if not self._display_pending:
+            return
+        self._display_pending = False
+        text = self._display_text.strip()
+        if not text:
+            return
+        if len(text) > self._DISPLAY_MAX_CHARS:
+            text = text[-self._DISPLAY_MAX_CHARS :]
+        self._display_last_sent_at = time.monotonic()
+        await self._send_display_message(text)
+
+    def _maybe_trigger_speech_gesture(self, text):
+        """Raise the robot hand when the robot itself says 'giơ tay'."""
+        if self._gesture_fired_for_response:
+            return
+        lowered = (text or "").lower()
+        if not any(keyword in lowered for keyword in self._GESTURE_KEYWORDS):
+            return
+        func_handler = getattr(self.conn, "func_handler", None)
+        if func_handler is None:
+            return
+        self._gesture_fired_for_response = True
+        previous = self._gesture_task
+        if previous is not None and not previous.done():
+            previous.cancel()
+        self._gesture_task = asyncio.create_task(self._run_speech_gesture(func_handler))
+
+    async def _run_speech_gesture(self, func_handler):
+        try:
+            self.logger.bind(tag="GoogleLive").info("speech_gesture raise_right_arm")
+            await func_handler.handle_llm_function_call(
+                self.conn, {"name": "raise_right_arm", "arguments": {}}
+            )
+            await asyncio.sleep(self._GESTURE_HOLD_SEC)
+            await func_handler.handle_llm_function_call(
+                self.conn, {"name": "lower_right_arm", "arguments": {}}
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.logger.bind(tag="GoogleLive").warning(
+                "Google Live speech gesture failed: {}", exc
+            )
+
     async def _send_llm_message(self, text):
         if self.conn.websocket is None:
             return
@@ -921,18 +1038,42 @@ class GoogleLiveAudioBridge:
             return
         from core.handle.sendAudioHandle import send_tts_message
 
-        extra_fields = None
+        provider = getattr(self.conn, "voice_provider", None)
+        playout_id = None
+        if state == "start":
+            prepare = getattr(provider, "prepare_course_playout", None)
+            if callable(prepare):
+                playout_id = prepare(self._active_response_id)
+        elif state == "stop":
+            current = getattr(provider, "current_course_playout_id", None)
+            if callable(current):
+                playout_id = current()
+        extra_fields = {"playoutId": playout_id} if playout_id else {}
         if state == "stop":
-            extra_fields = {
+            extra_fields.update({
                 "continue_listening": True,
                 "listen_mode": "realtime",
-            }
+            })
             drain_id = getattr(
                 self.conn, "google_live_lesson_prompt_drain_id", None
             )
             if isinstance(drain_id, str) and drain_id:
                 extra_fields["drainId"] = drain_id
-        await send_tts_message(self.conn, state, extra_fields=extra_fields)
+        try:
+            mark_stop = getattr(provider, "mark_course_playout_stop_sent", None)
+            send_options = {}
+            if state == "stop" and playout_id and callable(mark_stop):
+                # Register at actual dispatch, after queue drain and stale-stop
+                # filtering, so an immediate device receipt cannot race us.
+                send_options["on_send_started"] = lambda: mark_stop(playout_id)
+            sent = await send_tts_message(self.conn, state, extra_fields=extra_fields or None, **send_options)
+            if sent is False:
+                return
+        except BaseException:
+            cancel = getattr(provider, "cancel_course_playout", None)
+            if callable(cancel):
+                cancel()
+            raise
         if state == "start":
             self.conn.client_is_speaking = True
         elif state == "stop":
@@ -948,7 +1089,14 @@ class GoogleLiveAudioBridge:
                 "tts_stop_sent continue_listening=true listen_mode=realtime"
             )
 
-    async def _send_tts_stop_now(self, *, continue_listening=True):
+    async def _send_tts_stop_now(self, *, continue_listening=True, playout_id=None):
+        provider = getattr(self.conn, "voice_provider", None)
+        current = getattr(provider, "current_course_playout_id", None)
+        if playout_id is None:
+            playout_id = current() if callable(current) else None
+        cancel = getattr(provider, "cancel_course_playout", None)
+        if callable(cancel):
+            cancel()
         if self.conn.websocket is None:
             return
         if hasattr(self.conn, "clearSpeakStatus"):
@@ -960,6 +1108,7 @@ class GoogleLiveAudioBridge:
                 {
                     "type": "tts",
                     "state": "stop",
+                    **({"playoutId": playout_id} if playout_id else {}),
                     # Patch 3.4: this sender is interrupt-only (barge-in). Tag the
                     # stop so the device cuts playback immediately (ResetDecoder)
                     # instead of draining the queue like a normal end-of-turn stop.

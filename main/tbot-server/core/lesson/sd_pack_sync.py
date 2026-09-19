@@ -53,6 +53,9 @@ SD_PACK_SYNC_BASE_SEC = 30
 SD_PACK_SYNC_PER_ASSET_SEC = 8
 SD_PACK_SYNC_BYTES_PER_SEC = 16 * 1024
 SD_PACK_SYNC_RECOVERY_BACKOFF_SEC = 30
+SD_PACK_SYNC_DEVICE_COOLDOWN_SEC = 30 * 60
+SD_PACK_SYNC_BUSY_ABORT_COUNT = 2
+_LAST_FULL_SYNC_AT: dict[str, float] = {}
 DEFAULT_CACHE_ROOT = "data/lesson_assets"
 DEFAULT_LOCAL_ROOT = "sd://tbot/lesson-assets"
 _LOWER_SHA256_RE = re.compile(r"[0-9a-f]{64}")
@@ -404,7 +407,24 @@ async def sync_cached_lesson_assets_to_sd(
             for pack in packs
             if str(pack.get("cacheKey") or "") in only_cache_keys
         ]
+    # Every sync_to_sd call makes the firmware mute wake-word detection for a
+    # few seconds, and a rejected call still blocks its main loop. Re-running a
+    # full pack drain on every reconnect starved "Hi ESP" for minutes, so a
+    # device is only drained once per cooldown window and a run stops early
+    # once the firmware reports it is busy.
+    device_key = str(getattr(conn, "device_id", "") or "")
+    now = time.monotonic()
+    if device_key and packs and len(packs) > 1:
+        last = _LAST_FULL_SYNC_AT.get(device_key, 0.0)
+        if now - last < SD_PACK_SYNC_DEVICE_COOLDOWN_SEC:
+            _log(conn, "info", f"cached SD pack sync skipped reason=device_cooldown packs={len(packs)}")
+            return {"skipped": "device_cooldown", "packs": len(packs)}
+        _LAST_FULL_SYNC_AT[device_key] = now
+    consecutive_busy = 0
     for pack in packs:
+        if consecutive_busy >= SD_PACK_SYNC_BUSY_ABORT_COUNT:
+            _log(conn, "warning", f"cached SD pack sync aborted reason=device_busy remaining={len(packs) - synced - failed}")
+            break
         while is_busy():
             await pause(poll_interval)
         try:
@@ -420,8 +440,10 @@ async def sync_cached_lesson_assets_to_sd(
             normalized = normalize_firmware_sync_result(cache_key, result, pack)
             if normalized["ready"]:
                 synced += 1
+                consecutive_busy = 0
             else:
                 failed += 1
+                consecutive_busy += 1
                 _log(
                     conn,
                     "warning",
@@ -439,6 +461,7 @@ async def sync_cached_lesson_assets_to_sd(
             raise
         except Exception as exc:
             failed += 1
+            consecutive_busy += 1
             cache_key = str(pack.get("cacheKey") or "")
             from core.api.device_mcp_admin_handler import (
                 MCPLessonAssetSyncInvalidRequestError,

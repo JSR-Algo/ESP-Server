@@ -186,6 +186,9 @@ class _FakeNewRuntime:
     async def start_protocol(self, *, preloaded=False):
         return None
 
+    async def on_backend_assignment_terminal(self, *_args, **_kwargs):
+        self.closed = True
+
     async def close(self):
         self.closed = True
 

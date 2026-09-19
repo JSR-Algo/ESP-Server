@@ -60,7 +60,7 @@ def state(runtime):
 @pytest.mark.parametrize('operation', ['stop', 'cancel'])
 @pytest.mark.parametrize('admission_change', ['rollout_disabled', 'capability_missing'])
 @pytest.mark.parametrize('value', MALFORMED, ids=PARTITIONS)
-async def test_restored_terminal_rejects_malformed_then_completes_once(operation, admission_change, value, request):
+async def test_restored_terminal_rejects_malformed_then_completes_once(operation, admission_change, value, request, tmp_path):
     baseline_tasks = set(asyncio.all_tasks())
     runtime = runtime_with_store()
     restarted = None
@@ -166,7 +166,8 @@ async def test_restored_terminal_rejects_malformed_then_completes_once(operation
         pending = [t for t in asyncio.all_tasks() if t not in baseline_tasks and not t.done()]
         record['cleanup'] = dict(oldClosed=runtime._closed,
             restoredClosed=restarted._closed if restarted else None, remainingTasks=len(pending))
-        destination = Path(os.environ['TBOT_RUN22_CASES'])
+        destination = Path(os.environ.get('TBOT_RUN22_CASES', str(tmp_path)))
+        destination.mkdir(parents=True, exist_ok=True)
         name = request.node.callspec.id
         (destination/(name+'.json')).write_text(json.dumps(record, indent=2, sort_keys=True)+'\n')
         assert not pending, pending
