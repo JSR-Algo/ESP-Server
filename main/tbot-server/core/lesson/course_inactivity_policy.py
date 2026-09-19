@@ -38,11 +38,33 @@ from typing import Any
 # parsed, FAILS CLOSED — the loader refuses it and the server refuses to boot —
 # rather than silently reverting to the default, because a silent revert means an
 # operator who set 600 gets 180 and is never told.
+#
+# MIN RAISED 30 s -> 90 s (D2's first measured rider, 2026-09-19; evidence in
+# coordination/course-inactivity-timer-observability-20260919/report.md §3(c),
+# adopted by owner decision D8's lane). The floor is no longer only about the
+# ~25 s pause. The sweep measured a second and stronger reason: the socket-level
+# peer-silence watchdog (lesson.peer_silence_timeout_sec, shipped default 60 s,
+# core/connection.py) is armed only while the lesson runtime is in one of its live
+# states, so an abandonment timeout at or below that budget fires FIRST, takes the
+# runtime out of those states and suppresses the transport cleanup that would
+# otherwise have closed a half-open socket at 60 s. A timeout under the transport
+# budget buys nothing on a gone robot and costs the socket close. The floor is
+# therefore set clear ABOVE the shipped 60 s budget — 90 s, itself one of the four
+# values observed firing at exactly its configured time (90.01 s) — so the two
+# budgets cannot invert under the shipped transport default. This is a floor on
+# what an OPERATOR may configure; the 180 s DEFAULT is unchanged (D2 is settled by
+# measurement and was deliberately left alone), and the in-process parse below
+# stays bounds-free so tests can still drive the policy with a short window.
 COURSE_INACTIVITY_TIMEOUT_CONFIG_KEY = "course_inactivity_timeout_sec"
 COURSE_INACTIVITY_TIMEOUT_ENV_VAR = "LESSON_COURSE_INACTIVITY_TIMEOUT_SEC"
 COURSE_INACTIVITY_TIMEOUT_DEFAULT_SEC = 180.0
-COURSE_INACTIVITY_TIMEOUT_MIN_SEC = 30.0
+COURSE_INACTIVITY_TIMEOUT_MIN_SEC = 90.0
 COURSE_INACTIVITY_TIMEOUT_MAX_SEC = 1800.0
+
+#: The shipped lesson.peer_silence_timeout_sec transport budget the floor above has
+#: to stay clear of. Named so the relationship is checkable by a test rather than
+#: living only in the comment.
+PEER_SILENCE_TIMEOUT_SHIPPED_DEFAULT_SEC = 60.0
 
 
 class CourseInactivityTimeoutConfigError(ValueError):

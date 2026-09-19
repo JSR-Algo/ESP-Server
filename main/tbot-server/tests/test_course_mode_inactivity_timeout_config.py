@@ -32,6 +32,7 @@ from core.lesson.course_inactivity_policy import (
     COURSE_INACTIVITY_TIMEOUT_ENV_VAR,
     COURSE_INACTIVITY_TIMEOUT_MAX_SEC,
     COURSE_INACTIVITY_TIMEOUT_MIN_SEC,
+    PEER_SILENCE_TIMEOUT_SHIPPED_DEFAULT_SEC,
     CourseInactivityTimeoutConfigError,
     assert_course_inactivity_timeout_in_range,
     course_inactivity_timeout_sec,
@@ -59,8 +60,14 @@ def test_the_default_is_180_seconds_and_is_a_named_constant():
     assert COURSE_INACTIVITY_TIMEOUT_DEFAULT_SEC == 180.0
     assert COURSE_INACTIVITY_TIMEOUT_CONFIG_KEY == "course_inactivity_timeout_sec"
     assert COURSE_INACTIVITY_TIMEOUT_ENV_VAR == "LESSON_COURSE_INACTIVITY_TIMEOUT_SEC"
-    # The derivation's floor sits above the ~25 s pause it must not collide with.
+    # The derivation's floor sits above the ~25 s pause it must not collide with, and
+    # since D2's first measured rider it also sits clear above the 60 s peer-silence
+    # transport budget it must not invert with.
     assert COURSE_INACTIVITY_TIMEOUT_MIN_SEC > 25.0
+    assert COURSE_INACTIVITY_TIMEOUT_MIN_SEC > PEER_SILENCE_TIMEOUT_SHIPPED_DEFAULT_SEC
+    assert COURSE_INACTIVITY_TIMEOUT_MIN_SEC == 90.0
+    # The DEFAULT is deliberately unchanged: D2 is settled by measurement.
+    assert COURSE_INACTIVITY_TIMEOUT_DEFAULT_SEC == 180.0
     # An absent value is the only thing that yields the default.
     assert course_inactivity_timeout_sec({}) == COURSE_INACTIVITY_TIMEOUT_DEFAULT_SEC
     assert course_inactivity_timeout_sec({COURSE_INACTIVITY_TIMEOUT_CONFIG_KEY: None}) == 180.0
@@ -80,6 +87,9 @@ def test_the_runtime_reads_180_from_configuration_and_not_from_a_literal():
 
 
 @pytest.mark.parametrize("raw,expected", [(240, 240.0), ("240", 240.0), (240.5, 240.5), (30, 30.0)])
+# (30 stays here on purpose: the IN-PROCESS parse is bounds-free by design, so a
+#  test may still drive the policy with a short window. Only the OPERATOR seam
+#  gained the 90 s floor.)
 def test_a_configured_value_is_honoured_by_the_runtime(raw, expected):
     runtime = _course_runtime(timeout_sec=raw)
 
@@ -124,10 +134,13 @@ def test_a_config_volume_value_survives_the_loader_untouched():
 
 def test_the_env_override_wins_over_the_config_volume():
     config = _lesson_config(**{COURSE_INACTIVITY_TIMEOUT_CONFIG_KEY: 300})
-    with patch.dict(os.environ, {COURSE_INACTIVITY_TIMEOUT_ENV_VAR: "45"}, clear=False):
+    # Was 45 s. D2's first measured rider raised the operator-facing MINIMUM to 90 s
+    # (see the constant's derivation), so 45 is no longer an admissible override and
+    # this case now uses 120 to test precedence rather than the bounds.
+    with patch.dict(os.environ, {COURSE_INACTIVITY_TIMEOUT_ENV_VAR: "120"}, clear=False):
         applied = _loader()._apply_lesson_env_overrides(config)
 
-    assert applied["lesson"][COURSE_INACTIVITY_TIMEOUT_CONFIG_KEY] == 45.0
+    assert applied["lesson"][COURSE_INACTIVITY_TIMEOUT_CONFIG_KEY] == 120.0
 
 
 # ── fails closed, never silently reverts to the default ───────────────────────
@@ -143,7 +156,19 @@ def test_an_unparseable_value_raises_instead_of_becoming_180(raw):
         course_inactivity_timeout_sec({COURSE_INACTIVITY_TIMEOUT_CONFIG_KEY: raw})
 
 
-@pytest.mark.parametrize("value", [0.5, 29.9, COURSE_INACTIVITY_TIMEOUT_MAX_SEC + 1, 86400.0])
+@pytest.mark.parametrize(
+    "value",
+    [
+        0.5, 29.9, COURSE_INACTIVITY_TIMEOUT_MAX_SEC + 1, 86400.0,
+        # D2's first measured rider: 30, 60 and anything up to the new 90 s floor are
+        # now REFUSED. A timeout at or below the 60 s peer-silence budget fires first,
+        # takes the runtime out of its armed states and suppresses the socket close
+        # that would otherwise have reaped a half-open socket - so it removes a cleanup
+        # and replaces it with nothing. Measured in
+        # coordination/course-inactivity-timer-observability-20260919/report.md §3(c).
+        30.0, 45.0, 60.0, 89.9,
+    ],
+)
 def test_an_out_of_range_value_raises_instead_of_being_clamped_or_defaulted(value):
     with pytest.raises(CourseInactivityTimeoutConfigError):
         assert_course_inactivity_timeout_in_range(value)
