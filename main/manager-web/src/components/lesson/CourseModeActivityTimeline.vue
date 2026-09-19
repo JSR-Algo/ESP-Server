@@ -30,17 +30,23 @@
         <strong>{{ target.targetWord }}</strong>
         <span class="mono">{{ target.targetId }}</span>
       </div>
-      <div class="target-grid">
-        <el-form-item label="Word"><el-input v-model="target.targetWord" :disabled="disabled" @input="emitDraft" /></el-form-item>
-        <el-form-item label="Role">
-          <el-select v-model="target.role" :disabled="disabled" @change="emitDraft">
-            <el-option v-for="role in targetRoles" :key="role" :label="role" :value="role" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="Vietnamese meaning">
-          <el-input :value="(target.vietnameseMeanings || []).join(', ')" :disabled="disabled" @input="setMeanings(target, $event)" />
-        </el-form-item>
-      </div>
+      <!-- el-form-item resolves its owning el-form by walking up the parent chain; without one
+           the lookup dereferences undefined, the render throws and the whole card body renders
+           empty, which made every target uneditable in the real browser. The activity cards below
+           already wrap their items the same way. -->
+      <el-form label-position="top" size="small">
+        <div class="target-grid">
+          <el-form-item label="Word"><el-input v-model="target.targetWord" :disabled="disabled" @input="emitDraft" /></el-form-item>
+          <el-form-item label="Role">
+            <el-select v-model="target.role" :disabled="disabled" @change="emitDraft">
+              <el-option v-for="role in targetRoles" :key="role" :label="role" :value="role" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="Vietnamese meaning">
+            <el-input :value="(target.vietnameseMeanings || []).join(', ')" :disabled="disabled" @input="setMeanings(target, $event)" />
+          </el-form-item>
+        </div>
+      </el-form>
     </el-card>
 
     <div class="activity-list">

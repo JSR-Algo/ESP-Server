@@ -236,6 +236,24 @@ window.__MOUNT_COURSE_MODE_EDITOR__ = async () => {
     actionButtons: [...vm.$el.querySelectorAll('.advanced-steps-scroll button')].length,
   };
   const timeline = courseEditor.$children.find((child) => child.$options.name === 'CourseModeActivityTimeline');
+  // Real-DOM regression: the target cards must expose their editable fields, not an empty body.
+  const targetCards = [...vm.$el.querySelectorAll('.target-card')];
+  const targetLabels = [...(targetCards[0]?.querySelectorAll('.el-form-item__label') || [])].map((label) => label.textContent.trim());
+  const meaningItem = [...(targetCards[0]?.querySelectorAll('.el-form-item') || [])]
+    .find((item) => item.querySelector('.el-form-item__label')?.textContent.trim() === 'Vietnamese meaning');
+  const meaningInput = meaningItem?.querySelector('input');
+  const meaningValueBefore = meaningInput?.value ?? null;
+  if (meaningInput) {
+    meaningInput.value = `${meaningValueBefore}, t08-regression`;
+    meaningInput.dispatchEvent(new Event('input', { bubbles: true }));
+    await courseEditor.$nextTick();
+  }
+  const meaningEditApplied = timeline.draft.targets[0].vietnameseMeanings.includes('t08-regression');
+  if (meaningInput) {
+    meaningInput.value = meaningValueBefore;
+    meaningInput.dispatchEvent(new Event('input', { bubbles: true }));
+    await courseEditor.$nextTick();
+  }
   for (let index = 0; index < 40 && !timeline.objectKeys.includes('object.admin-only'); index += 1) await new Promise((resolve) => setTimeout(resolve, 0));
   const adminCatalogObjectSelectable = timeline.objectKeys.includes('object.admin-only');
   const draftCatalogObjectExcluded = !timeline.objectKeys.includes('object.draft-only');
@@ -261,7 +279,7 @@ window.__MOUNT_COURSE_MODE_EDITOR__ = async () => {
   const pendingSave = calls.pendingCourseModeSaves.shift(); pendingSave.ok({ lessonId: pendingSave.id, checksum: pendingSave.contract.contractChecksum, visualChecksum: "c".repeat(64), contract: pendingSave.contract });
   await savePromise; await courseEditor.$nextTick();
   const newerRevisionPreserved = courseEditor.courseModeDraft.activities[0].contextId === 'newer-context' && courseEditor.courseModeDirty;
-  return { ...initial, leakageWarning, adminCatalogObjectSelectable, draftCatalogObjectExcluded, selectedCatalogObjectKey, clearedObjectKey, disabledDuringSave, uiEditBlockedDuringSave, newerRevisionPreserved, saveCount: calls.courseModeSaves.length, savedChecksum: calls.courseModeSaves[0]?.contract.contractChecksum || '', savedObjectKey: calls.courseModeSaves[0]?.contract.activities[0].visual.objectAssetKey, savedFallback: calls.courseModeSaves[0]?.contract.activities[0].visual.fallback };
+  return { ...initial, targetCardCount: targetCards.length, targetLabels, meaningInputPresent: Boolean(meaningInput), meaningEditApplied, leakageWarning, adminCatalogObjectSelectable, draftCatalogObjectExcluded, selectedCatalogObjectKey, clearedObjectKey, disabledDuringSave, uiEditBlockedDuringSave, newerRevisionPreserved, saveCount: calls.courseModeSaves.length, savedChecksum: calls.courseModeSaves[0]?.contract.contractChecksum || '', savedObjectKey: calls.courseModeSaves[0]?.contract.activities[0].visual.objectAssetKey, savedFallback: calls.courseModeSaves[0]?.contract.activities[0].visual.fallback };
 };
 window.__MOUNT_COURSE_MODE_LOAD_ERROR__ = async () => {
   vm.$destroy(); vm.$el.remove(); await new Promise((resolve) => setTimeout(resolve, 0));
