@@ -33,15 +33,20 @@ def ledger(tmp_path: Path, candidate: dict, receipt: dict) -> dict:
 
 
 def test_ledger_is_candidate_bound_and_hash_valid(tmp_path: Path, candidate: dict, ledger: dict) -> None:
+    from datetime import datetime, timezone
+
     from course_mode_physical_tft_ledger_validate import validate_ledger
 
-    assert validate_ledger(ledger, candidate=candidate, repository_root=tmp_path)["valid"] is True
+    # The validator refuses a capture older than seven days, so pin the clock to the
+    # fixture's own capturedAt rather than let the assertion rot with the calendar.
+    now = datetime(2026, 8, 29, 13, tzinfo=timezone.utc)
+    assert validate_ledger(ledger, candidate=candidate, repository_root=tmp_path, now=now)["valid"] is True
     wrong = deepcopy(ledger)
     wrong["candidateId"] = "wrong"
-    assert "ledger.candidate" in validate_ledger(wrong, candidate=candidate, repository_root=tmp_path)["reasons"]
+    assert "ledger.candidate" in validate_ledger(wrong, candidate=candidate, repository_root=tmp_path, now=now)["reasons"]
     wrong = deepcopy(ledger)
     wrong["evidence"][0]["sha256"] = "f" * 64
-    assert "ledger.evidence.hash" in validate_ledger(wrong, candidate=candidate, repository_root=tmp_path)["reasons"]
+    assert "ledger.evidence.hash" in validate_ledger(wrong, candidate=candidate, repository_root=tmp_path, now=now)["reasons"]
 
 
 def test_ledger_rejects_unsafe_private_or_contradictory_evidence(tmp_path: Path, candidate: dict, ledger: dict) -> None:
