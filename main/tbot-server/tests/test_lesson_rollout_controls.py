@@ -221,6 +221,8 @@ def _runtime(*, device_id="robot-01", lesson=None):
     runtime._closed = False
     runtime._step_id = "s1"
     runtime._step_seq = 3
+    runtime._retained_selection = None
+    runtime._selection_revision = 0
     return runtime
 
 
