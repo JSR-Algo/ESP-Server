@@ -761,7 +761,17 @@ class DisconnectAbandonmentReaper:
         block for the whole outage and leave the intent silently non-durable. The
         timeout is raised as `TimeoutError`, which every caller already treats the same
         way it treats a refusal.
+
+        **Only a durable ledger is wrapped**, and that is not an optimisation. The
+        in-memory ledger is a dict: it performs no I/O and cannot hang, so a timeout
+        around it protects against nothing — while `asyncio.wait_for` costs an extra
+        event-loop turn, which leaves a fire-and-forget `note_binding` task pending one
+        turn longer than the caller. `tests/test_restored_terminal_ack.py` asserts that
+        a closed runtime leaves **no** pending tasks, and 40 of its cases caught exactly
+        that. The bound belongs on the network client, not on the dict.
         """
+        if not getattr(self.ledger, "durable", False):
+            return await coro
         return await asyncio.wait_for(coro, timeout=self._ledger_timeout_sec)
 
     def _record_ttl_sec(self, intent: DisconnectAbandonmentIntent) -> float:
