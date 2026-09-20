@@ -12,6 +12,7 @@ owns the single ``result -> outcome`` rename + COPPA child-speech stripping.
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import os
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
@@ -27,6 +28,18 @@ TAG = "LessonForwarder"
 
 _PENDING_TERMINAL_BATCHES: Dict[Tuple[str, str], Dict[str, Any]] = {}
 _DEFAULT_TERMINAL_STORE: Any = None
+
+
+def _same_batch(left: Any, right: Any) -> bool:
+    """JSON identity must distinguish a boolean from a numeric payload value."""
+    try:
+        return json.dumps(left, sort_keys=True, allow_nan=False) == json.dumps(right, sort_keys=True, allow_nan=False)
+    except (TypeError, ValueError):
+        return False
+
+
+class _TerminalBatchSuperseded(Exception):
+    """A queued retry no longer owns its retained outbox entry."""
 
 try:
     import httpx
@@ -141,9 +154,10 @@ class LessonEventForwarder:
             )
             return False
         if self._is_started_batch(batch):
+            batch = copy.deepcopy(batch)
             self._remember_started_batch(batch)
         if terminal:
-            batch = self._with_started_event_for_replay(batch)
+            batch = copy.deepcopy(self._with_started_event_for_replay(batch))
             self.pending_terminal_batch = batch
             _store_pending_terminal_batch(self.device_id, batch)
         if self._worker is None:
@@ -161,10 +175,15 @@ class LessonEventForwarder:
             on_success, on_failure = callbacks if len(callbacks) == 2 else (None, None)
             try:
                 if self._is_terminal_batch(item):
-                    await self._store_terminal_batch(item)
+                    if attempt == 0:
+                        await self._store_terminal_batch(item)
+                    elif not await self._terminal_retry_is_current(item):
+                        if self.pending_terminal_batch is item:
+                            self.pending_terminal_batch = None
+                        raise _TerminalBatchSuperseded()
                 await self._post(item)
                 if callable(on_success):
-                    result = on_success(item)
+                    result = on_success(copy.deepcopy(item))
                     if asyncio.iscoroutine(result):
                         await result
                 if self.pending_terminal_batch is item:
@@ -202,13 +221,13 @@ class LessonEventForwarder:
 
         self._dead_letter(batch)
         if callable(on_failure):
-            result = on_failure(batch)
+            result = on_failure(copy.deepcopy(batch))
             if asyncio.iscoroutine(result):
                 await result
         self._log("warning", f"lesson-events POST dead-lettered: {detail}", batch)
         if self._is_assignment_terminal_rejection(exc) and callable(self.on_assignment_terminal):
             try:
-                result = self.on_assignment_terminal(batch, exc)
+                result = self.on_assignment_terminal(copy.deepcopy(batch), exc)
                 if asyncio.iscoroutine(result):
                     await result
             except Exception as hook_exc:  # the hook must never kill the worker
@@ -291,7 +310,7 @@ class LessonEventForwarder:
         if self._post_fn is None:
             await self._ensure_client()
         try:
-            await post_fn(self._client, self.base_url, self.device_id, batch, token=self.token)
+            await post_fn(self._client, self.base_url, self.device_id, copy.deepcopy(batch), token=self.token)
         except Exception as exc:
             if not self._is_auth_token_expired(exc) or self._token_refresh_fn is None:
                 raise
@@ -304,7 +323,7 @@ class LessonEventForwarder:
                 "lesson-events token expired; reminted and retrying once",
                 batch,
             )
-            await post_fn(self._client, self.base_url, self.device_id, batch, token=self.token)
+            await post_fn(self._client, self.base_url, self.device_id, copy.deepcopy(batch), token=self.token)
         self._log_forwarded(batch)
 
     @staticmethod
@@ -375,18 +394,34 @@ class LessonEventForwarder:
         from pull-on-connect when the runtime already reached a terminal state but
         the original POST never got a 2xx.
         """
-        batch = self.pending_terminal_batch
-        if batch is None:
+        pending = self.pending_terminal_batch
+        if pending is None:
+            return False
+        batch = copy.deepcopy(pending)
+        if not await self._terminal_retry_is_current(batch):
+            if self.pending_terminal_batch is pending:
+                self.pending_terminal_batch = None
             return False
         try:
             await self._post(batch)
         except Exception as exc:  # keep pending for the next reconnect
             self._log("warning", f"lesson terminal replay failed: {type(exc).__name__}", batch)
             return False
-        if self.pending_terminal_batch is batch:
+        if self.pending_terminal_batch is pending:
             self.pending_terminal_batch = None
         await self._clear_terminal_batch(batch)
         return True
+
+    async def _terminal_retry_is_current(self, batch: Dict[str, Any]) -> bool:
+        # Retry is delivery only: never refresh TTL or recreate expired evidence.
+        if not _same_batch(self.pending_terminal_batch, batch):
+            return False
+        try:
+            retained = await self._terminal_store.load(self.device_id, batch["assignmentId"])
+        except Exception as exc:
+            self._log("warning", f"lesson terminal retry store unavailable: {type(exc).__name__}", batch)
+            return _same_batch(self.pending_terminal_batch, batch)
+        return _same_batch(self.pending_terminal_batch, batch) and _same_batch(retained, batch)
 
     async def _store_terminal_batch(self, batch: Dict[str, Any]) -> None:
         try:
@@ -448,7 +483,7 @@ class LessonEventForwarder:
     def _remember_started_batch(self, batch: Dict[str, Any]) -> None:
         key = _session_lifecycle_key(batch)
         if key is not None:
-            self._started_batches[key] = batch
+            self._started_batches[key] = copy.deepcopy(batch)
 
     def _with_started_event_for_replay(self, batch: Dict[str, Any]) -> Dict[str, Any]:
         key = _session_lifecycle_key(batch)
@@ -523,7 +558,7 @@ class MemoryTerminalReplayStore:
         _store_pending_terminal_batch(device_id, batch)
 
     async def load(self, device_id: str, assignment_id: str) -> Optional[Dict[str, Any]]:
-        return _PENDING_TERMINAL_BATCHES.get((device_id, assignment_id))
+        return copy.deepcopy(_PENDING_TERMINAL_BATCHES.get((device_id, assignment_id)))
 
     async def clear(self, device_id: str, batch: Dict[str, Any]) -> None:
         _clear_pending_terminal_batch(device_id, batch)
@@ -583,7 +618,7 @@ class RedisTerminalReplayStore:
         redis = await self._redis()
         redis_key = self._key(key[0], key[1])
         raw = await redis.get(redis_key)
-        if raw is None or json.loads(raw) != batch:
+        if raw is None or not _same_batch(json.loads(raw), batch):
             return
         # Compare the exact stored bytes atomically so a newer terminal survives
         # a replay acknowledgment, including replacement after the read above.
@@ -640,7 +675,7 @@ def _with_lesson_log_context(message: str, batch: Optional[Dict[str, Any]]) -> s
 def _store_pending_terminal_batch(device_id: str, batch: Dict[str, Any]) -> None:
     key = _pending_terminal_key(device_id, batch)
     if key is not None:
-        _PENDING_TERMINAL_BATCHES[key] = batch
+        _PENDING_TERMINAL_BATCHES[key] = copy.deepcopy(batch)
 
 
 def _clear_pending_terminal_batch(device_id: str, batch: Dict[str, Any]) -> None:
@@ -648,7 +683,7 @@ def _clear_pending_terminal_batch(device_id: str, batch: Dict[str, Any]) -> None
     if key is None:
         return
     stored = _PENDING_TERMINAL_BATCHES.get(key)
-    if stored is batch or stored == batch:
+    if _same_batch(stored, batch):
         _PENDING_TERMINAL_BATCHES.pop(key, None)
 
 
@@ -674,9 +709,10 @@ async def replay_stored_terminal_event(
     batch = await store.load(device_id, assignment_id)
     if batch is None:
         return False
+    batch = copy.deepcopy(batch)
     post = post_fn or _backend_api.post_lesson_event
     try:
-        await post(client, base_url, device_id, batch, token=token)
+        await post(client, base_url, device_id, copy.deepcopy(batch), token=token)
     except Exception as exc:
         if logger is not None:
             try:

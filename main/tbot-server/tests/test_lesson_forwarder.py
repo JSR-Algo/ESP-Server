@@ -234,8 +234,10 @@ class LessonEventForwarderDurabilityTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(auth_errors, ["AUTH_TOKEN_EXPIRED"])
         self.assertEqual([attempt[0] for attempt in attempts], ["jwt-1", "jwt-2"])
-        self.assertIs(attempts[0][1], terminal)
-        self.assertIs(attempts[1][1], terminal)
+        self.assertEqual(attempts[0][1], terminal)
+        self.assertEqual(attempts[1][1], terminal)
+        self.assertIsNot(attempts[0][1], terminal)
+        self.assertIsNot(attempts[1][1], attempts[0][1])
         self.assertEqual(persisted, [terminal])
         self.assertEqual(forwarder.dead_letters, [])
         self.assertIsNone(forwarder.pending_terminal_batch)
@@ -315,7 +317,8 @@ class LessonEventForwarderDurabilityTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(attempts, 2)
         self.assertEqual(refreshes, 1)
         self.assertEqual(forwarder.dead_letters, [terminal])
-        self.assertIs(forwarder.pending_terminal_batch, terminal)
+        self.assertEqual(forwarder.pending_terminal_batch, terminal)
+        self.assertIsNot(forwarder.pending_terminal_batch, terminal)
 
         await forwarder.aclose()
 
@@ -576,6 +579,8 @@ class LessonEventForwarderDurabilityTest(unittest.IsolatedAsyncioTestCase):
             logger=logger,
         )
         forwarder.pending_terminal_batch = terminal
+
+        await forwarder._terminal_store.store("dev1", terminal)
 
         self.assertFalse(await forwarder.replay_pending_terminal_event())
         self.assertIs(forwarder.pending_terminal_batch, terminal)
