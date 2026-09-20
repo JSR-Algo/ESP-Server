@@ -37,16 +37,13 @@ function recoveryHarness(mode = 'preserve', fault, seedsRunning = false) {
     if (args.includes('exec')) return { status: 0, stdout: '' };
     throw new Error(`unexpected mutating command: ${args.join(' ')}`);
   };
-  const fixtureCleanupOnly = () => calls.filter(call => call.args.includes('exec')).every(call =>
-    (call.args.includes('redis') && call.args.some(arg => /^rate_limit:|redis\.call\('keys','rl:\*'\)/.test(arg)))
-    || (call.args.includes('postgres') && call.args.some(arg => /^DELETE FROM admin_login_attempts WHERE email IN \('lesson-author-e2e@local\.invalid'/.test(arg))));
   const module = { exports: {} };
   const sandbox = { module, __dirname, process: { env }, require: id => id === 'node:child_process' ? { spawnSync } : require(id) };
   vm.runInNewContext(readFileSync(require.resolve('./reset-lesson-studio-e2e-state.cjs'), 'utf8'), sandbox);
-  return { api: module.exports, calls, env, fixtureCleanupOnly };
+  return { api: module.exports, calls, env };
 }
 
-test('preserve mode prepares both global setup and each real login with fixture throttle cleanup only and no seed jobs', async () => {
+test('preserve mode checks global setup and each login without mutating throttle or database state', async () => {
   const harness = recoveryHarness();
   const load = relative => {
     const filename = require.resolve(relative);
@@ -61,8 +58,7 @@ test('preserve mode prepares both global setup and each real login with fixture 
     assert.equal(url, '/login'); throw atLogin;
   } }), error => error === atLogin);
   assert.equal(harness.calls.filter(call => call.args.includes('ps')).length, 10);
-  assert.equal(harness.calls.filter(call => call.args.includes('exec')).length, 6);
-  assert.ok(harness.fixtureCleanupOnly());
+  assert.equal(harness.calls.filter(call => call.args.includes('exec')).length, 0);
   assert.ok(harness.calls.every(call => !call.args.some(arg => arg.startsWith('seed-'))));
 });
 
@@ -72,20 +68,42 @@ test('invalid state mode fails before any service subprocess', () => {
   assert.equal(harness.calls.length, 0);
 });
 
-test('preserve mode runs only fixture throttle cleanup even when legacy seed jobs remain running', () => {
+test('preserve mode remains read-only even when legacy seed jobs remain running', () => {
   const harness = recoveryHarness('preserve', undefined, true);
   assert.doesNotThrow(() => harness.api.resetLessonStudioE2EState());
-  assert.equal(harness.calls.filter(call => call.args.includes('exec')).length, 3);
-  assert.ok(harness.fixtureCleanupOnly());
+  assert.equal(harness.calls.filter(call => call.args.includes('exec')).length, 0);
   assert.ok(harness.calls.every(call => !call.args.some(arg => arg.startsWith('seed-'))));
 });
 
-for (const [fault, message] of [['image', /image ID mismatch/], ['mount', /asset mounts mismatch/], ['port', /port binding mismatch/], ['health', /not healthy/]]) {
-  test(`preserve mode still rejects ${fault} mismatch without resetting state`, () => {
-    const harness = recoveryHarness('preserve', fault);
+for (const mode of ['reset', 'default']) {
+  test(`${mode} mode retains all three reset commands after successful preflight`, () => {
+    const harness = recoveryHarness('reset', undefined, true);
+    if (mode === 'default') delete harness.env.LESSON_STUDIO_E2E_STATE_MODE;
+    harness.api.resetLessonStudioE2EState();
+    const commands = harness.calls.filter(call => call.args.includes('exec'));
+    assert.equal(commands.length, 3);
+    assert.deepEqual(commands.map(call => [call.command, ...call.args]),
+      Array.from(harness.api.buildResetCommands({ projectName: 'isolated-recovery' }), command => Array.from(command)));
+    assert.equal(harness.calls.filter(call => call.args.includes('ps')).length, 7);
+    const firstReset = harness.calls.findIndex(call => call.args.includes('exec'));
+    assert.ok(harness.calls.slice(firstReset).every(call => call.args.includes('exec')));
+  });
+}
+
+test('reset mode still requires seed services before any mutation', () => {
+  const harness = recoveryHarness('reset');
+  assert.throws(() => harness.api.resetLessonStudioE2EState(), /seed-postgres service is not running/);
+  assert.ok(harness.calls.every(call => !call.args.includes('exec')));
+});
+
+for (const mode of ['preserve', 'reset']) {
+ for (const [fault, message] of [['image', /image ID mismatch/], ['mount', /asset mounts mismatch/], ['port', /port binding mismatch/], ['health', /not healthy/]]) {
+  test(`${mode} mode still rejects ${fault} mismatch without resetting state`, () => {
+    const harness = recoveryHarness(mode, fault, true);
     assert.throws(() => harness.api.resetLessonStudioE2EState(), message);
     assert.ok(harness.calls.every(call => !call.args.includes('exec')));
   });
+ }
 }
 
 const {

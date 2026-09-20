@@ -78,12 +78,11 @@ function stateModeFromEnvironment(env = process.env) {
 }
 
 function resetLessonStudioE2EState(options = resetOptionsFromEnvironment()) {
-  stateModeFromEnvironment();
+  const stateMode = stateModeFromEnvironment();
   preflightLessonStudioE2EStack({ projectName: options.projectName, composeFile: options.composeFile, composeExecutable: options.composeExecutable });
-  // Both modes clear only the fixture accounts' login throttling (Redis rate-limit keys and
-  // admin_login_attempts for the e2e emails). Preserve mode differs solely by never requiring
-  // or re-running the seed jobs, so recovered lesson data stays untouched while every real
-  // login can still obtain a fresh captcha.
+  // A recovered stack must retain authentication throttles as well as lesson data.
+  // Global setup and per-login preparation both use this boundary.
+  if (stateMode === 'preserve') return;
   for (const [command, ...args] of buildResetCommands(options)) {
     const result = spawnSync(command, args, {
       encoding: 'utf8',
