@@ -3015,13 +3015,17 @@ def _container_tools_required(lane: Lane) -> bool:
 
 def _playwright_browsers_required(lane: Lane) -> bool:
     return (
-        lane.name.startswith("admin-course-mode-playwright-")
+        lane.name == "admin-browser"
+        or lane.name.startswith("admin-course-mode-playwright-")
         or lane.name in STATEFUL_ASSIGNMENT_LANES
     )
 
 
 def _backend_compiler_required(lane: Lane) -> bool:
-    return _playwright_browsers_required(lane)
+    return (
+        lane.name.startswith("admin-course-mode-playwright-")
+        or lane.name in STATEFUL_ASSIGNMENT_LANES
+    )
 
 
 def _container_tools_authorized(candidate: dict) -> bool:

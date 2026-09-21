@@ -5327,6 +5327,7 @@ def test_admin_browser_environment_is_only_candidate_bound_descriptor(candidate_
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
     environment = gate._child_environment(candidate, {
         "CHROME_BIN": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "PLAYWRIGHT_BROWSERS_PATH": "/untrusted/browser-cache",
     }, next(lane for lane in gate.FULL_LANES if lane.name == "admin-browser"))
     browser = candidate["tools"]["robotPreviewBrowser"]
 
@@ -5338,7 +5339,9 @@ def test_admin_browser_environment_is_only_candidate_bound_descriptor(candidate_
     assert environment["TBOT_ROBOT_PREVIEW_BROWSER_TREE_ENTRY_COUNT"] == str(browser["treeDigest"]["entryCount"])
     assert environment["TBOT_ROBOT_PREVIEW_BROWSER_TREE_TOTAL_BYTES"] == str(browser["treeDigest"]["totalBytes"])
     assert "CHROME_BIN" not in environment
-    assert "PLAYWRIGHT_BROWSERS_PATH" not in environment
+    assert environment["PLAYWRIGHT_BROWSERS_PATH"] == str(
+        Path(candidate["tools"]["playwrightBrowsers"]["webkit"]["root"]).parent
+    )
 
 
 def test_playwright_environment_binds_compose_candidate_inputs(candidate_file: Path) -> None:
@@ -5747,8 +5750,9 @@ def test_playwright_lane_blocks_post_run_stable_backend_mutation(
     assert result["lanes"][0]["exitCode"] is None
 
 
+@pytest.mark.parametrize("lane_name", ["admin-browser", "admin-course-mode-playwright-webkit-desktop"])
 def test_playwright_lane_stages_bound_browser_cache_and_sets_only_its_environment(
-    candidate_file: Path,
+    candidate_file: Path, lane_name: str,
 ) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
     _add_node_install(candidate, "adminEsp", "main/manager-web", "adminManagerWeb")
@@ -5756,7 +5760,7 @@ def test_playwright_lane_stages_bound_browser_cache_and_sets_only_its_environmen
     _configure_backend_build_fixture(candidate)
     lane = next(
         lane for lane in gate.FULL_LANES
-        if lane.name == "admin-course-mode-playwright-webkit-desktop"
+        if lane.name == lane_name
     )
 
     stage = gate.stage_execution_candidate(candidate, (lane,))
@@ -5765,6 +5769,7 @@ def test_playwright_lane_stages_bound_browser_cache_and_sets_only_its_environmen
         execution = stage.create_lane_execution()
         environment = gate._child_environment(execution.candidate, {}, lane)
         browser_root = Path(environment["PLAYWRIGHT_BROWSERS_PATH"])
+        assert gate._backend_compiler_required(lane) is (lane_name != "admin-browser")
         assert browser_root.is_relative_to(stage.root)
         assert not browser_root.is_relative_to(execution.root)
         for descriptor in execution.candidate["tools"]["playwrightBrowsers"].values():
