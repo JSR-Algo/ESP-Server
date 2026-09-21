@@ -55,6 +55,12 @@ async function loginAsLessonAuthor(page, credentials = {}) {
   await page.getByTestId('manager-login-password').fill(managerPassword);
   await page.getByTestId('manager-login-captcha').fill(captcha);
 
+  // The home header requests capabilities as soon as manager login completes.
+  // Observe that challenge before navigation can race its response.
+  const { expectObservedFault } = require('./real-service-evidence');
+  expectObservedFault(page, 'GET', '/nestjs/v1/admin/lesson-rollout-capabilities', 401, 'real author sign-in challenge');
+  const authorChallenge = page.waitForResponse(response =>
+    response.url().includes('/nestjs/v1/admin/lesson-rollout-capabilities') && response.status() === 401);
   const managerLogin = page.waitForResponse((response) =>
     response.url().includes('/tbot/user/login') && response.request().method() === 'POST');
   await page.getByTestId('manager-login-submit').click();
@@ -63,6 +69,7 @@ async function loginAsLessonAuthor(page, credentials = {}) {
   expect((await managerResponse.json()).code).toBe(0);
   await expect(page.getByText(managerUser)).toBeVisible();
   await page.waitForURL(/#\/home$/);
+  await authorChallenge;
 
   // The web container may start milliseconds before Docker DNS publishes the
   // backend alias. Verify the same-origin proxy has recovered before opening
@@ -77,14 +84,6 @@ async function loginAsLessonAuthor(page, credentials = {}) {
     });
     return response.status;
   })).toBe(200);
-
-  // The course-management view issues three authoring requests before an author session exists;
-  // each real 401 challenge is registered explicitly so no other HTTP failure is tolerated.
-  const { expectObservedFault } = require('./real-service-evidence');
-  expectObservedFault(page, 'GET', '/nestjs/v1/admin/lesson-rollout-capabilities', 401, 'real author sign-in challenge');
-  expectObservedFault(page, 'GET', '/nestjs/v1/admin/courses', 401, 'real author sign-in challenge');
-  expectObservedFault(page, 'GET', '/nestjs/v1/admin/course-insights/course-quality', 401, 'real author sign-in challenge');
-  await page.goto('/login#/course-management');
 
   const authorDialog = page.getByRole('dialog', { name: /sign in as author/i });
   if (!await authorDialog.isVisible().catch(() => false)) {
@@ -102,6 +101,7 @@ async function loginAsLessonAuthor(page, credentials = {}) {
   ]);
   expect(authorLogin.status()).toBe(200);
   await expect(authorDialog).toBeHidden();
+  await page.goto('/login#/course-management');
   await expect(page.getByRole('heading', { name: 'Courses' })).toBeVisible();
 }
 

@@ -7,6 +7,32 @@ const { createRequire } = require('node:module');
 
 const helperPath = path.resolve(__dirname, '../../e2e/lesson-studio/helpers/admin-api.js');
 
+test('author login registers its header challenge before manager login can trigger it', async () => {
+  const filename = path.resolve(__dirname, '../../e2e/lesson-studio/helpers/session.js');
+  const registered = [];
+  const req = createRequire(filename);
+  const expectStub = () => ({ toHaveAttribute: async () => {} });
+  expectStub.poll = () => ({ toBe: async () => {} });
+  const sandbox = { module: { exports: {} }, exports: {}, process,
+    require: name => {
+      if (name === '@playwright/test') return { expect: expectStub };
+      if (name.endsWith('reset-lesson-studio-e2e-state.cjs')) return { resetLessonStudioE2EState() {} };
+      if (name === './real-service-evidence') return { expectObservedFault: (_page, method, url, status) => registered.push([method, url, status]) };
+      return req(name);
+    },
+  };
+  vm.runInNewContext(fs.readFileSync(filename, 'utf8'), sandbox, { filename });
+  const page = {
+    goto: async () => {}, getByRole: () => ({}), waitForResponse: () => new Promise(() => {}),
+    getByTestId: id => ({ fill: async () => {}, click: async () => {
+      assert.equal(id, 'manager-login-submit');
+      assert.deepEqual(registered, [['GET', '/nestjs/v1/admin/lesson-rollout-capabilities', 401]]);
+      throw new Error('end-of-prelogin-proof');
+    } }),
+  };
+  await assert.rejects(sandbox.module.exports.loginAsLessonAuthor(page), /end-of-prelogin-proof/);
+});
+
 test('second-author fixture keeps ownership writes separate from the rollout asset reader', async () => {
   const calls = [];
   const req = createRequire(helperPath);
