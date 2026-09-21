@@ -8838,9 +8838,15 @@ def test_physical_flash_admission_rejects_stale_evidence_before_command(
     assert result["failedLane"] == "physical-flash-admission"
 
 
+@pytest.mark.parametrize('profile', ['production', 'm1-staging'])
 def test_physical_flash_admission_binds_software_audit_identity_and_result_fields(
-    candidate_file: Path,
+    candidate_file: Path, profile: str,
 ) -> None:
+    if profile == 'm1-staging':
+        candidate = json.loads(candidate_file.read_text())
+        candidate['qualificationProfile'] = profile
+        candidate_file.chmod(0o644)
+        candidate_file.write_text(json.dumps(candidate))
     candidate, _paths = _install_physical_admission_fixture(candidate_file)
     binding = gate._physical_admission_binding(
         candidate, require_output_absent=True, expected_candidate_path=candidate_file,
@@ -8856,6 +8862,8 @@ def test_physical_flash_admission_binds_software_audit_identity_and_result_field
     assert binding.software_audit_sha256 == hashlib.sha256(audit.read_bytes()).hexdigest()
     assert binding.software_snapshot_id == verified.snapshot_id
     expected = json.loads(binding.expected_result)
+    assert expected['serialPath'] == gate._admission.admission_policy(profile)['serialPath']
+    assert expected.get('qualificationProfile', 'production') == profile
     assert expected["softwareAuditSha256"] == binding.software_audit_sha256
     assert expected["softwareSnapshotId"] == binding.software_snapshot_id
 

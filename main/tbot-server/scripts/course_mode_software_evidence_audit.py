@@ -212,15 +212,18 @@ def _public_admission_scan_payloads(
         )
         if not signature_valid:
             return None
+        profile = candidate.get("qualificationProfile", "production")
+        policy = admission.admission_policy(profile)
         checked_at = admission._parse_utc(input_document.get("checkedAt"))
         if checked_at is None or admission.validate_documents(
             input_document,
             identity,
             candidate,
             checked_at,
-            [admission.SERIAL_PATH],
+            [policy["serialPath"]],
             [],
             None,
+            **({"qualification_profile": profile} if profile != "production" else {}),
         ):
             return None
         return PublicAdmissionScan(

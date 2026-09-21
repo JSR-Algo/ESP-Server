@@ -3551,7 +3551,7 @@ def _physical_admission_binding(
             "softwareAuditSha256": verified_audit.audit_sha256,
             "softwareSnapshotId": verified_audit.snapshot_id,
             "robotMac": _admission.ROBOT_MAC,
-            "serialPath": _admission.SERIAL_PATH,
+            "serialPath": policy["serialPath"],
             "firmwareSha": policy["firmwareSha"],
             "appSha256": policy["appSha256"],
             "manifestSha256": policy["manifestSha256"],

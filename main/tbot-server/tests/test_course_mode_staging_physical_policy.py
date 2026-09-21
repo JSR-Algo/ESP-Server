@@ -11,6 +11,7 @@ from tests.test_course_mode_physical_flash_admission import admission, documents
 def staged_documents(tmp_path, monkeypatch):
     doc, identity, _, actual = documents(tmp_path, Ed25519PrivateKey.generate())
     policy = {
+        'serialPath': '/dev/cu.usbmodem101',
         'firmwareSha': '7edf23ac4e09a745700396330b06fd26c929e05c',
         'appSha256': '5' * 64, 'appBytes': 3800000, 'manifestSha256': '6' * 64,
         'appOffset': '0x20000', 'partitionBytes': 4128768,
@@ -35,11 +36,60 @@ def staged_documents(tmp_path, monkeypatch):
     doc['flashPlan']['operation'].update(imageSha256=policy['appSha256'], imageBytes=policy['appBytes'])
     doc['flashPlan']['protectedPartitions'] = [p for p in deepcopy(policy['partitions']) if p['protected']]
     doc['safety']['preserveInactiveApplication'] = True
+    doc['robot']['serialPath'] = identity['robot']['serialPath'] = policy['serialPath']
+    doc['serialLease'].update(devicePath=policy['serialPath'], discoveredDevices=[policy['serialPath']])
     return doc, identity, actual
 
 
 def validate(items, **kwargs):
-    return admission.validate_documents(*items, NOW, [admission.SERIAL_PATH], [], None, **kwargs)
+    return admission.validate_documents(*items, NOW, [items[0]['robot']['serialPath']], [], None, **kwargs)
+
+
+def test_staging_serial_inventory_checks_selected_port(monkeypatch):
+    calls = []
+    monkeypatch.setattr(admission, '_enumerate_devices', lambda: {'/dev/cu.usbmodem101': (1, 2)})
+    monkeypatch.setattr(admission, '_trusted_lsof', lambda: True)
+    def lsof(command):
+        calls.append(command)
+        return 0, b'123\n', b'', None
+    monkeypatch.setattr(admission, '_run_lsof', lsof)
+    assert admission.collect_serial_inventory('/dev/cu.usbmodem101') == (['/dev/cu.usbmodem101'], [123], None)
+    assert calls[0][-1] == '/dev/cu.usbmodem101'
+
+
+def test_signed_staging_documents_are_scannable(staged_documents, monkeypatch):
+    import hashlib
+    from pathlib import Path
+    from cryptography.hazmat.primitives import serialization
+    import course_mode_software_evidence_audit as audit
+    doc, identity, actual = staged_documents
+    key = Ed25519PrivateKey.generate()
+    public = key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    fingerprint = hashlib.sha256(public).hexdigest()
+    monkeypatch.setattr(admission, 'PINNED_APPROVAL_PUBLIC_KEY_RAW', public)
+    monkeypatch.setattr(admission, 'PINNED_APPROVAL_KEY_FINGERPRINT', fingerprint)
+    identity['signer']['fingerprint'] = fingerprint
+    raw = admission._canonical_bytes(actual)
+    doc['candidate']['sha256'] = hashlib.sha256(raw).hexdigest()
+    identity['candidate'] = deepcopy(doc['candidate'])
+    identity_raw = admission._canonical_bytes(identity)
+    args = (actual, Path(doc['candidate']['path']), raw, admission._canonical_bytes(doc), identity_raw)
+    assert audit._public_admission_scan_payloads(*args, key.sign(identity_raw)) is not None
+    assert audit._public_admission_scan_payloads(*args, bytes(64)) is None
+    doc['safety']['adultObserverPresent'] = False
+    unsafe_args = (actual, Path(doc['candidate']['path']), raw, admission._canonical_bytes(doc), identity_raw)
+    assert audit._public_admission_scan_payloads(*unsafe_args, key.sign(identity_raw)) is None
+
+
+@pytest.mark.parametrize('devices,holders,error', [
+    ([admission.SERIAL_PATH], [], None),
+    (['/dev/cu.usbmodem101'], [123], None),
+    (['/dev/cu.usbmodem101'], [], 'visibility'),
+    (['/dev/cu.usbmodem101', admission.SERIAL_PATH], [], None),
+])
+def test_staging_inventory_fails_closed(staged_documents, devices, holders, error):
+    assert admission.validate_documents(*staged_documents, NOW, devices, holders, error,
+                                        qualification_profile='m1-staging')
 
 
 def test_staging_physical_policy_requires_explicit_profile(staged_documents):
@@ -86,6 +136,7 @@ def test_signed_staging_cli_binds_profile_and_preserves_signature_gate(valid_fil
     # Existing file fixture supplies synthetic immutable tools/artifacts. This
     # test exercises real signing, profile routing and publication around them.
     policy = admission.admission_policy('production')
+    policy['serialPath'] = '/dev/cu.usbmodem101'
     policy['partitions'] = admission.admission_policy('m1-staging')['partitions']
     monkeypatch.setattr(admission, 'M1_STAGING_POLICY', policy)
     doc['candidate']['qualificationProfile'] = actual['qualificationProfile'] = 'm1-staging'
@@ -96,6 +147,13 @@ def test_signed_staging_cli_binds_profile_and_preserves_signature_gate(valid_fil
     identity['partitionTable'] = deepcopy(policy['partitions'])
     doc['flashPlan']['protectedPartitions'] = [p for p in deepcopy(policy['partitions']) if p['protected']]
     doc['safety']['preserveInactiveApplication'] = True
+    doc['robot']['serialPath'] = identity['robot']['serialPath'] = policy['serialPath']
+    doc['serialLease'].update(devicePath=policy['serialPath'], discoveredDevices=[policy['serialPath']])
+    inventory_calls = []
+    def inventory(serial_path=admission.SERIAL_PATH):
+        inventory_calls.append(serial_path)
+        return [serial_path], [], None
+    monkeypatch.setattr(admission, 'collect_serial_inventory', inventory)
     resign(paths, doc, identity)
     calls = []
 
@@ -110,11 +168,15 @@ def test_signed_staging_cli_binds_profile_and_preserves_signature_gate(valid_fil
     assert admission.main(args) == 1
     assert not paths['output'].exists()
     capsys.readouterr()
+    inventory_calls.clear()
     assert admission.main([*args, '--profile', 'm1-staging']) == 0
     receipt = json.loads(paths['output'].read_text())
     assert receipt['qualificationProfile'] == 'm1-staging'
     assert receipt['physicalActionsPerformed'] is False
     assert receipt['serialOpened'] is False
+    assert receipt['serialPath'] == policy['serialPath']
+    assert len(inventory_calls) >= 3
+    assert set(inventory_calls) == {policy['serialPath']}
     assert ('m1-staging', 'm1-staging') in calls
     paths['output'].unlink()
     identity['candidate']['qualificationProfile'] = 'production'

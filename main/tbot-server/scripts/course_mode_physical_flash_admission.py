@@ -44,6 +44,7 @@ EXPECTED_PARTITIONS = [
 # Separate reviewed software artifact; these pins do not attest physical readiness.
 # Source/build evidence: M1/runs/20260921T094320Z/firmware-build-b/manifest.json.
 M1_STAGING_POLICY = {
+    "serialPath": "/dev/cu.usbmodem101",
     "firmwareSha": "7edf23ac4e09a745700396330b06fd26c929e05c",
     "appSha256": "6cdf24124d3c7469d1c2c3644300cff64f5b1a99cb305712c93e33d19c31ac0e",
     "appBytes": 3846880,
@@ -61,7 +62,7 @@ M1_STAGING_POLICY = {
 
 def admission_policy(qualification_profile="production"):
     if qualification_profile == "production":
-        return {"firmwareSha": FIRMWARE_SHA, "appSha256": APP_SHA256,
+        return {"serialPath": SERIAL_PATH, "firmwareSha": FIRMWARE_SHA, "appSha256": APP_SHA256,
                 "appBytes": APP_BYTES, "manifestSha256": MANIFEST_SHA256,
                 "appOffset": APP_OFFSET, "partitionBytes": PARTITION_BYTES,
                 "partitions": copy.deepcopy(EXPECTED_PARTITIONS)}
@@ -287,10 +288,10 @@ def _run_lsof(command):
         selector.close(); process.stdout.close(); process.stderr.close()
     return returncode,bytes(buffers[process.stdout]),bytes(buffers[process.stderr]),error
 
-def collect_serial_inventory():
+def collect_serial_inventory(serial_path=SERIAL_PATH):
     before=_enumerate_devices(); devices=sorted(before)
     if not _trusted_lsof(): return devices,[],"untrusted"
-    returncode,stdout,stderr,error=_run_lsof([str(TRUSTED_LSOF_EXECUTABLE),"-nP","-t","--",SERIAL_PATH])
+    returncode,stdout,stderr,error=_run_lsof([str(TRUSTED_LSOF_EXECUTABLE),"-nP","-t","--",serial_path])
     after=_enumerate_devices()
     if after!=before: return sorted(after),[],"inventory_changed"
     if error: return devices,[],error
@@ -305,9 +306,14 @@ def collect_serial_inventory():
         elif token: return devices,[],"output"
     return devices,sorted(set(holders)),None
 
-def _serial_inventory_safe():
-    devices,holders,error=collect_serial_inventory()
-    return error is None and devices==[SERIAL_PATH] and not holders
+def _profile_serial_inventory(qualification_profile):
+    if qualification_profile == "production":
+        return collect_serial_inventory()
+    return collect_serial_inventory(admission_policy(qualification_profile)["serialPath"])
+
+def _serial_inventory_safe(qualification_profile="production"):
+    devices,holders,error=_profile_serial_inventory(qualification_profile)
+    return error is None and devices==[admission_policy(qualification_profile)["serialPath"]] and not holders
 
 def _candidate_matches(binding, actual, *, qualification_profile="production"):
     if not isinstance(actual,dict): return False
@@ -369,13 +375,13 @@ def validate_documents(doc,identity,actual,now,devices,holders,inventory_error,*
     if isinstance(binding,dict) and not _candidate_matches(binding,actual,qualification_profile=qualification_profile): reasons.add("candidate.reference")
     if not _exact_equal(identity.get("partitionTable"),policy["partitions"]): reasons.add("expectedIdentity.partitionTable")
     if not _exact_equal(identity.get("signer"),{"algorithm":"ed25519","fingerprint":PINNED_APPROVAL_KEY_FINGERPRINT}): reasons.add("expectedIdentity.signer")
-    expected_robot={"mac":ROBOT_MAC,"board":BOARD,"target":TARGET,"serialPath":SERIAL_PATH,"exactlyOneRobot":True}
+    expected_robot={"mac":ROBOT_MAC,"board":BOARD,"target":TARGET,"serialPath":policy["serialPath"],"exactlyOneRobot":True}
     if not _exact_equal(doc.get("robot"),identity.get("robot")) or not _exact_equal(doc.get("robot"),expected_robot): reasons.add("robot.identity")
-    expected_lease={"soleLeaseConfirmed":True,"competingProcessesStopped":True,"devicePath":SERIAL_PATH,"discoveredDevices":[SERIAL_PATH],"holderPids":[],"inventoryMethod":"lstat-glob-lsof-v1"}
+    expected_lease={"soleLeaseConfirmed":True,"competingProcessesStopped":True,"devicePath":policy["serialPath"],"discoveredDevices":[policy["serialPath"]],"holderPids":[],"inventoryMethod":"lstat-glob-lsof-v1"}
     lease=doc.get("serialLease")
     if not isinstance(lease,dict) or set(lease)!=SERIAL_KEYS or not _exact_equal(lease,expected_lease): reasons.add("serialLease")
     if inventory_error: reasons.add(f"serial.lsof.{inventory_error}")
-    if devices!=[SERIAL_PATH]: reasons.add("serial.inventory")
+    if devices!=[policy["serialPath"]]: reasons.add("serial.inventory")
     if holders: reasons.add("serial.occupied")
     plan=doc.get("flashPlan"); operation={"operation":"write_flash","offset":policy["appOffset"],"imageSha256":policy["appSha256"],"imageBytes":policy["appBytes"],"after":"no-reset","eraseChip":False,"mergedImage":False}; protected=[p for p in policy["partitions"] if p["protected"]]
     if not isinstance(plan,dict) or set(plan)!=FLASH_KEYS: reasons.add("flashPlan.keys")
@@ -502,7 +508,7 @@ def main(argv=None):
     external_binding=_candidate_external_binding(actual,observe_images=False)
     if external_binding is None: failure(["candidate.external"]); return 1
     now=utc_now(); reasons=[f"candidate.{r}" for r in _validate_profile_candidate(actual,args.profile,now=now)]
-    devices,holders,inventory_error=collect_serial_inventory(); reasons.extend(validate_documents(doc,identity,actual,now,devices,holders,inventory_error,qualification_profile=args.profile))
+    devices,holders,inventory_error=_profile_serial_inventory(args.profile); reasons.extend(validate_documents(doc,identity,actual,now,devices,holders,inventory_error,qualification_profile=args.profile))
     if reasons: failure(reasons); return 1
     if not external_still_bound(actual,external_binding,now): failure(["candidate.external.changed"]); return 1
     observed_binding=_candidate_external_binding(actual,observe_images=True)
@@ -512,14 +518,14 @@ def main(argv=None):
         failure(["input.changed"]); return 1
     commit_reasons=_commit_time_reasons(doc,utc_now())
     if commit_reasons: failure(commit_reasons); return 1
-    final_devices,final_holders,final_inventory_error=collect_serial_inventory()
+    final_devices,final_holders,final_inventory_error=_profile_serial_inventory(args.profile)
     final_inventory_reasons=[]
     if final_inventory_error: final_inventory_reasons.append(f"serial.lsof.{final_inventory_error}")
-    if final_devices!=[SERIAL_PATH]: final_inventory_reasons.append("serial.inventory")
+    if final_devices!=[policy["serialPath"]]: final_inventory_reasons.append("serial.inventory")
     if final_holders: final_inventory_reasons.append("serial.occupied")
     if final_inventory_reasons: failure(final_inventory_reasons); return 1
     if not external_still_bound(actual,external_binding,now): failure(["candidate.external.changed"]); return 1
-    payload={"schemaVersion":1,"validator":VALIDATOR,"status":"pass","reasons":[],"candidateId":binding["candidateId"],"sessionId":doc["sessionId"],"signerFingerprint":fingerprint,"physicalActionsPerformed":False,"serialOpened":False,"inputSha256":hashlib.sha256(raw).hexdigest(),"expectedIdentitySha256":hashlib.sha256(identity_raw).hexdigest(),"candidateSha256":hashlib.sha256(candidate_raw).hexdigest(),"softwareAuditSha256":verified_audit.audit_sha256,"softwareSnapshotId":verified_audit.snapshot_id,"robotMac":ROBOT_MAC,"serialPath":SERIAL_PATH,"firmwareSha":policy["firmwareSha"],"appSha256":policy["appSha256"],"manifestSha256":policy["manifestSha256"]}
+    payload={"schemaVersion":1,"validator":VALIDATOR,"status":"pass","reasons":[],"candidateId":binding["candidateId"],"sessionId":doc["sessionId"],"signerFingerprint":fingerprint,"physicalActionsPerformed":False,"serialOpened":False,"inputSha256":hashlib.sha256(raw).hexdigest(),"expectedIdentitySha256":hashlib.sha256(identity_raw).hexdigest(),"candidateSha256":hashlib.sha256(candidate_raw).hexdigest(),"softwareAuditSha256":verified_audit.audit_sha256,"softwareSnapshotId":verified_audit.snapshot_id,"robotMac":ROBOT_MAC,"serialPath":policy["serialPath"],"firmwareSha":policy["firmwareSha"],"appSha256":policy["appSha256"],"manifestSha256":policy["manifestSha256"]}
     if args.profile == "m1-staging": payload["qualificationProfile"] = args.profile
     commit_failure_reasons=[]
     def commit_safe():
@@ -537,7 +543,7 @@ def main(argv=None):
         return (
             not _commit_time_reasons(doc,utc_now())
             and external_still_bound(actual,external_binding,now)
-            and _serial_inventory_safe()
+            and (_serial_inventory_safe() if args.profile == "production" else _serial_inventory_safe(args.profile))
         )
     if not _publish(args.output,payload,output_binding,(input_record,identity_record,signature_record,candidate_record),commit_safe): failure(commit_failure_reasons or ["output.path"]); return 1
     return 0

@@ -40,6 +40,14 @@ Production pins and document schemas remain unchanged. Current-session partition
 readback, actual attended safety and protected-region preservation must still be
 established; software pins do not establish those physical facts.
 
+The staging policy pins `/dev/cu.usbmodem101`, observed for USB serial
+`14:C1:9F:D1:AC:20` in M1. The production default remains
+`/dev/cu.usbmodem1101`. Inventory, signed robot/lease documents, receipt checks
+and publication-time exclusivity checks all use the selected policy. A missing,
+renumbered or occupied port fails admission; this pin is not a live observation.
+The software evidence auditor uses the same explicit profile and still requires
+the expected identity's Ed25519 signature and every safety assertion.
+
 ## Qualification and physical boundary
 
 After source changes, rebuild and refreeze the exact firmware/images/dependency
