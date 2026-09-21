@@ -12,6 +12,15 @@ explicitly for an M1 staging candidate. Production invocations reject staging
 evidence. Staging gate receipts retain the profile on PASS and BLOCKED paths,
 including report publication failures. Lane selection is unchanged.
 
+The admin-browser lane stages the pinned Chromium and WebKit cache as well as
+the robot-preview browser. For the explicit M1 profile, the gate sets
+`TBOT_MJPEG_REPLAY_CANDIDATE_BROWSER=1`: the mounted MJPEG replay checks use
+the frozen Chromium/WebKit pair and retain all replay assertions. Missing cache
+bindings fail before launch, and a failed candidate launch never falls back to
+host Chrome. Standalone and ordinary production-profile replay retain their
+existing Chrome/WebKit behavior; that host-Chrome diagnostic is not frozen
+staging-browser evidence.
+
 ## Pinned firmware
 
 The separate staging physical policy binds firmware commit

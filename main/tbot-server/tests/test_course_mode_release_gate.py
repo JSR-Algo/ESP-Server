@@ -5323,11 +5323,15 @@ def test_snapshot_rejects_dirty_exception_hash_drift(candidate_file: Path) -> No
         gate.stage_execution_candidate(candidate, ())
 
 
-def test_admin_browser_environment_is_only_candidate_bound_descriptor(candidate_file: Path) -> None:
+@pytest.mark.parametrize("staging", [False, True])
+def test_admin_browser_environment_is_only_candidate_bound_descriptor(candidate_file: Path, staging: bool) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    if staging:
+        candidate["qualificationProfile"] = "m1-staging"
     environment = gate._child_environment(candidate, {
         "CHROME_BIN": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
         "PLAYWRIGHT_BROWSERS_PATH": "/untrusted/browser-cache",
+        "TBOT_MJPEG_REPLAY_CANDIDATE_BROWSER": "untrusted",
     }, next(lane for lane in gate.FULL_LANES if lane.name == "admin-browser"))
     browser = candidate["tools"]["robotPreviewBrowser"]
 
@@ -5342,6 +5346,7 @@ def test_admin_browser_environment_is_only_candidate_bound_descriptor(candidate_
     assert environment["PLAYWRIGHT_BROWSERS_PATH"] == str(
         Path(candidate["tools"]["playwrightBrowsers"]["webkit"]["root"]).parent
     )
+    assert environment.get("TBOT_MJPEG_REPLAY_CANDIDATE_BROWSER") == ("1" if staging else None)
 
 
 def test_playwright_environment_binds_compose_candidate_inputs(candidate_file: Path) -> None:

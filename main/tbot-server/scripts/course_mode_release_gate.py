@@ -4048,6 +4048,8 @@ def _child_environment(
         except (KeyError, TypeError):
             return None
     if lane.name == "admin-browser":
+        if candidate.get("qualificationProfile") == "m1-staging":
+            environment["TBOT_MJPEG_REPLAY_CANDIDATE_BROWSER"] = "1"
         browser = candidate["tools"]["robotPreviewBrowser"]
         values = {
             "root": browser["root"], "executable": browser["executable"],

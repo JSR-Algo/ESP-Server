@@ -26,7 +26,7 @@
     "test:lesson-visual-library-ui": "node scripts/check-lesson-visual-library-ui.mjs",
     "test:lesson-visual-library-browser": "node scripts/check-lesson-visual-library-browser.mjs",
     "test:lesson-builder-browser": "node scripts/check-lesson-builder-browser.mjs",
-    "test:mjpeg-replay-browser": "node scripts/check-mjpeg-replay-browser.cjs",
+    "test:mjpeg-replay-browser": "node --test tests/scripts/mjpeg-replay-browser-launch.test.cjs && node scripts/check-mjpeg-replay-browser.cjs",
     "test:robot-preview-browser": "node --test tests/scripts/robot-preview-browser.test.mjs",
     "test:candidate-browser-harness": "node --test tests/scripts/candidate-browser-harness.test.mjs",
     "test:robot-preview-child-cleanup": "node scripts/check-robot-preview-screenshots.mjs --test-child-cleanup",

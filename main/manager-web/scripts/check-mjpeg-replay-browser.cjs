@@ -41,6 +41,15 @@ function componentModule(file) {
     + ';document.head.append(style);export default component;';
 }
 async function main() {
+  const candidateMode = process.env.TBOT_MJPEG_REPLAY_CANDIDATE_BROWSER;
+  assert.ok(candidateMode === undefined || candidateMode === '1', 'invalid candidate browser mode');
+  if (candidateMode === '1') {
+    assert.ok(path.isAbsolute(process.env.PLAYWRIGHT_BROWSERS_PATH || ''),
+      'candidate replay requires its frozen browser cache');
+  }
+  const browserRuns = candidateMode === '1'
+    ? [['Chromium', chromium, {}], ['WebKit', webkit, {}]]
+    : [['Chrome', chromium, { channel: 'chrome' }], ['WebKit', webkit, {}]];
   const output = process.env.MJPEG_REPLAY_OUTPUT || fs.mkdtempSync(path.join(os.tmpdir(), 'tbot-mjpeg-replay-'));
   fs.mkdirSync(output, { recursive: true });
   const server = http.createServer((request, response) => {
@@ -69,7 +78,7 @@ async function main() {
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
   const results = [];
   try {
-    for (const [name, engine, options] of [['Chrome', chromium, { channel: 'chrome' }], ['WebKit', webkit, {}]]) {
+    for (const [name, engine, options] of browserRuns) {
       let browser;
       const row = { name, scope: 'Actual local mounted Vue controls and JPEG decode; unregistered fixtures', pageErrors: [] };
       try {
