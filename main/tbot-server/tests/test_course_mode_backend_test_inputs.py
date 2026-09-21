@@ -1,6 +1,8 @@
 import copy
 import hashlib
+import os
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -74,3 +76,14 @@ def test_backend_native_dependencies_are_explicit():
     assert gate._python_runtime_stage_required(lane)
     assert gate._container_tools_required(lane)
     assert "COURSE_MODE_NATIVE_TEST_SCRATCH_ROOT" in gate._required_environment(lane)
+
+
+def test_canonical_shell_forwards_native_scratch_prerequisite(tmp_path):
+    launcher = Path(__file__).resolve().parents[3] / "scripts/course_robot_e2e_gates.sh"
+    dispatch = launcher.read_text().split("exec /usr/bin/env -i", 1)[1]
+    dispatch = dispatch[:dispatch.index('"${PYTHON}"')] + "/usr/bin/printenv COURSE_MODE_NATIVE_TEST_SCRATCH_ROOT"
+    result = subprocess.run(["/bin/sh", "-c", "exec /usr/bin/env -i" + dispatch],
+        env={**os.environ, "COURSE_MODE_NATIVE_TEST_SCRATCH_ROOT": str(tmp_path)},
+        capture_output=True, text=True)
+    assert result.returncode == 0
+    assert result.stdout.strip() == str(tmp_path)

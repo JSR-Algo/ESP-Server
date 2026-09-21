@@ -62,6 +62,24 @@ def valid_candidate(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(gate, "datetime", _FixtureDateTime)
 
 
+def test_staging_operator_confirmation_uses_explicit_profile(tmp_path, monkeypatch):
+    candidate_path, candidate = _candidate(tmp_path)
+    candidate["qualificationProfile"] = "m1-staging"
+    candidate_path.write_text(json.dumps(candidate))
+    profiles = []
+
+    def validate(value, *, qualification_profile="production"):
+        profiles.append(qualification_profile)
+        return [] if qualification_profile == value.get("qualificationProfile") else ["profile"]
+
+    monkeypatch.setattr(attestation, "validate_candidate", validate)
+    output = Path(candidate["evidenceRoot"]) / "operator-staging.json"
+    assert _run(candidate_path, output, "--profile", "m1-staging",
+                "--confirm-trusted-operator-account", "--confirm-untrusted-automation-stopped") == 0
+    assert profiles == ["m1-staging"]
+    assert _is_gate_valid(candidate, output)
+
+
 def test_writes_exact_candidate_bound_canonical_attestation(tmp_path: Path) -> None:
     candidate_path, candidate = _candidate(tmp_path)
     output = Path(candidate["evidenceRoot"]) / "operator-attestation.json"

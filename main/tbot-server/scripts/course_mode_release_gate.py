@@ -3177,10 +3177,11 @@ def release_state_matches(
     require_runtime: bool, node_lanes: Sequence[Lane] | None = None,
 ) -> bool:
     current = _load_candidate(candidate_path)
+    profile = candidate.get("qualificationProfile", "production")
     if (
         current != candidate or current is None
-        or validate_candidate(current, verify_external_tools=False)
-        or validate_candidate(current, verify_external_tools=True)
+        or _validate_profile_candidate(current, profile, verify_external_tools=False)
+        or _validate_profile_candidate(current, profile, verify_external_tools=True)
     ):
         return False
     if not _candidate_matches(candidate):
@@ -3409,12 +3410,17 @@ def physical_preflight_command(candidate: dict) -> tuple[str, ...] | None:
             return None
     except (KeyError, OSError, ValueError):
         return None
+    profile = candidate.get("qualificationProfile", "production")
+    if profile not in ("production", "m1-staging"):
+        return None
+    profile_args = ("--profile", profile) if profile == "m1-staging" else ()
     return (
         str(runtime.executable), "-I", "-s", "-c", PHYSICAL_ADMISSION_BOOTSTRAP,
         "scripts/course_mode_physical_flash_admission.py",
         "--input", str(resolved["input"]), "--output", str(resolved["output"]),
         "--expected-identity", str(resolved["expectedIdentity"]),
         "--expected-identity-signature", str(resolved["expectedIdentitySignature"]),
+        *profile_args,
     )
 
 
@@ -3515,6 +3521,8 @@ def _physical_admission_binding(
         )
         if verified_audit is None or audit_reasons:
             return None
+        profile = candidate.get("qualificationProfile", "production")
+        policy = _admission.admission_policy(profile)
         expected_result = {
             "schemaVersion": 1,
             "validator": _admission.VALIDATOR,
@@ -3534,10 +3542,12 @@ def _physical_admission_binding(
             "softwareSnapshotId": verified_audit.snapshot_id,
             "robotMac": _admission.ROBOT_MAC,
             "serialPath": _admission.SERIAL_PATH,
-            "firmwareSha": _admission.FIRMWARE_SHA,
-            "appSha256": _admission.APP_SHA256,
-            "manifestSha256": _admission.MANIFEST_SHA256,
+            "firmwareSha": policy["firmwareSha"],
+            "appSha256": policy["appSha256"],
+            "manifestSha256": policy["manifestSha256"],
         }
+        if profile == "m1-staging":
+            expected_result["qualificationProfile"] = profile
         return PhysicalAdmissionBinding(
             descriptor=descriptor,
             evidence_root_identity=_directory_identity(evidence_root_metadata),
@@ -4740,6 +4750,12 @@ def _quarantine_invalidate_remove(
                 os.close(write_descriptor)
 
 
+def _validate_profile_candidate(candidate, profile, **kwargs):
+    if profile == "production":
+        return validate_candidate(candidate, **kwargs)
+    return validate_candidate(candidate, qualification_profile=profile, **kwargs)
+
+
 def _run_gate_impl(
     candidate_path: Path,
     mode: str,
@@ -4750,7 +4766,14 @@ def _run_gate_impl(
     max_output_bytes: int = MAX_LANE_OUTPUT_BYTES,
     report_path: Path | None = None,
     runtime_root: Path | None = None,
+    qualification_profile: str = "production",
 ) -> dict:
+    def blocked(candidate_id: str | None, failed_lane: str) -> dict:
+        report = _blocked(candidate_id, failed_lane)
+        if qualification_profile == "m1-staging":
+            report["qualificationProfile"] = qualification_profile
+        return report
+
     candidate = _load_candidate(candidate_path)
     candidate_id = candidate.get("candidateId") if isinstance(candidate, dict) else None
     selected: tuple[Lane, ...] = ()
@@ -4764,23 +4787,23 @@ def _run_gate_impl(
         if candidate is not None:
             report_destination = _prepare_report_destination(candidate_path, candidate, report_path)
         if report_destination is None:
-            return _blocked(candidate_id if isinstance(candidate_id, str) else None, "report")
-    if candidate is None or validate_candidate(candidate):
-        report = _blocked(candidate_id if isinstance(candidate_id, str) else None, "candidate")
+            return blocked(candidate_id if isinstance(candidate_id, str) else None, "report")
+    if candidate is None or _validate_profile_candidate(candidate, qualification_profile):
+        report = blocked(candidate_id if isinstance(candidate_id, str) else None, "candidate")
     elif mode not in MODES or type(max_output_bytes) is not int or max_output_bytes <= 0:
-        report = _blocked(candidate_id, "configuration")
+        report = blocked(candidate_id, "configuration")
     elif lanes is None and (
         operator_binding := _operator_attestation_binding(candidate, source)
     ) is None:
-        report = _blocked(candidate_id, "operator-precondition")
+        report = blocked(candidate_id, "operator-precondition")
     elif lanes is None and report_path is not None and _paths_alias(
         report_path, operator_binding.path,
     ):
         assert report_destination is not None
         _close_report_destination(report_destination)
-        return _blocked(candidate_id, "report")
+        return blocked(candidate_id, "report")
     elif lanes is None and not _runtime_matches_candidate(candidate, runtime_root):
-        report = _blocked(candidate_id, "candidate-runtime")
+        report = blocked(candidate_id, "candidate-runtime")
     else:
         selected = tuple(lanes) if lanes is not None else lanes_for_mode(mode)
         require_runtime = lanes is None
@@ -4790,7 +4813,7 @@ def _run_gate_impl(
             len(lane_names) != len(set(lane_names))
             or not all(_valid_lane(lane, repositories) for lane in selected)
         ):
-            report = _blocked(candidate_id, "configuration")
+            report = blocked(candidate_id, "configuration")
         else:
             report = {
                 "candidateId": candidate_id, "verdict": "PASS", "lanes": [], "failedLane": None,
@@ -4811,7 +4834,7 @@ def _run_gate_impl(
             if not release_state_matches(
                 candidate_path, candidate, selected, runtime_root, require_runtime,
             ):
-                report = _blocked(candidate_id, selected[0].name if selected else "candidate-runtime")
+                report = blocked(candidate_id, selected[0].name if selected else "candidate-runtime")
                 if selected:
                     report["lanes"].append({
                         "name": selected[0].name, "exitCode": None, "durationMs": 0,
@@ -5274,9 +5297,9 @@ def _run_gate_impl(
                 if operator_binding is not None and _operator_attestation_binding(
                     candidate, source,
                 ) != operator_binding:
-                    report = _blocked(candidate_id, "operator-precondition")
+                    report = blocked(candidate_id, "operator-precondition")
                 elif not _candidate_metadata_matches(candidate_path, candidate):
-                    report = _blocked(candidate_id, selected[-1].name if selected else "candidate-runtime")
+                    report = blocked(candidate_id, selected[-1].name if selected else "candidate-runtime")
                 elif operator_binding is not None:
                     report["operatorAttestationSha256"] = operator_binding.sha256
     if operator_binding is not None and _operator_attestation_binding(
@@ -5291,19 +5314,21 @@ def _run_gate_impl(
         report["verdict"] == "PASS" and published_physical_result is not None
         and not _admission._still_bound(published_physical_result)
     ):
-        report = _blocked(candidate_id, "physical-flash-admission")
+        report = blocked(candidate_id, "physical-flash-admission")
     if report["verdict"] == "PASS" and physical_admission_binding is not None and (
         _physical_admission_binding(
             candidate, require_output_absent=False,
             expected_candidate_path=candidate_path,
         ) != physical_admission_binding
     ):
-        report = _blocked(candidate_id, "physical-flash-admission")
+        report = blocked(candidate_id, "physical-flash-admission")
     if report["verdict"] != "PASS" and published_physical_result is not None:
         if _remove_bound_physical_admission_result(published_physical_result):
             published_physical_result = None
         else:
             report["cleanupFailed"] = True
+    if qualification_profile == "m1-staging":
+        report["qualificationProfile"] = qualification_profile
     if report_path is not None:
         assert report_destination is not None
         report_parent_identity = None
@@ -5327,7 +5352,7 @@ def _run_gate_impl(
                     expected_candidate_path=candidate_path,
                 ) != physical_admission_binding
             ):
-                report = _blocked(candidate_id, "physical-flash-admission")
+                report = blocked(candidate_id, "physical-flash-admission")
             if not _write_report_atomic(report_path, report, report_destination):
                 report_finalization_failed = True
             else:
@@ -5335,22 +5360,22 @@ def _run_gate_impl(
                 if report["verdict"] == "PASS" and operator_binding is not None and (
                     _operator_attestation_binding(candidate, source) != operator_binding
                 ):
-                    post_publish_report = _blocked(candidate_id, "operator-precondition")
+                    post_publish_report = blocked(candidate_id, "operator-precondition")
                 elif report["verdict"] == "PASS" and physical_admission_binding is not None and (
                     _physical_admission_binding(
                         candidate, require_output_absent=False,
                         expected_candidate_path=candidate_path,
                     ) != physical_admission_binding
                 ):
-                    post_publish_report = _blocked(candidate_id, "physical-flash-admission")
+                    post_publish_report = blocked(candidate_id, "physical-flash-admission")
                 elif report["verdict"] == "PASS" and published_physical_result is not None and (
                     not _admission._still_bound(published_physical_result)
                 ):
-                    post_publish_report = _blocked(candidate_id, "physical-flash-admission")
+                    post_publish_report = blocked(candidate_id, "physical-flash-admission")
                 elif report["verdict"] == "PASS" and not _candidate_metadata_matches(
                     candidate_path, candidate,
                 ):
-                    post_publish_report = _blocked(
+                    post_publish_report = blocked(
                         candidate_id, selected[-1].name if selected else "candidate-runtime",
                     )
                 if post_publish_report is not None:
@@ -5385,10 +5410,10 @@ def _run_gate_impl(
                     )
                 )
                 if not report_removed:
-                    report = _blocked(candidate_id, "report")
+                    report = blocked(candidate_id, "report")
                     report["cleanupFailed"] = True
                 else:
-                    report = _blocked(candidate_id, "report")
+                    report = blocked(candidate_id, "report")
             if report_finalization_failed and published_physical_result is not None:
                 if _remove_bound_physical_admission_result(published_physical_result):
                     published_physical_result = None
@@ -5413,6 +5438,7 @@ def run_gate(
     max_output_bytes: int = MAX_LANE_OUTPUT_BYTES,
     report_path: Path | None = None,
     runtime_root: Path | None = None,
+    qualification_profile: str = "production",
 ) -> dict:
     assignment_guard = AssignmentRuntimeGuard()
     try:
@@ -5425,6 +5451,7 @@ def run_gate(
             max_output_bytes=max_output_bytes,
             report_path=report_path,
             runtime_root=runtime_root,
+            qualification_profile=qualification_profile,
         )
     finally:
         assignment_guard.cleanup()
@@ -5445,6 +5472,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--candidate", type=Path)
     parser.add_argument("--mode", choices=MODES, default="quick")
     parser.add_argument("--report", type=Path)
+    parser.add_argument("--profile", choices=("production", "m1-staging"), default="production")
     parser.add_argument("--list-lanes", action="store_true")
     args = parser.parse_args(argv)
     if args.list_lanes:
@@ -5454,7 +5482,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.candidate is None:
         parser.error("--candidate is required")
-    report = run_gate(args.candidate, args.mode, report_path=args.report)
+    report = run_gate(args.candidate, args.mode, report_path=args.report, qualification_profile=args.profile)
     _emit(report)
     return 0 if report["verdict"] == "PASS" else 1
 

@@ -1709,12 +1709,17 @@ def _firmware_manifest_schema_valid(value: Any) -> bool:
         "tests": {"projectSourceGate", "firmwareVersionAndCourseGates"},
         "safety": {"flashed", "serialAccessed", "hilRun", "physicalDeviceAccessed"},
     }
+    if value.get("profile") == "m1-staging":
+        exact["config"] = (
+            exact["config"] - {"productionConfigAudit", "productionArtifactAudit"}
+        ) | {"stagingConfigAudit", "stagingArtifactAudit"}
     return all(isinstance(value.get(name), dict) and set(value[name]) == keys for name, keys in exact.items())
 
 
 def _validate_firmware(
     value: Any, repositories: dict[str, Any], tools: dict[str, Any], reasons: set[str],
     *, verify_identity: bool, candidate_created: datetime | None, candidate_expires: datetime | None,
+    qualification_profile: str = "production",
 ) -> None:
     if not isinstance(value, dict) or set(value) != FIRMWARE_KEYS:
         reasons.add("firmware.keys")
@@ -1799,6 +1804,7 @@ def _validate_firmware(
         reasons.add("tools.espIdf.commit")
     reproducibility = evidence["reproducibility"]
     config = evidence["config"]
+    audit_prefix = "staging" if qualification_profile == "m1-staging" else "production"
     safety = evidence["safety"]
     evidence_created = _parse_rfc3339_utc(evidence.get("createdAt"))
     free_percent = partition.get("freePercent")
@@ -1807,7 +1813,7 @@ def _validate_firmware(
         if type(value.get("partitionBytes")) is int and value["partitionBytes"] > 0 else None
     )
     if (
-        evidence.get("status") != "PASS" or evidence.get("profile") != "production"
+        evidence.get("status") != "PASS" or evidence.get("profile") != qualification_profile
         or evidence.get("board") != "LCDWiki ES3C35P" or evidence.get("target") != "esp32s3"
         or evidence_created is None
         or (
@@ -1822,8 +1828,8 @@ def _validate_firmware(
         or reproducibility["independentCleanBuilds"] < 2
         or reproducibility.get("ccacheEnabled") is not False
         or config.get("appReproducibleBuild") is not True
-        or config.get("productionConfigAudit") != "PASS"
-        or config.get("productionArtifactAudit") != "PASS"
+        or config.get(audit_prefix + "ConfigAudit") != "PASS"
+        or config.get(audit_prefix + "ArtifactAudit") != "PASS"
         or re.fullmatch(r"[1-9][0-9]* passed(?:, [0-9]+ skipped.*)?", evidence["tests"].get("projectSourceGate", "")) is None
         or re.fullmatch(r"[1-9][0-9]* passed", evidence["tests"].get("firmwareVersionAndCourseGates", "")) is None
         or any(safety.get(field) is not False for field in safety)
@@ -2200,14 +2206,21 @@ def backend_test_inputs_valid(candidate: dict) -> bool:
 
 def validate_candidate(
     candidate: Any, *, now: datetime | None = None, verify_external_tools: bool = True,
+    qualification_profile: str = "production",
 ) -> list[str]:
     """Return sorted, stable and privacy-safe validation reason codes."""
     reasons: set[str] = set()
     validation_now = now or datetime.now(timezone.utc)
     if not isinstance(candidate, dict):
         return ["candidate.type"]
-    if set(candidate) != REQUIRED_KEYS:
+    expected_keys = REQUIRED_KEYS | ({"qualificationProfile"} if qualification_profile == "m1-staging" else set())
+    if set(candidate) != expected_keys:
         reasons.add("topLevel.keys")
+    if (
+        qualification_profile not in ("production", "m1-staging")
+        or candidate.get("qualificationProfile", "production") != qualification_profile
+    ):
+        reasons.add("qualificationProfile")
     if not isinstance(candidate.get("candidateId"), str) or CANDIDATE_ID_RE.fullmatch(candidate["candidateId"]) is None:
         reasons.add("candidateId")
     created = _parse_rfc3339_utc(candidate.get("createdAt"))
@@ -2307,6 +2320,7 @@ def validate_candidate(
     )
     _validate_firmware(
         candidate.get("firmware"), repositories, tools if isinstance(tools, dict) else {}, reasons,
+        qualification_profile=qualification_profile,
         verify_identity=(
             verify_external_tools
             and not any(reason.startswith("repositories.firmware.") for reason in reasons)
@@ -2374,17 +2388,18 @@ def validate_candidate(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("candidate", type=Path)
+    parser.add_argument("--profile", choices=("production", "m1-staging"), default="production")
     args = parser.parse_args(argv)
     try:
         candidate = strict_json_loads(read_secure_regular(args.candidate, MAX_CANDIDATE_BYTES))
-        reasons = validate_candidate(candidate)
+        reasons = validate_candidate(candidate, qualification_profile=args.profile)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
         reasons = ["candidate.input"]
-    print(json.dumps(
-        {"schemaVersion": 1, "validator": "course-mode-candidate.v1",
-         "status": "pass" if not reasons else "fail", "reasons": reasons},
-        sort_keys=True, separators=(",", ":"),
-    ))
+    report = {"schemaVersion": 1, "validator": "course-mode-candidate.v1",
+              "status": "pass" if not reasons else "fail", "reasons": reasons}
+    if args.profile == "m1-staging":
+        report["qualificationProfile"] = args.profile
+    print(json.dumps(report, sort_keys=True, separators=(",", ":")))
     return 0 if not reasons else 1
 
 
