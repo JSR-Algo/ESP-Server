@@ -48,6 +48,7 @@ sys.path.insert(0, _scripts_directory)
 try:
     _software_snapshot = importlib.import_module("course_mode_software_evidence_snapshot")
     _admission = importlib.import_module("course_mode_physical_flash_admission")
+    _backend_native = importlib.import_module("course_mode_backend_native_runtime")
 finally:
     sys.path.remove(_scripts_directory)
 
@@ -647,6 +648,12 @@ class ExecutionStage:
                     return value
 
                 rebased_candidate = rebase(self.candidate)
+
+            if "backendTestInputs" in rebased_candidate["tools"]:
+                portal = Path(rebased_candidate["tools"]["backendTestInputs"]["portalOpenapi"]["path"])
+                portal.chmod(0o444)
+                if not _manifest.backend_test_inputs_valid(rebased_candidate):
+                    raise ValueError("lane backend test inputs mismatch")
 
             runtime = lane_root / "runtime"
             environment = {}
@@ -1821,6 +1828,132 @@ def _cjson_entry(source: Path, commit: str, base: list[str]) -> tuple[str, str, 
     return fields[0], fields[1], fields[2]
 
 
+def _run_backend_native_tests(command, candidate, environment, cwd, timeout_sec, max_output_bytes):
+    scratch = None
+    scratch_identity = None
+    parent_fd = None
+    interrupted = None
+    result = _manifest.BoundedCommandResult(None, "", "authority")
+    try:
+        parent = Path(environment["COURSE_MODE_NATIVE_TEST_SCRATCH_ROOT"])
+        if not parent.is_absolute() or parent != parent.resolve(strict=True):
+            raise _backend_native.NativePrerequisiteError("native prerequisite invalid")
+        parent_fd, parent_metadata, ancestry = _manifest._open_trusted_source_directory(parent)
+        usage = shutil.disk_usage(parent)
+        if usage.free < 128 * 1024 * 1024 or usage.free / usage.total < 0.05:
+            raise _backend_native.NativePrerequisiteError("native prerequisite invalid")
+        scratch = Path(tempfile.mkdtemp(prefix="course-mode-native-", dir=parent))
+        scratch_identity = _owned_tree_identity(scratch)
+        verification_fd, verification, verified_ancestry = _manifest._open_trusted_source_directory(parent)
+        try:
+            authority = _manifest._source_directory_authority_identity
+            if (authority(os.fstat(parent_fd)) != authority(parent_metadata)
+                    or authority(verification) != authority(parent_metadata)
+                    or verified_ancestry != ancestry):
+                raise _backend_native.NativePrerequisiteError("native scratch parent changed")
+        finally:
+            os.close(verification_fd)
+        tmp = scratch / "tmp"
+        tmp.mkdir()
+        (scratch / "runtime").mkdir()
+        python = candidate["tools"]["pythonTestRuntime"]
+        if not _manifest.python_test_runtime_authorized(python):
+            raise _backend_native.NativePrerequisiteError("native prerequisite invalid")
+        python_tree, error = _manifest.secure_python_test_runtime_tree_descriptor(Path(python["root"]))
+        if error or python_tree != python["treeDigest"]:
+            raise _backend_native.NativePrerequisiteError("native prerequisite invalid")
+        firmware = Path(candidate["repositories"]["firmware"]["path"])
+        esp = Path(candidate["repositories"]["adminEsp"]["path"])
+        journey = esp / "main/tbot-server/scripts/retained_media_journey.py"
+        if not journey.is_file() or journey.is_symlink():
+            raise _backend_native.NativePrerequisiteError("native prerequisite invalid")
+        clang = Path("/Library/Developer/CommandLineTools/usr/bin/clang")
+        compiler, error = _manifest.secure_executable_descriptor(clang)
+        if error or compiler is None or clang.stat().st_uid != 0 or clang.stat().st_mode & 0o022:
+            raise _backend_native.NativePrerequisiteError("native compiler unavailable")
+        sdk = Path("/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk").resolve(strict=True)
+        sdk_metadata = sdk.stat()
+        if not sdk.is_dir() or sdk_metadata.st_uid != 0 or sdk_metadata.st_mode & 0o022:
+            raise _backend_native.NativePrerequisiteError("native SDK unavailable")
+        cxx = scratch / "clang-cxx"
+        cxx.write_text('#!/bin/sh\nexec /Library/Developer/CommandLineTools/usr/bin/clang --driver-mode=g++ "$@"\n')
+        cxx.chmod(0o500)
+        native_environment = {
+            **environment,
+            "PATH": str(Path(python["root"]) / "bin") + ":" + environment["PATH"],
+            "TMPDIR": str(tmp), "CJSON_DIR": str(Path(candidate["tools"]["espIdf"]["root"]) / "components/json/cJSON"),
+            "CC": str(clang), "CXX": str(cxx),
+            "SDKROOT": str(sdk),
+            "RETAINED_CONTRACT_VECTORS": str(firmware / "tests/fixtures/retained-assignment-device.v1.vectors.json"),
+            "RETAINED_TEST_PYTHON": str(Path(python["root"]) / python["executable"]),
+            "RETAINED_TEST_JOURNEY": str(journey),
+            "RETAINED_TEST_RUNTIME_ROOT": str(scratch), "RETAINED_TEST_SCRATCH_ROOT": str(tmp),
+        }
+        build = run_bounded_command(
+            ["/bin/bash", str(firmware / "scripts/run_host_native_retained_mcp_test.sh")],
+            cwd=firmware, env=native_environment, timeout_sec=180,
+            max_output_bytes=max_output_bytes, contain_process_group=True,
+        )
+        if build.error or build.returncode != 0:
+            raise _backend_native.NativeBuildError("native build failed")
+        binaries = list(tmp.glob("retained-mcp.*/retained-mcp-test"))
+        if len(binaries) != 1:
+            raise _backend_native.NativePrerequisiteError("native prerequisite invalid")
+        binary = binaries[0]
+        observed, error = _manifest.secure_executable_descriptor(binary)
+        if error or observed is None:
+            raise _backend_native.NativePrerequisiteError("native prerequisite invalid")
+        (scratch / "runtime/retained-mcp-binary.json").write_text(json.dumps({
+            "path": str(binary), "sha256": observed["sha256"], "compiler": compiler, "sdk": str(sdk),
+        }))
+        with _backend_native.OwnedPostgres(
+            candidate["tools"]["docker"]["path"], candidate["database"]["engineImageId"], environment,
+        ) as database:
+            result = run_bounded_command(
+                list(command), cwd=cwd, timeout_sec=timeout_sec,
+                max_output_bytes=max_output_bytes,
+                env={**native_environment, "RETAINED_TEST_DATABASE_URL": database.url},
+                contain_process_group=True,
+            )
+        repeated, error = _manifest.secure_python_test_runtime_tree_descriptor(Path(python["root"]))
+        if error or repeated != python_tree or not _manifest.backend_test_inputs_valid(candidate):
+            result = _manifest.BoundedCommandResult(None, "", "authority")
+        observed, error = _manifest.secure_executable_descriptor(clang)
+        if error or observed != compiler:
+            result = _manifest.BoundedCommandResult(None, "", "authority")
+    except _backend_native.NativeCleanupError as error:
+        result = _manifest.BoundedCommandResult(None, str(error), "native-cleanup")
+    except _backend_native.NativeBuildError:
+        result = _manifest.BoundedCommandResult(None, "", "native-build")
+    except (_backend_native.NativePrerequisiteError, OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired):
+        result = _manifest.BoundedCommandResult(None, "", "native-prerequisite")
+    except BaseException as error:
+        interrupted = error
+    finally:
+        if parent_fd is not None:
+            os.close(parent_fd)
+        if scratch is not None and not _remove_owned_tree(scratch, scratch_identity):
+            retained = (result.stdout + "\n" if result.error == "native-cleanup" else "") + str(scratch)
+            result = _manifest.BoundedCommandResult(None, retained, "native-cleanup")
+    if interrupted is not None:
+        if result.error == "native-cleanup":
+            raise RetainedStagingError(scratch) from interrupted
+        raise interrupted
+    return result
+
+
+def _stage_backend_test_inputs(candidate: dict, staged: dict, root: Path, state: dict) -> None:
+    if not _manifest.backend_test_inputs_valid(candidate):
+        raise ValueError("backend test inputs invalid")
+    value = candidate["tools"]["backendTestInputs"]["portalOpenapi"]
+    destination = root / "inputs/portal/openapi.json"
+    _copy_snapshot_file(Path(value["path"]), destination, state, expected_sha256=value["sha256"])
+    destination.chmod(0o444)
+    staged["tools"]["backendTestInputs"]["portalOpenapi"]["path"] = str(destination)
+    if not _manifest.backend_test_inputs_valid(candidate) or not _manifest.backend_test_inputs_valid(staged):
+        raise ValueError("backend test inputs changed during staging")
+
+
 def stage_execution_candidate(candidate: dict, lanes: Sequence[Lane]) -> ExecutionStage:
     temporary_parent = Path("/private/tmp") if sys.platform == "darwin" else Path(tempfile.gettempdir())
     root = Path(tempfile.mkdtemp(prefix="course-mode-stage-", dir=temporary_parent))
@@ -1831,6 +1964,8 @@ def stage_execution_candidate(candidate: dict, lanes: Sequence[Lane]) -> Executi
         root_descriptor = _open_snapshot_directory(root)
         staged = json.loads(json.dumps(candidate))
         state = {"entries": 0, "bytes": 0}
+        if "backendTestInputs" in candidate["tools"] or any(lane.name == "backend-tests" for lane in lanes):
+            _stage_backend_test_inputs(candidate, staged, root, state)
         repositories_root = root / "repositories"
         repositories_root.mkdir()
         for name, repository in candidate["repositories"].items():
@@ -1844,7 +1979,7 @@ def stage_execution_candidate(candidate: dict, lanes: Sequence[Lane]) -> Executi
                 )
             staged["repositories"][name]["path"] = str(destination)
         tools_root = root / "tools"
-        if any(lane.name == "firmware-handler" for lane in lanes):
+        if any(lane.name in {"firmware-handler", "backend-tests"} for lane in lanes):
             descriptor = candidate["tools"]["espIdf"]
             source_value = descriptor["root"]
             commit = descriptor["commit"]
@@ -2163,7 +2298,8 @@ QUICK_LANES = (
 FULL_LANES = (
     _lane("backend-lint", "backend", ".", ("npm", "run", "lint")),
     _lane("backend-typecheck", "backend", ".", ("npm", "run", "typecheck")),
-    _lane("backend-tests", "backend", ".", ("npm", "test", "--", "--no-cache"), 1800.0),
+    _lane("backend-tests", "backend", ".", ("npm", "test", "--", "--no-cache"), 1800.0,
+          ("COURSE_MODE_NATIVE_TEST_SCRATCH_ROOT",)),
     _lane("backend-build", "backend", ".", ("npm", "run", "build")),
     _lane(
         "backend-curriculum-verifier", "backend", ".",
@@ -2860,12 +2996,13 @@ def _python_test_runtime_required(lane: Lane) -> bool:
 
 
 def _python_runtime_stage_required(lane: Lane) -> bool:
-    return lane.name == "physical-flash-admission" or _python_test_runtime_required(lane)
+    return lane.name in {"physical-flash-admission", "backend-tests"} or _python_test_runtime_required(lane)
 
 
 def _container_tools_required(lane: Lane) -> bool:
     return (
-        lane.name.startswith("admin-course-mode-playwright-")
+        lane.name == "backend-tests"
+        or lane.name.startswith("admin-course-mode-playwright-")
         or lane.name.startswith("admin-course-mode-assignment-")
     )
 
@@ -3885,6 +4022,11 @@ def _child_environment(
         if len(roots) == 1:
             environment["PLAYWRIGHT_BROWSERS_PATH"] = str(roots.pop())
     environment.update(dict(lane.fixed_environment))
+    if lane.name == "backend-tests":
+        try:
+            environment["TBOT_PORTAL_OPENAPI_PATH"] = candidate["tools"]["backendTestInputs"]["portalOpenapi"]["path"]
+        except (KeyError, TypeError):
+            return None
     if lane.name == "admin-browser":
         browser = candidate["tools"]["robotPreviewBrowser"]
         values = {
@@ -4928,6 +5070,12 @@ def _run_gate_impl(
                     )
                     if not container_authority or not browser_authority or not operator_authority:
                         result = _manifest.BoundedCommandResult(None, "", "authority")
+                    elif lane.name == "backend-tests":
+                        result = _run_backend_native_tests(
+                            command, execution_candidate, child_environment, resolved_cwd,
+                            lane.timeout_sec, max_output_bytes,
+                        )
+                        bounded_result = result
                     elif _python_test_runtime_required(lane) or _backend_compiler_required(lane):
                         backend_binding = _backend_snapshot_environment(execution_stage)
                         if backend_binding is None:
@@ -5000,7 +5148,8 @@ def _run_gate_impl(
                         if bounded_result is not None else None
                     )
                     skip_state = pytest_report_has_skips(junit_path) if junit_path else False
-                except BaseException:
+                except BaseException as interrupted_error:
+                    retained_paths = set(interrupted_error.paths) if isinstance(interrupted_error, RetainedStagingError) else set()
                     try:
                         _cleanup_gate_owned_or_raise(
                             lane_execution, execution_stage, assignment_runtime,
@@ -5008,10 +5157,14 @@ def _run_gate_impl(
                         assignment_runtime = None
                         assignment_guard.release()
                     except RetainedStagingError as error:
+                        retained_paths.update(error.paths)
+                    if retained_paths:
                         report["verdict"] = "BLOCKED"
                         report["failedLane"] = "cleanup"
+                        report["cleanupFailed"] = True
                         report["retainedOwner"] = "current-process"
-                        report["retainedPaths"] = list(error.paths)
+                        report["retainedPaths"] = sorted(retained_paths)
+                        report["interrupted"] = isinstance(interrupted_error, (KeyboardInterrupt, SystemExit)) or isinstance(interrupted_error.__cause__, (KeyboardInterrupt, SystemExit))
                         assignment_runtime = None
                         assignment_guard.release()
                         break
@@ -5075,15 +5228,18 @@ def _run_gate_impl(
                 if lane_failed:
                     cleanup_failed = (
                         rollback_restore_failed or parent_restore_succeeded is False
+                        or result.error == "native-cleanup"
                     )
                     report["verdict"] = (
                         "BLOCKED"
-                        if cleanup_failed or result.error in {"authority", "containment"}
+                        if cleanup_failed or result.error in {"authority", "containment", "native-prerequisite"}
                         else "FAIL"
                     )
                     report["failedLane"] = lane.name
                     if cleanup_failed:
                         report["cleanupFailed"] = True
+                        if result.error == "native-cleanup":
+                            report["retainedResource"] = result.stdout
                 elif skip_state is not False:
                     report["verdict"] = "BLOCKED"
                     report["failedLane"] = lane.name

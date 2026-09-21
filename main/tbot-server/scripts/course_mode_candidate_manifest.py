@@ -93,6 +93,7 @@ REQUIRED_TOOLS_KEYS = frozenset({
     "robotPreviewBrowser", "node", "pythonTestRuntime", "espIdf",
 })
 TOOLS_KEYS = REQUIRED_TOOLS_KEYS
+MAX_PORTAL_OPENAPI_BYTES = 16 * 1024 * 1024
 PHYSICAL_ADMISSION_KEYS = frozenset({
     "input", "output", "expectedIdentity", "expectedIdentitySignature",
 })
@@ -2172,6 +2173,31 @@ def _validate_physical_admission(
             reasons.add(f"{prefix}.{key}")
 
 
+def backend_test_inputs_valid(candidate: dict) -> bool:
+    try:
+        inputs = candidate["tools"]["backendTestInputs"]
+        if not isinstance(inputs, dict) or set(inputs) != {"portalOpenapi"}:
+            return False
+        value = inputs["portalOpenapi"]
+        if not isinstance(value, dict) or set(value) != {"path", "sha256", "bytes"}:
+            return False
+        if (not isinstance(value["path"], str) or not isinstance(value["sha256"], str)
+                or re.fullmatch(r"[0-9a-f]{64}", value["sha256"]) is None
+                or type(value["bytes"]) is not int
+                or not 0 < value["bytes"] <= MAX_PORTAL_OPENAPI_BYTES):
+            return False
+        path = Path(value["path"])
+        backend = Path(candidate["repositories"]["backend"]["path"])
+        if path == backend / "openapi.json":
+            return False
+        observed, error = secure_regular_descriptor(
+            path, MAX_PORTAL_OPENAPI_BYTES, secure_metadata=True, bind_parent=True,
+        )
+        return error is None and observed == {"sha256": value["sha256"], "bytes": value["bytes"]}
+    except (KeyError, TypeError, ValueError, OSError):
+        return False
+
+
 def validate_candidate(
     candidate: Any, *, now: datetime | None = None, verify_external_tools: bool = True,
 ) -> list[str]:
@@ -2201,8 +2227,12 @@ def validate_candidate(
         if set(tools) not in (
             REQUIRED_TOOLS_KEYS,
             REQUIRED_TOOLS_KEYS | {"physicalAdmission"},
+            REQUIRED_TOOLS_KEYS | {"backendTestInputs"},
+            REQUIRED_TOOLS_KEYS | {"physicalAdmission", "backendTestInputs"},
         ):
             reasons.add("tools.keys")
+        if "backendTestInputs" in tools and not backend_test_inputs_valid(candidate):
+            reasons.add("tools.backendTestInputs.portalOpenapi")
         docker_executable = _validate_container_tool(
             "docker", tools.get("docker"), reasons, verify_identity=verify_external_tools,
         )

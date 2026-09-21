@@ -920,6 +920,14 @@ def candidate_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         },
         "evidenceRoot": str(evidence_root),
     }
+    portal = tmp_path / "docs/site/api/openapi.json"
+    portal.parent.mkdir(parents=True)
+    portal.write_bytes(b'{"openapi":"3.1.0","paths":{}}\n')
+    portal.chmod(0o444)
+    candidate["tools"]["backendTestInputs"] = {"portalOpenapi": {
+        "path": str(portal), "sha256": hashlib.sha256(portal.read_bytes()).hexdigest(),
+        "bytes": portal.stat().st_size,
+    }}
     path = tmp_path / "candidate.json"
     path.write_text(json.dumps(candidate), encoding="utf-8")
     return path
