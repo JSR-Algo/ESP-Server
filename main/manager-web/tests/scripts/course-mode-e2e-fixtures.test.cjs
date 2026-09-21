@@ -7,6 +7,40 @@ const { createRequire } = require('node:module');
 
 const helperPath = path.resolve(__dirname, '../../e2e/lesson-studio/helpers/admin-api.js');
 
+test('second-author fixture keeps ownership writes separate from the rollout asset reader', async () => {
+  const calls = [];
+  const req = createRequire(helperPath);
+  const sandbox = { module: { exports: {} }, exports: {}, console,
+    process: { env: { TBOT_BACKEND_WORKTREE: '/unit/backend' }, execPath: process.execPath },
+    require: name => {
+      if (name === 'node:fs') return { existsSync: () => true };
+      if (name === 'node:child_process') return { execFileSync: () => JSON.stringify({ activities: [] }) };
+      return req(name);
+    },
+  };
+  vm.runInNewContext(fs.readFileSync(helperPath, 'utf8'), sandbox, { filename: helperPath });
+  function page(actor) {
+    return {
+      evaluate: async () => ({ manager: 'unit-manager', nest: actor }),
+      request: { fetch: async (url, options) => {
+        calls.push({ actor, url, ...options });
+        if (url.includes('/lesson-visual-assets') || url.includes('/assets')) {
+          assert.equal(actor, 'rollout-admin', 'only the admitted actor may read source media');
+        } else {
+          assert.equal(actor, 'owner', 'draft creation and contract writes retain the second author');
+        }
+        let data = { id: 'draft', visualChecksum: 'initial' };
+        if (url.includes('/lesson-visual-assets')) data = [{ publicationState: 'published', assetKey: 'real-key' }];
+        else if (url.includes('/assets')) data = { assets: [{ assetId: 'existing' }] };
+        return { ok: () => true, status: () => 200, text: async () => '', json: async () => ({ data }) };
+      } },
+    };
+  }
+  await sandbox.module.exports.createCourseModeDraft(page('owner'), { visualPage: page('rollout-admin'), runId: 'unit' });
+  assert.ok(calls.some(call => call.method === 'PUT' && call.actor === 'owner'));
+  assert.ok(calls.some(call => call.url.includes('/lesson-visual-assets') && call.actor === 'rollout-admin'));
+});
+
 test('v5 fixture binding sends both tokens from one saved snapshot and all seven phases', async () => {
   const phases = ['flyIn', 'walk', 'teach', 'listen', 'thinking', 'celebrate', 'exit'];
   const selection = {

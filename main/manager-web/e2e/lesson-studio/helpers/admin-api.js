@@ -94,7 +94,7 @@ function withCanonicalCourseModeChecksum(contract) {
   }));
 }
 
-async function createCourseModeDraft(page, { weekNumber = 1, runId } = {}) {
+async function createCourseModeDraft(page, { weekNumber = 1, runId, visualPage = page } = {}) {
   const suffix = runId || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
   const course = await adminApi(page, 'POST', '/courses', {
     courseKey: `e2e-course-mode-${suffix}`,
@@ -111,13 +111,13 @@ async function createCourseModeDraft(page, { weekNumber = 1, runId } = {}) {
     estimatedDurationSec: 480,
     durationPreset: 8,
   });
-  const catalog = await adminApi(page, 'GET', '/lesson-visual-assets?profile=espTft');
+  const catalog = await adminApi(visualPage, 'GET', '/lesson-visual-assets?profile=espTft');
   const contract = canonicalCourseModeContract(weekNumber, catalog
     .filter(asset => (asset.publication_state || asset.publicationState) === 'published')
     .map(asset => asset.asset_key || asset.assetKey));
   const initialVisuals = await adminApi(page, 'GET', `/lessons/${lesson.id}/visuals`);
   await adminApi(page, 'PUT', `/lessons/${lesson.id}/course-mode`, { expectedChecksum: null, expectedVisualChecksum: initialVisuals.visualChecksum, contract });
-  await createPublishableCourseModeVisuals(page, lesson.id);
+  await createPublishableCourseModeVisuals(visualPage, lesson.id);
   return { course, lesson: await adminApi(page, 'GET', `/lessons/${lesson.id}`), contract, runId: suffix };
 }
 

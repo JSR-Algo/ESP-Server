@@ -98,7 +98,7 @@ test('deduplicates identical retries and rejects a stale second-admin draft writ
   const second = await browser.newPage();
   await loginAsLessonAuthor(first, { authorEmail: 'lesson-author-b-e2e@local.invalid' });
   await loginAsLessonAuthor(second);
-  const fixture = await createCourseModeDraft(first);
+  const fixture = await createCourseModeDraft(first, { visualPage: second });
   const visuals = await createVisualTriple(second, fixture.lesson.id, fixture.runId);
   await createPublishableCourseModeVisuals(second, fixture.lesson.id);
   const stale = await adminApi(second, 'GET', `/lessons/${fixture.lesson.id}/course-mode`);
