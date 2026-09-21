@@ -46,7 +46,11 @@ The lane creates an isolated PostgreSQL container from the candidate's exact
 `database.engineImageId`, without pulling. A unique ownership label, verified
 container ID and loopback-only ephemeral port bind its lifecycle. The generated
 password is passed through the private environment, not command arguments.
-Ambient retained database URLs do not select the database. Test exceptions and
+The lane binds `RETAINED_TEST_DATABASE_URL`, `LESSON_RETAINED_TEST_DATABASE_URL`,
+`LESSON_STORAGE_TEST_DATABASE_URL` and
+`LESSON_LIFECYCLE_HARDENING_TEST_DATABASE_URL` to that owned database, overriding
+inherited values. The consumers use isolated schemas or child databases. This
+also enables the conditional lifecycle-hardening suite. Test exceptions and
 timeouts still trigger owned-resource cleanup.
 
 Native compilation failure is FAIL. Missing prerequisites and unverified

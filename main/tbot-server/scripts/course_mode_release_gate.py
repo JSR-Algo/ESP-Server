@@ -1912,7 +1912,13 @@ def _run_backend_native_tests(command, candidate, environment, cwd, timeout_sec,
             result = run_bounded_command(
                 list(command), cwd=cwd, timeout_sec=timeout_sec,
                 max_output_bytes=max_output_bytes,
-                env={**native_environment, "RETAINED_TEST_DATABASE_URL": database.url},
+                env={
+                    **native_environment,
+                    "RETAINED_TEST_DATABASE_URL": database.url,
+                    "LESSON_RETAINED_TEST_DATABASE_URL": database.url,
+                    "LESSON_STORAGE_TEST_DATABASE_URL": database.url,
+                    "LESSON_LIFECYCLE_HARDENING_TEST_DATABASE_URL": database.url,
+                },
                 contain_process_group=True,
             )
         repeated, error = _manifest.secure_python_test_runtime_tree_descriptor(Path(python["root"]))
