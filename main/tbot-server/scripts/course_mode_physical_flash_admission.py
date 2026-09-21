@@ -14,9 +14,9 @@ from course_mode_physical_tft_preflight import PINNED_APPROVAL_KEY_FINGERPRINT, 
 VALIDATOR = "course-mode-physical-flash-admission.v1"
 COURSE_ID, COURSE_KEY = "a17792f6-8d86-4ad1-a6f3-77663b4d4674", "english-6month-4-6"
 ROBOT_MAC, BOARD, TARGET, SERIAL_PATH = "14:c1:9f:d1:ac:20", "LCDWiki ES3C35P", "esp32s3", "/dev/cu.usbmodem1101"
-FIRMWARE_SHA = "b54c6ca33e9beb3747b44feceb7c64fea33fe1d6"
-APP_SHA256, APP_BYTES, APP_OFFSET, PARTITION_BYTES = "782020e2f8ac44bd197f57e9e126c196286a8223005de1e425f8290f12b28dff", 3637200, "0x20000", 4128768
-MANIFEST_SHA256 = "23b70849b6b65901b01b38e91279455a2e5e8d13989438e2e0bbfa707602aa65"
+FIRMWARE_SHA = "91c86074df5a17d5b684a6c28ea57b727abe3a01"
+APP_SHA256, APP_BYTES, APP_OFFSET, PARTITION_BYTES = "8531432b18eef2d656c5afb2574a2b73c2458679d355d6ebcb47828086b0dc95", 3863248, "0x20000", 4128768
+MANIFEST_SHA256 = "39d1538b602829d472d017d78950baf46e8035bab1539e4a99871925732e2809"
 MAX_JSON_BYTES, MAX_LSOF_OUTPUT_BYTES, LSOF_TIMEOUT_SECONDS, CHECK_FRESHNESS_SECONDS = 1024 * 1024, 64 * 1024, 3.0, 300
 OPERATOR_UID = 501
 TRUSTED_LSOF_EXECUTABLE = next((p for p in (Path("/usr/sbin/lsof"), Path("/usr/bin/lsof")) if p.is_file()), Path("/usr/sbin/lsof"))
@@ -158,9 +158,11 @@ def _candidate_external_binding(candidate,*,observe_images):
         docker=Path(candidate["tools"]["docker"]["path"])
         images={}
         if observe_images:
-            for reference in (candidate["images"]["lessonStudioBackend"]["reference"],candidate["images"]["lessonStudioWeb"]["reference"],candidate["database"]["engineImage"]):
+            application_images = (candidate["images"]["lessonStudioBackend"]["reference"],candidate["images"]["lessonStudioWeb"]["reference"])
+            for reference in (*application_images,candidate["database"]["engineImage"]):
                 observed=candidate_manifest._docker_image_descriptor(reference,docker)
                 if observed is None: return None
+                if reference in application_images and (observed.get("Os") != "linux" or observed.get("Architecture") != "amd64"): return None
                 images[reference]=observed
         return (tuple(files),tuple(directories),docker,images)
     except (KeyError,TypeError,ValueError): return None
@@ -296,7 +298,7 @@ def _validate_candidate_shape(value,reasons):
     for name,image in images.items():
         repo=repos.get("backend" if name=="backend" else "admin",{})
         labels={"org.opencontainers.image.revision":repo.get("sha"),"org.opencontainers.image.source":repo.get("remoteUrl")}
-        if not isinstance(image,dict) or set(image)!=IMAGE_KEYS or not _exact_equal(image.get("platform"),"linux/arm64") or not _exact_equal(image.get("provenanceLabels"),labels): reasons.add(f"candidate.images.{name}")
+        if not isinstance(image,dict) or set(image)!=IMAGE_KEYS or not _exact_equal(image.get("platform"),"linux/amd64") or not _exact_equal(image.get("provenanceLabels"),labels): reasons.add(f"candidate.images.{name}")
     fw=value.get("firmware"); expected_app={"sha256":APP_SHA256,"bytes":APP_BYTES,"offset":APP_OFFSET,"partitionBytes":PARTITION_BYTES}
     if not isinstance(fw,dict) or set(fw)!={"board","target","gitSha","app","manifest"}: reasons.add("candidate.firmware"); return
     if not _exact_equal((fw.get("board"),fw.get("target"),fw.get("gitSha")),(BOARD,TARGET,FIRMWARE_SHA)): reasons.add("candidate.firmware")
