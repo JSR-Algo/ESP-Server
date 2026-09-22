@@ -4025,6 +4025,7 @@ def _child_environment(
             "JWT_PUBLIC_KEY", "TBOT_DEVICE_MINT_SECRET", "LESSON_ASSET_ORIGIN_BASE",
             "ROBOT_ESP_BASE_URL", "LESSON_STUDIO_E2E_BACKEND_HOST_PORT",
             "LESSON_STUDIO_E2E_WEB_HOST_PORT",
+            "LESSON_STUDIO_E2E_VISUAL_SOURCE_LESSON_ID",
         ):
             value = source.get(name)
             if value:

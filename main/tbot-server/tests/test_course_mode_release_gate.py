@@ -5391,6 +5391,23 @@ def test_playwright_environment_forwards_exact_stack_coordinates(candidate_file:
     assert {key: environment[key] for key in source} == source
 
 
+@pytest.mark.parametrize("lane_name", [
+    "admin-course-mode-playwright-chromium-desktop",
+    "admin-course-mode-playwright-webkit-desktop",
+    "admin-course-mode-playwright-chromium-mobile",
+    "admin-course-mode-playwright-webkit-mobile",
+])
+def test_playwright_environment_preserves_explicit_visual_source(candidate_file: Path, lane_name: str) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    lane = next(item for item in gate.FULL_LANES if item.name == lane_name)
+    source_id = "ac33d760-539a-41bb-994f-ff53cb317219"
+    environment = gate._child_environment(candidate, {
+        "LESSON_STUDIO_E2E_VISUAL_SOURCE_LESSON_ID": source_id,
+    }, lane)
+    assert environment is not None
+    assert environment.get("LESSON_STUDIO_E2E_VISUAL_SOURCE_LESSON_ID") == source_id
+
+
 def test_admin_browser_snapshot_preserves_playwright_platform_layout(candidate_file: Path) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
     _add_node_install(candidate, "adminEsp", "main/manager-web", "adminManagerWeb")
