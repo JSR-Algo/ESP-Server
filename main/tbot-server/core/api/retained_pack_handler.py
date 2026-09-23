@@ -19,7 +19,7 @@ class RetainedPackHandler:
         self.connections = connections
         self.auth = LessonNudgeHandler(config, connections if connections is not None else {})
 
-    async def _bind_device(self, operation):
+    async def _select_device(self, operation):
         from core.api.device_mcp_admin_handler import DeviceMCPAdminHandler, _call_raw_mcp_tool
         from core.lesson.retained_pack_contract import parse_device_receipt
 
@@ -68,7 +68,8 @@ class RetainedPackHandler:
             return refusal('INVALID_RETAINED_PACK_CONTRACT', 400)
         try:
             receipt = await materialize_retained_operation(operation, config=self.config,
-                bind_device=self._bind_device if self.connections is not None else None)
+                bind_device=self._select_device if self.connections is not None else None,
+                release_device=self._select_device if self.connections is not None else None)
         except MaterializationError as error:
             return web.json_response(error.to_response(), status=error.status)
         except ValueError as error:

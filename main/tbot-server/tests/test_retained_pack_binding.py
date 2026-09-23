@@ -33,6 +33,14 @@ def releasing(bind):
             'desiredSelectionRevision': 3}
 
 
+def release_receipt(op):
+    return {**{k: op[k] for k in ('operationId', 'requestId', 'requestRevision', 'deviceId',
+                                  'consumerIdentity', 'desiredSelectionRevision')},
+            'contractVersion': 'retained-assignment-device.v1', 'state': 'released',
+            'cacheKey': op['selection']['cacheKey'],
+            'packDescriptorChecksum': op['selection']['packDescriptorChecksum']}
+
+
 async def prepare(tmp_path, monkeypatch):
     config, store, op, content = fixture(tmp_path, monkeypatch)
     await materialize_retained_operation(op, config=config, client=Client(Stream(content)), resolver=public_resolver)
@@ -126,3 +134,85 @@ async def test_later_acquire_cannot_downgrade_a_device_owner_to_preparation(tmp_
     with pytest.raises(ValueError):
         await materialize_retained_operation(acquire, config=config)
     assert op['selection']['cacheKey'] in shared_protected_cache_keys(store)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('outcome', ['cancel', 'timeout', 'wrong-device', 'wrong-consumer',
+                                   'stale-revision', 'wrong-request', 'wrong-checksum', 'extra', 'bound'])
+async def test_uncertain_release_stays_protected_across_restart_until_exact_retry(tmp_path, monkeypatch, outcome):
+    config, store, op = await prepare(tmp_path, monkeypatch)
+
+    async def bind(envelope):
+        return device_receipt(envelope)
+
+    await materialize_retained_operation(op, config=config, bind_device=bind)
+    release = releasing(op)
+
+    async def failed(envelope):
+        state = json.loads((store.root / 'lesson-retained/devices' / (op['deviceId'] + '.json')).read_text())
+        assert state['phase'] == 'RELEASE_PENDING'
+        with pytest.raises(PackDeletionRefused):
+            store.delete_pack(op['selection']['cacheKey'])
+        if outcome == 'cancel':
+            raise asyncio.CancelledError()
+        if outcome == 'timeout':
+            raise TimeoutError()
+        result = release_receipt(envelope)
+        edits = {'wrong-device': ('deviceId', str(uuid4())),
+                 'wrong-consumer': ('consumerIdentity', str(uuid4())),
+                 'stale-revision': ('desiredSelectionRevision', 2),
+                 'wrong-request': ('requestId', str(uuid4())),
+                 'wrong-checksum': ('packDescriptorChecksum', '0' * 64),
+                 'extra': ('ready', True), 'bound': ('state', 'bound')}
+        key, value = edits[outcome]
+        result[key] = value
+        return result
+
+    with pytest.raises((asyncio.CancelledError, TimeoutError, ValueError)):
+        await materialize_retained_operation(release, config=config, release_device=failed)
+    RetainedPackStore(store)
+    assert op['selection']['cacheKey'] in shared_protected_cache_keys(store)
+    with pytest.raises(PackDeletionRefused):
+        store.delete_pack(op['selection']['cacheKey'])
+    calls = []
+
+    async def retry(envelope):
+        calls.append(envelope)
+        return release_receipt(envelope)
+
+    receipt = await materialize_retained_operation(release, config=config, release_device=retry)
+    assert receipt['state'] == 'released'
+    assert op['selection']['cacheKey'] not in shared_protected_cache_keys(store)
+    RetainedPackStore(store)
+    assert await materialize_retained_operation(release, config=config, release_device=retry) == receipt
+    assert calls == [release]
+    with pytest.raises(ValueError):
+        await materialize_retained_operation(op, config=config, bind_device=bind)
+
+
+@pytest.mark.asyncio
+async def test_release_keeps_device_lock_until_receipt_and_rejects_competing_operation(tmp_path, monkeypatch):
+    config, store, op = await prepare(tmp_path, monkeypatch)
+
+    async def bind(envelope):
+        return device_receipt(envelope)
+
+    await materialize_retained_operation(op, config=config, bind_device=bind)
+    release = releasing(op)
+    entered, finish = asyncio.Event(), asyncio.Event()
+
+    async def dispatch(envelope):
+        entered.set()
+        await finish.wait()
+        return release_receipt(envelope)
+
+    task = asyncio.create_task(materialize_retained_operation(release, config=config, release_device=dispatch))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        with pytest.raises(ValueError, match='busy'):
+            await materialize_retained_operation(release, config=config, release_device=dispatch)
+        assert op['selection']['cacheKey'] in shared_protected_cache_keys(store)
+    finally:
+        finish.set()
+        result = await task
+    assert result['state'] == 'released'
