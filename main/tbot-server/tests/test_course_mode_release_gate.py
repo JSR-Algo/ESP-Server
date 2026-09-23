@@ -5430,6 +5430,44 @@ def test_admin_browser_snapshot_preserves_playwright_platform_layout(candidate_f
         assert stage.cleanup() is True
 
 
+@pytest.mark.parametrize("project", ["chromium-desktop", "webkit-desktop", "chromium-mobile", "webkit-mobile"])
+@pytest.mark.parametrize("configured", [True, False])
+def test_playwright_runner_preserves_optional_fixture_bindings(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch, project: str, configured: bool,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    _add_node_install(candidate, "adminEsp", "main/manager-web", "adminManagerWeb")
+    _add_node_install(candidate, "backend", ".", "backend")
+    _configure_backend_build_fixture(candidate)
+    candidate_file.write_text(json.dumps(candidate), encoding="utf-8")
+    lane = gate.Lane(
+        f"admin-course-mode-playwright-{project}", "adminEsp", "main/manager-web",
+        ("node", "probe.js"), 5.0, gate.PLAYWRIGHT_COMPOSE_ENV,
+    )
+    bindings = {
+        "LESSON_STUDIO_E2E_VISUAL_SOURCE_LESSON_ID": "ac33d760-539a-41bb-994f-ff53cb317219",
+        "LESSON_STUDIO_E2E_ASSIGNMENT_FIXTURE": "/reviewed/local-assignment.json",
+    }
+    source = {**_assignment_source(candidate_file), "COURSE_MODE_ADMIN_E2E_READY": "1",
+              "TOP_SECRET": "must-not-reach-child", "NODE_OPTIONS": "--inspect",
+              "LESSON_STUDIO_E2E_STATE_MODE": "preserve"}
+    if configured:
+        source.update(bindings)
+    observed = {}
+
+    def capture_lane(_command, **kwargs):
+        observed.update(kwargs["env"])
+        return gate._manifest.BoundedCommandResult(0, "", None)
+
+    monkeypatch.setattr(gate, "playwright_browsers_authorized", lambda _candidate: True)
+    monkeypatch.setattr(gate, "run_bounded_command", capture_lane)
+    result = gate.run_gate(candidate_file, "full", lanes=(lane,), source_environment=source)
+
+    assert result["verdict"] == "PASS", result
+    assert {key: observed[key] for key in bindings if key in observed} == (bindings if configured else {})
+    assert not {"TOP_SECRET", "NODE_OPTIONS", "LESSON_STUDIO_E2E_STATE_MODE"}.intersection(observed)
+
+
 def test_playwright_lane_stages_candidate_bound_container_tools(candidate_file: Path) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
     _add_node_install(candidate, "adminEsp", "main/manager-web", "adminManagerWeb")

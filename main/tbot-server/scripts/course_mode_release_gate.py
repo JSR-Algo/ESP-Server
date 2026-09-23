@@ -423,6 +423,10 @@ PLAYWRIGHT_COMPOSE_ENV = (
     "LESSON_ASSET_ORIGIN_BASE", "ROBOT_ESP_BASE_URL",
     "LESSON_STUDIO_E2E_BACKEND_HOST_PORT", "LESSON_STUDIO_E2E_WEB_HOST_PORT",
 )
+PLAYWRIGHT_OPTIONAL_FIXTURE_ENV = (
+    "LESSON_STUDIO_E2E_VISUAL_SOURCE_LESSON_ID",
+    "LESSON_STUDIO_E2E_ASSIGNMENT_FIXTURE",
+)
 TASK4_STANDARD_HOST_PORTS = frozenset({3100, 8102, 18443})
 TASK4_BACKEND_MOUNT_ROOTS = (
     "src/lessons/fixtures/tvideo-raw-code/assets/asset-manifest.json",
@@ -4025,8 +4029,7 @@ def _child_environment(
             "JWT_PUBLIC_KEY", "TBOT_DEVICE_MINT_SECRET", "LESSON_ASSET_ORIGIN_BASE",
             "ROBOT_ESP_BASE_URL", "LESSON_STUDIO_E2E_BACKEND_HOST_PORT",
             "LESSON_STUDIO_E2E_WEB_HOST_PORT",
-            "LESSON_STUDIO_E2E_VISUAL_SOURCE_LESSON_ID",
-            "LESSON_STUDIO_E2E_ASSIGNMENT_FIXTURE",
+            *PLAYWRIGHT_OPTIONAL_FIXTURE_ENV,
         ):
             value = source.get(name)
             if value:
@@ -4991,9 +4994,16 @@ def _run_gate_impl(
                         report["verdict"] = "BLOCKED"
                         report["failedLane"] = "snapshot"
                     break
+                child_source = dict(required_source)
+                if lane.name.startswith("admin-course-mode-playwright-"):
+                    # Optional fixture bindings must survive the outer required-input filter.
+                    child_source.update({
+                        name: lane_source[name] for name in PLAYWRIGHT_OPTIONAL_FIXTURE_ENV
+                        if lane_source.get(name)
+                    })
                 lane_environment = _child_environment(
                     execution_candidate,
-                    required_source,
+                    child_source,
                     lane,
                     source_candidate=candidate,
                     assignment_runtime_capsule_root=(
