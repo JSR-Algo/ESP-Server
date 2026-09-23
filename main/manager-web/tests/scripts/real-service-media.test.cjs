@@ -137,3 +137,88 @@ test('still rejects an empty MJPEG canvas', async () => {
 test('rejects stale visible pixels while the current MJPEG decoder is pending', async () => {
   await assert.rejects(loadDecoderAssertion()(canvasStage(255, false), phase), /current MJPEG decoder/);
 });
+
+test('media integrity uses the fixture CA and retains TLS and byte validation', async t => {
+  const { execFileSync } = require('node:child_process');
+  const { createServer } = require('node:https');
+  const { createHash } = require('node:crypto');
+  const { request: playwrightRequest } = require('@playwright/test');
+  const { assertHttpMedia } = require('../../e2e/lesson-studio/helpers/real-service-evidence');
+  const root = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'media-ca-'));
+  const previous = process.env.TASK4_ASSIGNMENT_TLS_ROOT;
+  const previousRuntime = process.env.TASK4_ASSIGNMENT_RUNTIME_ROOT;
+  const certs = {};
+  for (const host of ['task4-media.localhost', 'wrong.localhost']) {
+    const directory = path.join(root, host);
+    fs.mkdirSync(directory);
+    execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
+      '-subj', `/CN=${host}`, '-addext', `subjectAltName=DNS:${host}`,
+      '-keyout', path.join(directory, 'key.pem'), '-out', path.join(directory, 'cert.pem')], { stdio: 'ignore' });
+    certs[host] = { directory, key: fs.readFileSync(path.join(directory, 'key.pem')),
+      cert: fs.readFileSync(path.join(directory, 'cert.pem')) };
+  }
+  const bytes = Buffer.from('unchanged media bytes');
+  const context = await playwrightRequest.newContext();
+  const servers = [];
+  t.after(async () => {
+    await context.dispose();
+    await Promise.all(servers.map(server => new Promise(resolve => server.close(resolve))));
+    if (previous === undefined) delete process.env.TASK4_ASSIGNMENT_TLS_ROOT;
+    else process.env.TASK4_ASSIGNMENT_TLS_ROOT = previous;
+    if (previousRuntime === undefined) delete process.env.TASK4_ASSIGNMENT_RUNTIME_ROOT;
+    else process.env.TASK4_ASSIGNMENT_RUNTIME_ROOT = previousRuntime;
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  const serve = async certificate => {
+    const server = createServer(certificate, (_request, response) => {
+      response.writeHead(200, { 'Content-Type': 'application/octet-stream' });
+      response.end(bytes);
+    });
+    servers.push(server);
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    return `https://task4-media.localhost:${server.address().port}/tvideo-demo/asset.bin`;
+  };
+  const url = await serve(certs['task4-media.localhost']);
+  const manifest = { assets: [{ assetKey: 'tls-proof', url, bytes: bytes.length,
+    sha256: createHash('sha256').update(bytes).digest('hex') }] };
+  const page = { request: context };
+  process.env.TASK4_ASSIGNMENT_TLS_ROOT = certs['task4-media.localhost'].directory;
+  await t.test('accepts only exact bytes over the pinned certificate', async () => {
+    await assertHttpMedia(page, manifest);
+  });
+  await t.test('the browser route uses the same verified transport', async () => {
+    const { installTrustedTask4MediaRoute } = require('../../e2e/lesson-studio/helpers/session');
+    let result;
+    await installTrustedTask4MediaRoute({ route: async (pattern, handle) => {
+      assert.ok(pattern.test(url));
+      await handle({ request: () => ({ url: () => url, headers: () => ({}) }),
+        fulfill: async response => { result = response; } });
+    } });
+    assert.equal(result.status, 200);
+    assert.deepEqual(result.body, bytes);
+  });
+  await t.test('fixture trust does not apply to other origins or paths', async () => {
+    const { trustedTask4MediaResponse } = require('../../e2e/lesson-studio/helpers/session');
+    for (const other of [url.replace('task4-media.localhost', 'assets.example.com'),
+      url.replace('https:', 'http:'), url.replace('/tvideo-demo/', '/private/'),
+      url.replace('task4-media.localhost', 'task4-media.localhost.evil')]) {
+      assert.equal(await trustedTask4MediaResponse(other), null);
+    }
+  });
+  await t.test('rejects a validly delivered hash mismatch', async () => {
+    await assert.rejects(assertHttpMedia(page, { assets: [{ ...manifest.assets[0], sha256: '0'.repeat(64) }] }), /tls-proof/);
+  });
+  await t.test('rejects an untrusted server certificate', async () => {
+    process.env.TASK4_ASSIGNMENT_TLS_ROOT = certs['wrong.localhost'].directory;
+    await assert.rejects(assertHttpMedia(page, manifest), /self.signed|certificate/i);
+  });
+  await t.test('rejects a trusted certificate for the wrong hostname', async () => {
+    const wrongUrl = await serve(certs['wrong.localhost']);
+    await assert.rejects(assertHttpMedia(page, { assets: [{ ...manifest.assets[0], url: wrongUrl }] }), /hostname|altnames/i);
+  });
+  await t.test('missing fixture CA does not disable normal TLS verification', async () => {
+    delete process.env.TASK4_ASSIGNMENT_TLS_ROOT;
+    delete process.env.TASK4_ASSIGNMENT_RUNTIME_ROOT;
+    await assert.rejects(assertHttpMedia(page, manifest), /self.signed|certificate/i);
+  });
+});

@@ -73,12 +73,14 @@ async function assertHttpMedia(page, manifest) {
   for (const asset of manifest.assets) {
     const url = new URL(asset.url);
     expect(['http:', 'https:']).toContain(url.protocol);
-    const response = await page.request.get(url.href, { timeout: 15000 });
-    expect(response.status(), `${asset.assetKey} HTTP media`).toBe(200);
-    const body = await response.body();
+    // APIRequestContext does not use the browser's certificate-pinned fixture route.
+    const trusted = await require('./session').trustedTask4MediaResponse(url.href);
+    const response = trusted || await page.request.get(url.href, { timeout: 15000 });
+    expect(trusted ? response.status : response.status(), `${asset.assetKey} HTTP media`).toBe(200);
+    const body = trusted ? response.body : await response.body();
     expect(body.length, asset.assetKey).toBe(Number(asset.bytes));
     expect(crypto.createHash('sha256').update(body).digest('hex'), asset.assetKey).toBe(asset.sha256);
-    expect(response.headers()['content-type']).not.toMatch(/text\/html/);
+    expect((trusted ? response.headers : response.headers())['content-type']).not.toMatch(/text\/html/);
   }
 }
 
