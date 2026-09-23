@@ -26,7 +26,7 @@
     "test:lesson-visual-library-ui": "node scripts/check-lesson-visual-library-ui.mjs",
     "test:lesson-visual-library-browser": "node scripts/check-lesson-visual-library-browser.mjs",
     "test:lesson-builder-browser": "node scripts/check-lesson-builder-browser.mjs",
-    "test:mjpeg-replay-browser": "node --test tests/scripts/mjpeg-replay-browser-launch.test.cjs && node scripts/check-mjpeg-replay-browser.cjs",
+    "test:mjpeg-replay-browser": "node --test tests/scripts/mjpeg-replay-browser-launch.test.cjs tests/scripts/shared-asset-picker-media.test.cjs && node scripts/check-mjpeg-replay-browser.cjs",
     "test:robot-preview-browser": "node --test tests/scripts/robot-preview-browser.test.mjs",
     "test:candidate-browser-harness": "node --test tests/scripts/candidate-browser-harness.test.mjs",
     "test:robot-preview-child-cleanup": "node scripts/check-robot-preview-screenshots.mjs --test-child-cleanup",
@@ -49,7 +49,7 @@
     "test:e2e:course-mode:assignment:new": "node scripts/run-task4-assignment-phase.cjs new",
     "test:e2e:course-mode:assignment:rollback": "node scripts/run-task4-assignment-phase.cjs rollback",
     "test:persisted-phase-selection": "node scripts/check-persisted-phase-selection.cjs",
-    "test:course-mode:e2e-fixtures": "node --test tests/scripts/course-mode-e2e-fixtures.test.cjs tests/scripts/legacy-visual-fixtures.test.cjs"
+    "test:course-mode:e2e-fixtures": "node --test tests/scripts/course-mode-edit-values.test.cjs tests/scripts/course-mode-e2e-fixtures.test.cjs tests/scripts/legacy-visual-fixtures.test.cjs"
   },
   "dependencies": {
     "axios": "^1.19.0",

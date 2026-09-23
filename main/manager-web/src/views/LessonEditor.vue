@@ -3902,6 +3902,7 @@ export default {
 .cinematic-effect { margin-bottom:18px; }
 .preview-surface { border:1px solid #d8e2dd; border-radius:18px; background:#fff; box-sizing:border-box; max-width:100%; min-width:0; padding:14px; }
 .exact-renderer-surface { margin-top:18px; }
+.exact-renderer-surface [data-testid="preview-persistence-status"] { overflow-wrap:anywhere; }
 .cinematic-frame { aspect-ratio:16/10; background:#0c1c19; border:2px solid #17312d; border-radius:16px; box-sizing:border-box; max-width:100%; min-width:0; overflow:hidden; width:100%; }
 .cinematic-frame iframe { border:0; display:block; height:100%; max-width:100%; min-width:0; width:100%; }
 .cinematic-note { color:#5f6f63; font-size:12.5px; line-height:1.45; margin:8px 2px 0; }

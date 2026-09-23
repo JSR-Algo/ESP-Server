@@ -14,9 +14,29 @@ const {
 
 test('binds the selected seven-phase Course Mode sources through the admin pickers', async ({ page }, testInfo) => {
   const assertNoUnexpectedPageErrors = monitorUnexpectedPageErrors(page);
+  const imageEvents = [];
+  let boundary = 'initial';
+  for (const event of ['request', 'requestfinished', 'requestfailed']) page.on(event, request => {
+    if (request.resourceType() !== 'image') return;
+    imageEvents.push({ event, boundary, at: Date.now(), path: new URL(request.url()).pathname,
+      framePath: new URL(request.frame().url()).pathname, error: request.failure()?.errorText });
+  });
   await loginAsLessonAuthor(page);
   const fixture = await createCourseModeDraft(page);
+  await createVisualTriple(page, fixture.lesson.id, fixture.runId);
   const selection = await createVisualTriple(page, fixture.lesson.id, fixture.runId, { bind: false });
+  const catalog = await adminApi(page, 'GET', '/lesson-visual-assets?profile=espTft');
+  const selectedTeach = catalog.find(asset => (asset.version_id || asset.versionId) === selection.ids.teach);
+  expect(selectedTeach).toBeTruthy();
+  const replacement = await adminApi(page, 'POST', `/lesson-visual-assets/${encodeURIComponent(selectedTeach.asset_key || selectedTeach.assetKey)}/versions`, {
+    category: selectedTeach.category, title: selectedTeach.title, profile: 'espTft',
+    storagePath: selectedTeach.storage_path || selectedTeach.storagePath, sha256: selectedTeach.sha256,
+    mimeType: selectedTeach.mime_type || selectedTeach.mimeType, bytes: Number(selectedTeach.bytes),
+    width: Number(selectedTeach.width), height: Number(selectedTeach.height), publicationState: 'published',
+    compatibilityMetadata: selectedTeach.compatibility_metadata || selectedTeach.compatibilityMetadata,
+  });
+  selection.ids.teach = replacement.id;
+  selection.robotAssetVersionIds.teach = replacement.id;
   const initial = await adminApi(page, 'GET', `/lessons/${fixture.lesson.id}/visuals`);
   await gotoAppRoute(page, `#/lesson-editor?lessonId=${fixture.lesson.id}`);
   const panel = page.getByTestId('course-mode-visual-selection');
@@ -25,11 +45,15 @@ test('binds the selected seven-phase Course Mode sources through the admin picke
   }
   const save = page.waitForResponse(response => response.request().method() === 'PUT'
     && response.url().endsWith(`/lessons/${fixture.lesson.id}/visuals`));
+  const refreshed = ['course-mode', 'steps', 'manifest-preview'].map(endpoint => page.waitForResponse(response =>
+    response.request().method() === 'GET'
+      && new URL(response.url()).pathname.endsWith(`/lessons/${fixture.lesson.id}/${endpoint}`)));
   const button = panel.getByRole('button', { name: 'Save visual bindings', exact: true });
   await button.scrollIntoViewIfNeeded();
   const box = await button.boundingBox();
   expect(box.x).toBeGreaterThanOrEqual(0);
   expect(box.x + box.width).toBeLessThanOrEqual(page.viewportSize().width);
+  boundary = 'saving';
   await button.click();
   const response = await save;
   expect(response.status()).toBe(200);
@@ -37,6 +61,11 @@ test('binds the selected seven-phase Course Mode sources through the admin picke
     expectedChecksum: initial.checksum, expectedVisualChecksum: initial.visualChecksum,
     robotAssetVersionIds: selection.robotAssetVersionIds,
   });
+  await expect(panel).toContainText('Visual versions saved and read back.');
+  for (const readback of await Promise.all(refreshed)) {
+    expect(readback.status()).toBe(200);
+    expect(await readback.finished()).toBeNull();
+  }
   const persisted = await adminApi(page, 'GET', `/lessons/${fixture.lesson.id}/visuals`);
   for (const [phase, id] of Object.entries(selection.robotAssetVersionIds)) {
     const refs = persisted.refs.filter(ref => ref.slot === `robotOverlay.${phase}`);
@@ -44,13 +73,18 @@ test('binds the selected seven-phase Course Mode sources through the admin picke
     expect(refs.every(ref => ref.assetVersionId === id)).toBe(true);
     expect(JSON.stringify(persisted.cinematicPhases)).toContain(id);
   }
+  await assertNoUnexpectedPageErrors.waitForSettledRequests();
+  boundary = 'reload';
   await page.reload();
+  boundary = 'reloaded';
   for (const [slot, id] of Object.entries(selection.ids)) {
     await expect(panel.getByTestId(`course-visual-${slot}`).locator('select')).toHaveValue(id);
   }
   await testInfo.attach('persisted-seven-phase-bindings', { body: JSON.stringify(persisted), contentType: 'application/json' });
   await button.scrollIntoViewIfNeeded();
   await page.screenshot({ path: testInfo.outputPath('seven-phase-readback.png') });
+  await testInfo.attach('image-request-boundaries', { body: JSON.stringify(imageEvents), contentType: 'application/json' });
+  await require('node:fs/promises').writeFile(testInfo.outputPath('image-request-boundaries.json'), JSON.stringify(imageEvents, null, 2));
   assertNoUnexpectedPageErrors();
 });
 

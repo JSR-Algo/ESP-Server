@@ -8,7 +8,11 @@
       <div v-for="asset in filtered" :key="asset.versionId || (asset.assetKey + ':' + (asset.version || ''))" :class="['asset-tile', { selected: isSelected(asset) }]">
         <button type="button" class="asset-tile__select" :disabled="disabled" @click="selectAsset(asset)">
           <span class="asset-tile__preview">
-            <video v-if="isMp4(asset)" :src="asset.url" muted playsinline preload="metadata" />
+            <CinematicVideoLayer v-if="mjpegIdentities.get(asset)" :src="asset.url"
+              :mjpeg-identity="mjpegIdentities.get(asset)" :layer-id="asset.assetKey"
+              :position-style="{ position: 'relative', width: '100%', height: '100%', objectFit: 'contain' }"
+              :controlled="true" :playing="false" />
+            <video v-else-if="isMp4(asset)" :src="asset.url" muted playsinline preload="metadata" />
             <img v-else-if="asset.thumbnailUrl || asset.url" :src="asset.thumbnailUrl || asset.url" alt="" />
             <span v-else>{{ initials(asset.assetKey) }}</span>
           </span>
@@ -20,15 +24,36 @@
   </section>
 </template>
 <script>
+import CinematicVideoLayer from './CinematicVideoLayer.vue';
+
 export default {
   name: 'SharedAssetPicker',
+  components: { CinematicVideoLayer },
   props: {
     assets: { type: Array, default: () => [] }, selectedKey: { type: String, default: '' }, selectedVersionId: { type: String, default: '' },
     category: { type: String, default: '' }, disabled: { type: Boolean, default: false }, loading: { type: Boolean, default: false },
     error: { type: String, default: '' }, title: { type: String, default: '' }, showActions: { type: Boolean, default: true },
   },
   data: () => ({ query: '' }),
-  computed: { filtered() { const q = this.query.toLowerCase(); return this.assets.filter((a) => (!this.category || a.category === this.category || a.layer === this.category) && (!q || String(a.assetKey).toLowerCase().includes(q))); } },
+  computed: {
+    filtered() { const q = this.query.toLowerCase(); return this.assets.filter((a) => (!this.category || a.category === this.category || a.layer === this.category) && (!q || String(a.assetKey).toLowerCase().includes(q))); },
+    mjpegIdentities() {
+      // Catalog readbacks replace objects without necessarily changing media.
+      const previous = this._mjpegIdentityCache || new Map();
+      const current = new Map();
+      const identities = new Map(this.assets.filter(asset => asset.compatibilityMetadata?.codec === 'mjpeg')
+        .map(asset => {
+          const identity = { bytes: asset.bytes, sha256: asset.sha256,
+            metadata: { ...asset.compatibilityMetadata, mediaType: asset.mimeType, width: asset.width, height: asset.height } };
+          const key = JSON.stringify(identity);
+          const stable = previous.get(key) || identity;
+          current.set(key, stable);
+          return [asset, stable];
+        }));
+      this._mjpegIdentityCache = current;
+      return identities;
+    },
+  },
   methods: {
     selectAsset(asset) {
       if (this.disabled) return;

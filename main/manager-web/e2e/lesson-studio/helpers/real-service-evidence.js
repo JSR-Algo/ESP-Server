@@ -5,14 +5,25 @@ const journals = new WeakMap();
 function observeJourney(page) {
   const evidence = { pageErrors: [], consoleErrors: [], requestFailures: [], httpFailures: [], expectedFaults: [], checkpoints: [] };
   const allowed = [];
+  const pending = new Set();
+  let lastRequestChange = Date.now();
+  page.on('request', request => {
+    if (!['xhr', 'fetch', 'image'].includes(request.resourceType())) return;
+    pending.add(request);
+    lastRequestChange = Date.now();
+  });
+  const finished = request => {
+    if (pending.delete(request)) lastRequestChange = Date.now();
+  };
+  page.on('requestfinished', finished);
+  page.on('requestfailed', finished);
   page.on('pageerror', error => evidence.pageErrors.push(error.message));
   page.on('requestfailed', request => {
-    // Browser-cancelled same-origin media probes (nginx 206 range fetches the <video> element
-    // abandons after buffering) and navigation-cancelled Google web fonts are not service faults.
+    // Media cancellation stays visible until its lifecycle cause is established.
     const { isExpectedNavigationAbort } = require('./page-errors');
     if (isExpectedNavigationAbort(request)) return;
     evidence.requestFailures.push({
-      method: request.method(), url: request.url(), error: request.failure()?.errorText || 'unknown',
+      method: request.method(), resourceType: request.resourceType(), url: request.url(), error: request.failure()?.errorText || 'unknown',
     });
   });
   page.on('console', message => {
@@ -27,10 +38,15 @@ function observeJourney(page) {
   });
   const journal = {
     evidence,
+    async waitForSettledRequests() {
+      // Save callbacks can start another readback and image load after response headers.
+      await expect.poll(() => pending.size === 0 && Date.now() - lastRequestChange >= 250,
+        { message: 'finish API and image bodies before deliberate navigation', timeout: 10000 }).toBe(true);
+    },
     expectFault(method, path, status, label) { allowed.push({ method, path, status, label }); },
-    async checkpoint(testInfo, name, state) {
+    async checkpoint(testInfo, name, state, capture = page) {
       const file = `${name}.png`;
-      await page.screenshot({ path: testInfo.outputPath(file), fullPage: true });
+      await capture.screenshot({ path: testInfo.outputPath(file), ...(capture === page ? { fullPage: true } : {}) });
       evidence.checkpoints.push({ name, file, state });
       await fs.writeFile(testInfo.outputPath('real-service-readback.json'), JSON.stringify(evidence, null, 2));
     },
@@ -66,15 +82,17 @@ async function assertHttpMedia(page, manifest) {
   }
 }
 
-async function assertDecodedStage(stage) {
+async function assertDecodedStage(stage, phase) {
   const images = stage.locator('img');
   expect(await images.count()).toBeGreaterThan(0);
   for (const image of await images.all()) {
     await expect.poll(() => image.evaluate(img => img.complete && img.naturalWidth > 0)).toBe(true);
   }
   const video = stage.locator('video');
-  await expect(video).toHaveCount(1);
-  await expect.poll(() => video.evaluate(v => {
+  const overlay = phase?.layers.find(layer => layer.slot === 'robotOverlay');
+  const usesMjpeg = overlay?.metadata.codec === 'mjpeg';
+  await expect(video).toHaveCount(usesMjpeg ? 0 : 1);
+  if (!usesMjpeg) await expect.poll(() => video.evaluate(v => {
     if (v.readyState < 2 || !v.videoWidth || !v.videoHeight) return false;
     const canvas = document.createElement('canvas');
     canvas.width = v.videoWidth; canvas.height = v.videoHeight;
@@ -83,6 +101,10 @@ async function assertDecodedStage(stage) {
   }), { message: 'actual decoder pixels required; metadata/time alone is insufficient' }).toBe(true);
   const keyed = stage.locator('.cinematic-canvas');
   await expect(keyed).toHaveCount(1);
+  if (usesMjpeg) await expect.poll(() => keyed.evaluate(canvas => {
+    const state = canvas.parentElement.__vue__?._mjpeg?.state();
+    return Boolean(state?.ready && !state.pending && !state.seeking);
+  }), { message: 'current MJPEG decoder must settle before inspecting pixels' }).toBe(true);
   await expect.poll(() => keyed.evaluate(canvas => canvas.getContext('2d')
     .getImageData(0, 0, canvas.width, canvas.height).data.some((byte, index) => index % 4 === 3 && byte > 0)),
   { message: 'rendered character pixels required after chroma removal' }).toBe(true);

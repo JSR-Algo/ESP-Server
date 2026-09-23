@@ -45,7 +45,7 @@
 
   /* L1 — background scene VIDEO, playing (zIndex 1) */
   .bg{position:absolute;inset:0;z-index:1}
-  .bg video{width:100%;height:100%;object-fit:contain;display:block;background:#bfe8fb}
+  .bg video,.bg img{width:100%;height:100%;object-fit:contain;display:block;background:#bfe8fb}
 
   /* L2 — teaching object (zIndex 2): the word card is PRESENTED AT TEEBOT'S SIDE
      when he arrives up close (screen-left of the robot, chest height) — never floating
@@ -176,6 +176,7 @@
       <video id="bgv" muted loop playsinline autoplay preload="auto"
         poster="assets/scenes/scene-07-farm.png"
         src="assets/scenes/deep-barn-farm-background-6s.mp4"></video>
+      <img id="bgi" alt="" style="display:none">
     </div>
 
     <!-- L2 · teaching object — anchored above the REAL barn -->
@@ -455,7 +456,31 @@ document.getElementById('rawcode').addEventListener('click',async e=>{
           total: p.total !== undefined ? p.total : prev.total,
         };
       }
-      if (p.bg) { var v = document.getElementById('bgv'); if (v) { if (p.bgPoster) v.poster = p.bgPoster; v.src = p.bg; try { v.load(); } catch (e) {} var pl = v.play && v.play(); if (pl && pl.catch) pl.catch(function () {}); } }
+      if (p.bg) {
+        var v = document.getElementById('bgv');
+        var image = document.getElementById('bgi');
+        var isImage = /\.(png|jpe?g|webp)(?:$|[?#])/i.test(p.bg);
+        if (v && image) {
+          image.style.display = isImage ? 'block' : 'none';
+          v.style.display = isImage ? 'none' : 'block';
+          if (isImage) {
+            image.src = p.bg;
+            if (v.getAttribute('src')) {
+              v.pause();
+              v.removeAttribute('src');
+              v.load();
+            }
+          } else {
+            if (p.bgPoster) v.poster = p.bgPoster;
+            // Step updates must not restart the same background clip.
+            if (v.getAttribute('src') !== p.bg) {
+              v.src = p.bg;
+              v.load();
+              var pl = v.play(); if (pl && pl.catch) pl.catch(function () {});
+            }
+          }
+        }
+      }
       if (p.obj) { var oi = document.querySelector('#obj img'); if (oi) oi.src = p.obj; }
       if (p.word !== undefined) { var tw = document.querySelector('#obj .tagword'); if (tw) tw.textContent = p.word; var im = document.querySelector('#obj img'); if (im) im.alt = p.word; }
       if (p.stepId !== undefined || p.stepText !== undefined) { var k = document.querySelector('.stepcard .k'); if (k) k.innerHTML = '<b>' + esc(p.stepId || '') + '</b> ' + esc(p.stepText || ''); }

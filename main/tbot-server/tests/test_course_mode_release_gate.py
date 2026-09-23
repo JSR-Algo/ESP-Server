@@ -5397,15 +5397,18 @@ def test_playwright_environment_forwards_exact_stack_coordinates(candidate_file:
     "admin-course-mode-playwright-chromium-mobile",
     "admin-course-mode-playwright-webkit-mobile",
 ])
-def test_playwright_environment_preserves_explicit_visual_source(candidate_file: Path, lane_name: str) -> None:
+@pytest.mark.parametrize("binding,value", [
+    ("LESSON_STUDIO_E2E_VISUAL_SOURCE_LESSON_ID", "ac33d760-539a-41bb-994f-ff53cb317219"),
+    ("LESSON_STUDIO_E2E_ASSIGNMENT_FIXTURE", "/reviewed/local-assignment.json"),
+])
+def test_playwright_environment_preserves_explicit_visual_source(candidate_file: Path, lane_name: str, binding: str, value: str) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
     lane = next(item for item in gate.FULL_LANES if item.name == lane_name)
-    source_id = "ac33d760-539a-41bb-994f-ff53cb317219"
     environment = gate._child_environment(candidate, {
-        "LESSON_STUDIO_E2E_VISUAL_SOURCE_LESSON_ID": source_id,
+        binding: value,
     }, lane)
     assert environment is not None
-    assert environment.get("LESSON_STUDIO_E2E_VISUAL_SOURCE_LESSON_ID") == source_id
+    assert environment.get(binding) == value
 
 
 def test_admin_browser_snapshot_preserves_playwright_platform_layout(candidate_file: Path) -> None:

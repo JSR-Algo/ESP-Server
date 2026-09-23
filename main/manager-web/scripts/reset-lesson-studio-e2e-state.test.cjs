@@ -30,7 +30,7 @@ function recoveryHarness(mode = 'preserve', fault, seedsRunning = false) {
         ['asset-manifest.json', '/candidate/backend/src/lessons/fixtures/tvideo-raw-code/assets/asset-manifest.json'],
         ['admin', '/candidate/backend/src/lessons/fixtures/tvideo-raw-code/assets/admin'],
         ['esp-tft', '/candidate/backend/src/lessons/fixtures/tvideo-raw-code/assets/esp-tft'],
-        ['assets', '/candidate/firmware/lesson/assets'],
+        ...['background', 'objects', 'reference', 'robot'].map(directory => [`assets/${directory}`, `/candidate/firmware/lesson/assets/${directory}`]),
       ].map(([suffix, source]) => ({ Type: 'bind', Source: fault === 'mount' ? '/stale' : source, Destination: `/usr/share/nginx/html/tvideo-demo/${suffix}`, RW: false }))) };
       return { status: 0, stdout: `${fault === 'health' ? 'unhealthy' : 'healthy'} sha256:${fault === 'image' ? 'stale' : service}` };
     }
@@ -286,7 +286,7 @@ test('preflight accepts only a healthy candidate-bound stack', () => {
       { Type: 'bind', Source: '/candidate/backend/src/lessons/fixtures/tvideo-raw-code/assets/asset-manifest.json', Destination: '/usr/share/nginx/html/tvideo-demo/asset-manifest.json', RW: false },
       { Type: 'bind', Source: '/candidate/backend/src/lessons/fixtures/tvideo-raw-code/assets/admin', Destination: '/usr/share/nginx/html/tvideo-demo/admin', RW: false },
       { Type: 'bind', Source: '/candidate/backend/src/lessons/fixtures/tvideo-raw-code/assets/esp-tft', Destination: '/usr/share/nginx/html/tvideo-demo/esp-tft', RW: false },
-      { Type: 'bind', Source: '/candidate/firmware/lesson/assets', Destination: '/usr/share/nginx/html/tvideo-demo/assets', RW: false },
+      ...['background', 'objects', 'reference', 'robot'].map(directory => ({ Type: 'bind', Source: `/candidate/firmware/lesson/assets/${directory}`, Destination: `/usr/share/nginx/html/tvideo-demo/assets/${directory}`, RW: false })),
     ]);
     const service = args.at(-1);
     if (args.includes('ps')) return containers[service];
@@ -370,7 +370,7 @@ test('preflight rejects candidate services exposed beyond loopback', () => {
       { Type: 'bind', Source: '/candidate/backend/src/lessons/fixtures/tvideo-raw-code/assets/asset-manifest.json', Destination: '/usr/share/nginx/html/tvideo-demo/asset-manifest.json', RW: false },
       { Type: 'bind', Source: '/candidate/backend/src/lessons/fixtures/tvideo-raw-code/assets/admin', Destination: '/usr/share/nginx/html/tvideo-demo/admin', RW: false },
       { Type: 'bind', Source: '/candidate/backend/src/lessons/fixtures/tvideo-raw-code/assets/esp-tft', Destination: '/usr/share/nginx/html/tvideo-demo/esp-tft', RW: false },
-      { Type: 'bind', Source: '/candidate/firmware/lesson/assets', Destination: '/usr/share/nginx/html/tvideo-demo/assets', RW: false },
+      ...['background', 'objects', 'reference', 'robot'].map(directory => ({ Type: 'bind', Source: `/candidate/firmware/lesson/assets/${directory}`, Destination: `/usr/share/nginx/html/tvideo-demo/assets/${directory}`, RW: false })),
     ]);
     const service = args.at(-1);
     if (args.includes('ps')) return containers[service];

@@ -4,8 +4,60 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const { createRequire } = require('node:module');
+require('./real-service-media.test.cjs');
+require('./reference-background.test.cjs');
+require('./targeted-rollback-journey.test.cjs');
 
 const helperPath = path.resolve(__dirname, '../../e2e/lesson-studio/helpers/admin-api.js');
+
+function curriculumPage({ draft = true, courseKey = 'english-6month-4-6' } = {}) {
+  const calls = [];
+  const curriculum = { courseId: 'canonical-course', courseKey: 'english-6month-4-6',
+    lessonKey: 'w01-greetings-politeness', sourceLessonId: 'published-w1' };
+  const lesson = { id: 'draft-w1', course_id: curriculum.courseId, lesson_key: curriculum.lessonKey,
+    lesson_version: 3, status: 'draft', manifest_version: 'teebot-lesson-renderer.v5' };
+  return { calls, curriculum, page: {
+    evaluate: async () => ({ manager: 'test-manager', nest: 'test-author' }),
+    request: { fetch: async (url, options) => {
+      calls.push({ url, method: options.method });
+      assert.notEqual(url, '/nestjs/v1/admin/courses', 'curriculum fixture must not create a default demo');
+      let data;
+      if (url.endsWith('/courses/canonical-course')) data = { id: curriculum.courseId, course_key: courseKey };
+      else if (url.endsWith('/courses/canonical-course/lessons')) data = [
+        { id: 'published-w1', lesson_key: curriculum.lessonKey, lesson_version: 2, status: 'published' },
+        ...(draft ? [lesson] : []),
+      ];
+      else if (url.endsWith('/lessons/published-w1/new-version')) data = lesson;
+      else if (url.endsWith('/lessons/draft-w1')) data = lesson;
+      else if (url.endsWith('/lessons/draft-w1/course-mode')) data = { contract: { activities: [{ activityId: 'retained-activity' }] } };
+      else throw new Error(`unexpected request ${url}`);
+      return { ok: () => true, status: () => 200, text: async () => '', json: async () => ({ data }) };
+    } },
+  } };
+}
+
+test('canonical curriculum fixture reuses its actual draft without creating or relabeling a demo', async () => {
+  const fixture = curriculumPage();
+  const result = await require(helperPath).createCourseModeDraft(fixture.page, { curriculum: fixture.curriculum });
+  assert.equal(result.lesson.id, 'draft-w1');
+  assert.equal(result.contract.activities[0].activityId, 'retained-activity');
+  assert.equal(fixture.calls.some(call => call.method !== 'GET'), false);
+});
+
+test('canonical curriculum fixture branches the published source only when no draft exists', async () => {
+  const fixture = curriculumPage({ draft: false });
+  await require(helperPath).createCourseModeDraft(fixture.page, { curriculum: fixture.curriculum });
+  assert.deepEqual(fixture.calls.filter(call => call.method === 'POST'), [
+    { url: '/nestjs/v1/admin/lessons/published-w1/new-version', method: 'POST' },
+  ]);
+});
+
+test('canonical curriculum fixture rejects a mismatched course identity before writing', async () => {
+  const fixture = curriculumPage({ courseKey: 'unrelated-demo' });
+  await assert.rejects(require(helperPath).createCourseModeDraft(fixture.page, { curriculum: fixture.curriculum }),
+    /canonical curriculum course/);
+  assert.equal(fixture.calls.some(call => call.method !== 'GET'), false);
+});
 
 test('author login registers its header challenge before manager login can trigger it', async () => {
   const filename = path.resolve(__dirname, '../../e2e/lesson-studio/helpers/session.js');
@@ -144,8 +196,9 @@ test('journey rejects transport failures that produce no HTTP response', () => {
   const { observeJourney } = require('../../e2e/lesson-studio/helpers/real-service-evidence');
   const page = new EventEmitter();
   const journal = observeJourney(page);
-  page.emit('requestfailed', { method: () => 'GET', url: () => 'http://localhost/media.mp4', failure: () => ({ errorText: 'net::ERR_CONNECTION_REFUSED' }) });
+  page.emit('requestfailed', { method: () => 'GET', resourceType: () => 'media', url: () => 'http://localhost/media.mp4', failure: () => ({ errorText: 'net::ERR_CONNECTION_REFUSED' }) });
   assert.equal(journal.evidence.requestFailures.length, 1);
+  assert.equal(journal.evidence.requestFailures[0].resourceType, 'media');
   assert.throws(() => journal.assertHappyPath());
 });
 

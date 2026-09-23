@@ -162,7 +162,9 @@ function preflightLessonStudioE2EStack({ env = process.env, projectName, compose
         ['/usr/share/nginx/html/tvideo-demo/asset-manifest.json', path.resolve(backendRoot, 'src/lessons/fixtures/tvideo-raw-code/assets/asset-manifest.json')],
         ['/usr/share/nginx/html/tvideo-demo/admin', path.resolve(backendRoot, 'src/lessons/fixtures/tvideo-raw-code/assets/admin')],
         ['/usr/share/nginx/html/tvideo-demo/esp-tft', path.resolve(backendRoot, 'src/lessons/fixtures/tvideo-raw-code/assets/esp-tft')],
-        ['/usr/share/nginx/html/tvideo-demo/assets', path.resolve(firmwareRoot, 'lesson/assets')],
+        ...['background', 'objects', 'reference', 'robot'].map(directory => [
+          `/usr/share/nginx/html/tvideo-demo/assets/${directory}`, path.resolve(firmwareRoot, 'lesson/assets', directory),
+        ]),
       ]);
       const observed = new Map(
         Array.isArray(mounts) ? mounts.map((mount) => [mount.Destination, mount]) : [],

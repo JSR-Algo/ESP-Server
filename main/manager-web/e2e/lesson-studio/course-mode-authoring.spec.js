@@ -1,12 +1,13 @@
 const { test, expect } = require('@playwright/test');
 const { loginAsLessonAuthor } = require('./helpers/session');
 const { monitorUnexpectedPageErrors } = require('./helpers/page-errors');
-const { gotoAppRoute, stabilizeStageMedia } = require('./helpers/navigation');
+const { gotoAppRoute, stabilizeStageMedia, stagePlaybackState } = require('./helpers/navigation');
 const { visitPersistedPhases } = require('./helpers/persisted-phases');
 const {
   adminApi,
   createCourseModeDraft,
   createPublishableCourseModeVisuals,
+  createVisualTriple,
 } = require('./helpers/admin-api');
 
 const gotoLessonEditor = (page, lessonId) => gotoAppRoute(page, `#/lesson-editor?lessonId=${lessonId}`);
@@ -91,7 +92,16 @@ test('@s07-assets persists seven phase bindings and preserves activity image ver
   await page.unroute(libraryRoute);
   await expect(panel.getByTestId('course-visual-background').locator('select')).toHaveValue(override.refs.find(r=>r.slot==='backgroundScene').assetVersionId);
   await expect(panel.getByTestId('course-visual-object').locator('select')).toHaveValue(replacements.object);
-  for(const width of [1440,390]){await page.setViewportSize({width,height:width===390?844:900});await panel.scrollIntoViewIfNeeded();expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1)).toBe(true);await panel.screenshot({path:testInfo.outputPath(`bindings-${width}.png`)});}
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
+    await panel.scrollIntoViewIfNeeded();
+    const status = page.getByTestId('preview-persistence-status');
+    await expect(status).toContainText('Checksum:');
+    expect(await status.evaluate(element => element.scrollWidth <= element.clientWidth + 1),
+      'the complete saved checksum must wrap within the preview').toBe(true);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
+    await panel.screenshot({ path: testInfo.outputPath(`bindings-${width}.png`) });
+  }
   await require('node:fs/promises').writeFile(testInfo.outputPath('persisted-bindings.json'),JSON.stringify({lessonId:lesson.id,sourceLessonId:config.source,request,second,before,after,replacements,current,override,pageErrors},null,2));
   expect(pageErrors).toEqual([]);
 });
@@ -101,12 +111,14 @@ test('authors, saves, and reloads the canonical Course Mode contract', async ({ 
   await loginAsLessonAuthor(page);
   const fixture = await createCourseModeDraft(page);
 
+  await createVisualTriple(page, fixture.lesson.id, fixture.runId);
   await gotoLessonEditor(page, fixture.lesson.id);
   const timeline = page.getByTestId('course-mode-activity-timeline');
   await expect(timeline).toBeVisible();
   await expect(timeline.locator('.activity-card')).toHaveCount(fixture.contract.activities.length);
   await expect(page.getByTestId('course-mode-projected-steps-read-only')).toBeVisible();
   await expect(page.getByTestId('lesson-step-subject')).toBeDisabled();
+  await expect(page.getByTestId('preview-persistence-status')).toContainText('Checksum:');
 
   const firstActivityType = timeline.locator('.activity-card .el-form-item')
     .filter({ hasText: 'Activity type' }).first().locator('input');
@@ -117,7 +129,10 @@ test('authors, saves, and reloads the canonical Course Mode contract', async ({ 
   ));
   await timeline.getByRole('button', { name: 'Save Course Mode' }).click();
   await expect(timeline.getByRole('status')).toContainText('Saved');
-  await savePreviewSettled;
+  const savedPreview = await savePreviewSettled;
+  expect(savedPreview.status()).toBe(200);
+  expect(await savedPreview.finished()).toBeNull();
+  await expect(page.getByTestId('preview-persistence-status')).toContainText((await savedPreview.json()).data.checksum);
 
   await page.reload({ waitUntil: 'domcontentloaded' });
   await expect(page.getByTestId('course-mode-activity-timeline').locator('.activity-card'))
@@ -139,7 +154,12 @@ test('renders persisted seven-phase bindings in the exact 480x320 renderer-v5 pr
   await createPublishableCourseModeVisuals(page, fixture.lesson.id);
   const initial = await adminApi(page, 'GET', `/lessons/${fixture.lesson.id}/visuals`);
   expect(initial.refs).toEqual([]);
+  assertNoUnexpectedPageErrors.expectFault('GET', `/nestjs/v1/admin/lessons/${fixture.lesson.id}/manifest-preview`,
+    400, 'unbound seven-phase draft cannot produce a playable preview');
+  const unboundPreview = page.waitForResponse(response => response.request().method() === 'GET'
+    && response.url().includes(`/lessons/${fixture.lesson.id}/manifest-preview`));
   await gotoLessonEditor(page, fixture.lesson.id);
+  expect((await unboundPreview).status()).toBe(400);
   const panel = page.getByTestId('course-mode-visual-selection');
   await expect(panel).toBeVisible();
   for (const [key, id] of Object.entries(selection.ids)) {
@@ -186,45 +206,51 @@ test('renders persisted seven-phase bindings in the exact 480x320 renderer-v5 pr
     expect(box.x).toBeGreaterThanOrEqual(0);
     expect(box.x + box.width).toBeLessThanOrEqual(page.viewportSize().width);
   }
+  // Opening/recall phases intentionally omit objects; inspect a persisted three-layer phase.
+  const objectPhase = manifest.cinematicPhases.find(phase =>
+    ['backgroundScene', 'teachingObject', 'robotOverlay'].every(slot => phase.layers.some(layer => layer.slot === slot)));
+  expect(objectPhase, 'a persisted object phase is required for geometry proof').toBeTruthy();
+  const objectStep = manifest.steps.findIndex(step => objectPhase.activityIds.includes(String(step.activityId || step.id)));
+  expect(objectStep).toBeGreaterThanOrEqual(0);
+  await page.getByLabel('Lesson steps', { exact: true }).locator('.step-nav__item').nth(objectStep).click();
+  await page.getByLabel('Persisted cinematic phases').getByRole('button', { name: objectPhase.phaseId, exact: true }).click();
   await expect(stage.locator('.layer-background')).toBeVisible();
   await expect(stage.locator('.layer-teachingObject')).toBeVisible();
   await expect(stage.locator('.layer-robotOverlay')).toBeVisible();
-  await expect(stage.locator('.layer-robotOverlay video')).toHaveClass(/hidden/);
-  await expect(stage.locator('.layer-robotOverlay canvas')).toBeVisible();
+  await require('./helpers/real-service-evidence').assertDecodedStage(stage, objectPhase);
+  const background = objectPhase.layers.find(layer => layer.slot === 'backgroundScene');
+  // The reference iframe is lazy-loaded; bring it into view before querying its document.
+  await page.locator('iframe[src*="/tvideo-demo/index.html"]').scrollIntoViewIfNeeded();
+  const referenceImage = page.frameLocator('iframe[src*="/tvideo-demo/index.html"]').locator('#bgi');
+  await expect(referenceImage).toBeVisible();
+  await expect.poll(() => referenceImage.evaluate(img => img.complete && img.naturalWidth > 0)).toBe(true);
+  const backgroundAsset = manifest.assets.find(asset => asset.sha256 === background.sha256);
+  expect(backgroundAsset).toBeTruthy();
+  await expect(referenceImage).toHaveAttribute('src', backgroundAsset.url);
+  await stabilizeStageMedia(stage);
+  const firstState = await stagePlaybackState(stage);
+  expect(firstState.ready).toBe(true);
+  expect(firstState.currentTimeSec).toBeGreaterThan(0.3);
+  const firstFrame = await stage.locator('.cinematic-canvas').evaluate(canvas => canvas.toDataURL());
+  const keyedCorner = await stage.locator('.cinematic-canvas').evaluate(canvas =>
+    Array.from(canvas.getContext('2d').getImageData(2, 2, 1, 1).data));
+  expect(keyedCorner[3]).toBe(0);
+  await stabilizeStageMedia(stage, 0.7);
+  const progressedState = await stagePlaybackState(stage);
+  expect(progressedState.currentTimeSec).toBeGreaterThan(firstState.currentTimeSec);
+  expect(progressedState.frameIndex).toBeGreaterThan(firstState.frameIndex);
+  await stabilizeStageMedia(stage);
+  // The configured source may vary; compare exact decoded pixels when seeking back.
+  expect(await stage.locator('.cinematic-canvas').evaluate(canvas => canvas.toDataURL())).toBe(firstFrame);
   if (testInfo.project.name.includes('webkit')) {
-    await stabilizeStageMedia(stage);
-    await expect(stage.locator('.layer-robotOverlay video')).toHaveClass(/hidden/);
-    const keyedCorner = await stage.locator('.layer-robotOverlay canvas').evaluate((canvas) => (
-      Array.from(canvas.getContext('2d').getImageData(2, 2, 1, 1).data)
-    ));
-    expect(keyedCorner[3]).toBe(0);
-    const videoState = await stage.locator('video').evaluateAll((videos) => videos.map((video) => ({
-      readyState: video.readyState,
-      duration: video.duration,
-      currentTime: video.currentTime,
-    })));
-    expect(videoState.length).toBeGreaterThan(0);
-    for (const video of videoState) {
-      expect(video.readyState).toBeGreaterThanOrEqual(1);
-      expect(Number.isFinite(video.duration)).toBe(true);
-      expect(video.duration).toBeGreaterThan(0);
-      expect(video.currentTime).toBeGreaterThan(0.3);
-    }
-    await stabilizeStageMedia(stage, 0.7);
-    const progressedTimes = await stage.locator('video').evaluateAll((videos) => (
-      videos.map((video) => video.currentTime)
-    ));
-    for (let index = 0; index < progressedTimes.length; index += 1) {
-      expect(progressedTimes[index]).toBeGreaterThan(videoState[index].currentTime);
-    }
-    await stabilizeStageMedia(stage);
+    // Repeatability does not replace the independently reviewed visual baseline.
     await expect(stage).toHaveScreenshot('course-mode-step-1.png', {
       animations: 'disabled',
-      // WebKit canvas/video decoding varies only inside animated antialiased pixels.
       maxDiffPixels: 1200,
       maxDiffPixelRatio: 0.01,
     });
   }
+  await stage.screenshot({ path: testInfo.outputPath('persisted-object-phase.png') });
   const geometry = await stage.locator('.stage-layer').evaluateAll((elements) => elements.map((element) => ({
     className: element.className,
     left: element.offsetLeft,
@@ -252,13 +278,24 @@ test('renders persisted seven-phase bindings in the exact 480x320 renderer-v5 pr
   expect(zByLayer.teachingObject).toBeLessThan(zByLayer.robotOverlay);
   const preview = page.locator('.robot-preview').first();
   await visitPersistedPhases(page, manifest, async ({ phase, stepIndex }) => {
-    await require('./helpers/real-service-evidence').assertDecodedStage(stage);
+    await require('./helpers/real-service-evidence').assertDecodedStage(stage, phase);
     await stage.screenshot({ path: testInfo.outputPath(`actual-${stepIndex}-${phase.phaseId}.png`) });
   });
   await preview.getByRole('button', { name: /play cinematic/i }).click();
-  await expect.poll(() => stage.locator('video').evaluate(video => video.currentTime)).toBeGreaterThan(0);
+  try { await expect.poll(async () => (await stagePlaybackState(stage)).currentTimeSec).toBeGreaterThan(0.3); }
+  catch (error) {
+    await require('node:fs/promises').writeFile(testInfo.outputPath('playback-failure.json'), JSON.stringify(await stage.evaluate(el => {
+      const vm=el.querySelector('.layer-robotOverlay').__vue__;
+      const parent=vm.$parent;
+      return {child:vm.$options.name,playing:vm.playing,transportMaster:vm.transportMaster,player:vm._mjpeg?.state(),playerPlaying:vm._mjpeg?.playing,
+        parent:parent.$options.name,parentPlaying:parent.cinematicPlaying,ready:parent.cinematicMediaReady?.(),duration:parent.cinematicDurationMs,phase:parent.projection?.cinematicPhase,
+        errors:parent.mediaErrors,frame:parent.cinematicFrameHandle,images:(parent.$refs.stageImages||[]).map(i=>({complete:i.complete,width:i.naturalWidth,src:i.src}))};
+    }),null,2));throw error;
+  }
+  await preview.getByRole('button', { name: /pause cinematic/i }).click();
   await preview.getByRole('button', { name: /replay/i }).click();
-  await expect.poll(() => stage.locator('video').evaluate(video => video.currentTime)).toBeLessThan(0.2);
+  await expect.poll(async () => (await stagePlaybackState(stage)).currentTimeSec).toBeLessThan(0.2);
+  await expect.poll(async () => (await stagePlaybackState(stage)).frameIndex).toBe(0);
   assertNoUnexpectedPageErrors();
 });
 

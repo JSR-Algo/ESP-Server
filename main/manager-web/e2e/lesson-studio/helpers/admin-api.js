@@ -94,7 +94,34 @@ function withCanonicalCourseModeChecksum(contract) {
   }));
 }
 
-async function createCourseModeDraft(page, { weekNumber = 1, runId, visualPage = page } = {}) {
+async function createCurriculumDraft(page, curriculum, runId) {
+  expect(curriculum.courseKey, 'canonical curriculum course is required').toBe('english-6month-4-6');
+  expect(curriculum.lessonKey, 'selected canonical W1 is required').toBe('w01-greetings-politeness');
+  expect(curriculum.courseId).toBeTruthy();
+  expect(curriculum.sourceLessonId).toBeTruthy();
+  const course = await adminApi(page, 'GET', `/courses/${curriculum.courseId}`);
+  expect(course.course_key, 'canonical curriculum course identity must match').toBe(curriculum.courseKey);
+  const lessons = await adminApi(page, 'GET', `/courses/${course.id}/lessons`);
+  const versions = lessons.filter(lesson => lesson.lesson_key === curriculum.lessonKey);
+  expect(versions.some(lesson => lesson.id === curriculum.sourceLessonId && lesson.status === 'published'),
+    'the observed published W1 source must remain available').toBe(true);
+  const drafts = versions.filter(lesson => lesson.status === 'draft');
+  expect(drafts.length, 'ambiguous canonical W1 drafts').toBeLessThanOrEqual(1);
+  const published = versions.filter(lesson => lesson.status === 'published')
+    .sort((a, b) => Number(b.lesson_version) - Number(a.lesson_version))[0];
+  const selected = drafts[0] || await adminApi(page, 'POST', `/lessons/${published.id}/new-version`, {});
+  const lesson = await adminApi(page, 'GET', `/lessons/${selected.id}`);
+  expect(lesson.course_id).toBe(course.id);
+  expect(lesson.lesson_key).toBe(curriculum.lessonKey);
+  expect(lesson.status).toBe('draft');
+  expect(lesson.manifest_version).toBe('teebot-lesson-renderer.v5');
+  const { contract } = await adminApi(page, 'GET', `/lessons/${lesson.id}/course-mode`);
+  expect(contract.activities.length).toBeGreaterThan(0);
+  return { course, lesson, contract, runId: runId || `curriculum-${Date.now().toString(36)}` };
+}
+
+async function createCourseModeDraft(page, { weekNumber = 1, runId, visualPage = page, curriculum } = {}) {
+  if (curriculum) return createCurriculumDraft(page, curriculum, runId);
   const suffix = runId || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
   const course = await adminApi(page, 'POST', '/courses', {
     courseKey: `e2e-course-mode-${suffix}`,

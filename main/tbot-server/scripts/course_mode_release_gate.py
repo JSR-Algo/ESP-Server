@@ -4026,6 +4026,7 @@ def _child_environment(
             "ROBOT_ESP_BASE_URL", "LESSON_STUDIO_E2E_BACKEND_HOST_PORT",
             "LESSON_STUDIO_E2E_WEB_HOST_PORT",
             "LESSON_STUDIO_E2E_VISUAL_SOURCE_LESSON_ID",
+            "LESSON_STUDIO_E2E_ASSIGNMENT_FIXTURE",
         ):
             value = source.get(name)
             if value:
