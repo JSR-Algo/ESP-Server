@@ -80,7 +80,12 @@ async function waitForFile(path, timeoutMs = 10000, signal = null) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
     if (signal?.aborted) throw signal.reason;
-    if (existsSync(path)) return readFile(path, 'utf8');
+    if (existsSync(path)) {
+      const contents = await readFile(path, 'utf8');
+      // Chromium creates the file before finishing the port line.
+      const match = /^([1-9]\d{0,4})\r?\n/.exec(contents);
+      if (match && Number(match[1]) <= 65535) return contents;
+    }
     await new Promise((resolve, reject) => {
       const onAbort = () => {
         clearTimeout(timer);
@@ -316,6 +321,19 @@ async function runHarness({
 }
 
 if (childCleanupSelfTest) {
+  const partialProfile = await mkdtemp(join(tmpdir(), 'tbot-devtools-partial-'));
+  const partialPort = join(partialProfile, 'DevToolsActivePort');
+  await writeFile(partialPort, '');
+  const publishPort = (async () => {
+    await new Promise(resolve => setTimeout(resolve, 60));
+    await writeFile(partialPort, '9222\n/devtools/browser/test');
+  })();
+  try {
+    assert.equal((await waitForFile(partialPort)).split('\n')[0], '9222');
+  } finally {
+    await publishPort;
+    await rm(partialProfile, { recursive: true, force: true });
+  }
   const controller = new AbortController();
   const cancelledWait = waitForFile(join(tmpdir(), 'tbot-file-that-must-not-exist'), 10000, controller.signal);
   controller.abort(new Error('waitForFile cancelled'));
