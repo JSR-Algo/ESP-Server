@@ -172,7 +172,7 @@
             @dirty="courseVisualDirty = $event" @saving="courseVisualSaving = $event" @saved="onCourseVisualSaved"
             @reload-assets="loadCinematicLibraries"
           />
-          <section v-if="!isCourseModeV5" class="lesson-visual-pair" v-loading="savingLessonVisuals" :aria-busy="savingLessonVisuals ? 'true' : 'false'">
+          <section v-if="lesson.lessonId === lessonId && !courseModeLoading && !isCourseModeV5" class="lesson-visual-pair" v-loading="savingLessonVisuals" :aria-busy="savingLessonVisuals ? 'true' : 'false'">
             <div class="lesson-visual-pair__heading">
               <div>
                 <h4>{{ $t(isCourseModeV5 ? 'lesson.visualTripleTitle' : 'lesson.visualPairTitle') }}</h4>

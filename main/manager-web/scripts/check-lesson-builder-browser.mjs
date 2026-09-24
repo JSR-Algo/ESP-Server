@@ -50,6 +50,24 @@ try {
     assertNoPageOverflow(audit);
     assertResponsiveOverflowControls(audit);
   }
+  const pickerLoadingBoundary = await evaluate(`(async()=>{
+    const e=window.__LESSON_BUILDER_TEST__.editor, original=e.lesson;
+    const tick=()=>new Promise(resolve=>e.$nextTick(resolve));
+    e.lesson={...original,manifestVersion:'teebot-lesson-renderer.v5',courseModeContract:null};
+    e.courseModeLoading=true;await tick();
+    const pendingV5Pickers=e.$el.querySelectorAll('.lesson-visual-pair .asset-picker').length;
+    e.courseModeLoading=false;await tick();
+    const nonCourseV5Pickers=e.$el.querySelectorAll('.lesson-visual-pair .asset-picker').length;
+    e.lesson={...e.lesson,lessonId:'previous-route-lesson'};await tick();
+    const staleLessonPickers=e.$el.querySelectorAll('.lesson-visual-pair .asset-picker').length;
+    e.lesson=original;await tick();
+    const legacyPickers=e.$el.querySelectorAll('.lesson-visual-pair .asset-picker').length;
+    return {pendingV5Pickers,staleLessonPickers,nonCourseV5Pickers,legacyPickers};
+  })()`);
+  assert.equal(pickerLoadingBoundary.pendingV5Pickers, 0, 'pending Course Mode authority must not mount legacy media pickers');
+  assert.equal(pickerLoadingBoundary.staleLessonPickers, 0, 'a retained previous-route lesson must not mount legacy media pickers');
+  assert.ok(pickerLoadingBoundary.nonCourseV5Pickers > 0, 'resolved non-Course v5 retains legacy authoring');
+  assert.ok(pickerLoadingBoundary.legacyPickers > 0, 'current legacy lessons retain their pickers');
   const result = await evaluate(`(async()=>{
     const t=window.__LESSON_BUILDER_TEST__,e=t.editor, tick=()=>new Promise(r=>setTimeout(r,0)),waitFor=async(test)=>{for(let i=0;i<50&&!test();i+=1)await tick();if(!test())throw new Error('browser fixture condition timed out')};
     const setInput=(input,value)=>{input.value=value;input.dispatchEvent(new Event('input',{bubbles:true}))};
