@@ -27,9 +27,9 @@ test('real v5 next draft, edits, publication, new assignment, rollback and insig
     await adminApi(page, 'POST', `/lessons/${fixture.lesson.id}/publish`);
     const source = await adminApi(page, 'GET', `/lessons/${fixture.lesson.id}`);
     const sourceManifest = await adminApi(page, 'GET', `/lessons/${fixture.lesson.id}/manifest-preview?profile=espTft`);
-    await page.goto(`/#/course-lessons?courseId=${fixture.course.id}`);
+    await journal.retireDocumentForNavigation(() => page.goto(`/#/course-lessons?courseId=${fixture.course.id}`));
     await expect(page.getByText(source.title).first()).toBeVisible();
-    await page.goto(`/#/lesson-editor?lessonId=${source.id}`);
+    await journal.retireDocumentForNavigation(() => page.goto(`/#/lesson-editor?lessonId=${source.id}`));
     const nextResponse = page.waitForResponse(r => r.request().method() === 'POST' && r.url().endsWith(`/lessons/${source.id}/new-version`));
     await page.getByTestId('create-next-version').click();
     const response = await nextResponse;
@@ -84,7 +84,7 @@ test('real v5 next draft, edits, publication, new assignment, rollback and insig
     await expect(panel).toContainText('Visual versions saved and read back.');
     const bindings = await adminApi(page, 'GET', `/lessons/${nextId}/visuals`);
     await journal.waitForSettledRequests();
-    await page.reload(); await expect(context).toHaveValue(`t08-${fixture.runId}`);
+    await journal.retireDocumentForNavigation(() => page.reload()); await expect(context).toHaveValue(`t08-${fixture.runId}`);
     for (const [slot, id] of Object.entries(selected.ids)) await expect(panel.getByTestId(`course-visual-${slot}`).locator('select')).toHaveValue(id);
     const preview = await adminApi(page, 'GET', `/lessons/${nextId}/manifest-preview?profile=espTft`);
     expect(preview.manifest.cinematicPhases).toEqual(bindings.cinematicPhases);
@@ -126,7 +126,7 @@ test('real v5 next draft, edits, publication, new assignment, rollback and insig
     expect(typeof childName).toBe('string'); expect(childName.trim().length).toBeGreaterThan(0);
     const lessonKey = published.lesson_key || published.lessonKey;
     await waitForPublishedPack(page, published, published.manifest_checksum || published.manifestChecksum, journal.evidence.packReadiness);
-    await page.goto(`/#/course-lessons?courseId=${fixture.course.id}`);
+    await journal.retireDocumentForNavigation(() => page.goto(`/#/course-lessons?courseId=${fixture.course.id}`));
     await page.locator('.filter-row input').first().fill(published.title);
     const lessonRow = page.locator('.el-table__body-wrapper tbody tr').filter({ hasText: lessonKey }).filter({ hasText: published.title });
     await expect(lessonRow).toHaveCount(1);
@@ -198,7 +198,7 @@ test('real v5 next draft, edits, publication, new assignment, rollback and insig
     const course = quality.courses.find(row => row.courseId === fixture.course.id);
     expect(course).toMatchObject({ courseKey: fixture.course.course_key || fixture.course.courseKey });
     expect(course.assignments).toBeGreaterThanOrEqual(2);
-    await page.goto('/#/course-insights'); await expect(page.getByRole('heading', { name: /learner & quality/i })).toBeVisible();
+    await journal.retireDocumentForNavigation(() => page.goto('/#/course-insights')); await expect(page.getByRole('heading', { name: /learner & quality/i })).toBeVisible();
     await journal.checkpoint(testInfo, 'assignment-rollback-insights', { created, rollback, history, quality });
     journal.assertHappyPath();
   } finally {

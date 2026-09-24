@@ -174,10 +174,15 @@
     <!-- L1 · background scene video — FULL frame, playing -->
     <div class="bg">
       <video id="bgv" muted loop playsinline autoplay preload="auto"
-        poster="assets/scenes/scene-07-farm.png"
-        src="assets/scenes/deep-barn-farm-background-6s.mp4"></video>
+        poster="assets/scenes/scene-07-farm.png"></video>
       <img id="bgi" alt="" style="display:none">
     </div>
+    <script>
+      // Embedded authoring waits for its selected background instead of fetching an unused demo clip.
+      if (new URLSearchParams(location.search).get('embed') !== '1') {
+        document.getElementById('bgv').src = 'assets/scenes/deep-barn-farm-background-6s.mp4';
+      }
+    </script>
 
     <!-- L2 · teaching object — anchored above the REAL barn -->
     <div class="object" id="obj">
