@@ -27,6 +27,9 @@ objects, reference and robot directories. Splitting the firmware mount preserves
 the browser media bundled in the web image. Production/default audit evidence
 still requires four mounts. Existing canonical-source, existence, read-only,
 image, disabled-assignment and no-manual-recreation checks remain mandatory.
+All five staging runtime/quick/full/live-db lane reports must carry the matching
+`qualificationProfile: "m1-staging"` and the current operator-attestation digest.
+Keep native receipt metadata intact; missing or mismatched profiles fail audit.
 
 ## Pinned firmware
 
