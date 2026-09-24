@@ -4,7 +4,7 @@ const { readFileSync } = require('node:fs');
 const vm = require('node:vm');
 
 // Subprocess doubles exercise preparation control flow, never real service readiness.
-function recoveryHarness(mode = 'preserve', fault, seedsRunning = false) {
+function recoveryHarness(mode = 'preserve', fault, seedsRunning = false, databaseUrl = 'postgresql://tbot:private@postgres:5432/tbot') {
   const env = {
     LESSON_STUDIO_E2E_STATE_MODE: mode,
     COMPOSE_PROJECT_NAME: 'isolated-recovery',
@@ -23,6 +23,7 @@ function recoveryHarness(mode = 'preserve', fault, seedsRunning = false) {
     }
     if (args.includes('inspect')) {
       const service = args.at(-1).replace('-container', '');
+      if (args.some(arg => arg.includes('.Config.Env'))) return { status: 0, stdout: JSON.stringify(databaseUrl === null ? [] : [`DATABASE_URL=${databaseUrl}`]) };
       if (args.some(arg => arg.includes('.NetworkSettings.Ports'))) return { status: 0, stdout: JSON.stringify({
         [service === 'backend' ? '3000/tcp' : '8002/tcp']: [{ HostIp: fault === 'port' ? '0.0.0.0' : '127.0.0.1', HostPort: service === 'backend' ? '3100' : '8102' }],
       }) };
@@ -41,6 +42,21 @@ function recoveryHarness(mode = 'preserve', fault, seedsRunning = false) {
   const sandbox = { module, __dirname, process: { env }, require: id => id === 'node:child_process' ? { spawnSync } : require(id) };
   vm.runInNewContext(readFileSync(require.resolve('./reset-lesson-studio-e2e-state.cjs'), 'utf8'), sandbox);
   return { api: module.exports, calls, env };
+}
+
+test('reset follows the verified backend database instead of the original seed database', () => {
+  const harness = recoveryHarness('reset', undefined, true, 'postgresql://tbot:private@postgres:5432/m1_real_media_20260924_r3');
+  harness.api.resetLessonStudioE2EState();
+  const command = harness.calls.find(call => call.args.includes('psql'));
+  assert.equal(command.args[command.args.indexOf('-d') + 1], 'm1_real_media_20260924_r3');
+});
+
+for (const databaseUrl of [null, 'invalid', 'postgresql://tbot:private@remote:5432/tbot', 'postgresql://tbot:private@postgres:5433/tbot', 'postgresql://other:private@postgres:5432/tbot', 'postgresql://tbot:private@postgres:5432/', 'postgresql://tbot:private@postgres:5432/tbot?host=remote', 'postgresql://tbot:private@postgres:5432/db%20name']) {
+  test(`invalid backend database binding ${JSON.stringify(databaseUrl)} fails before any mutation`, () => {
+    const harness = recoveryHarness('reset', undefined, true, databaseUrl);
+    assert.throws(() => harness.api.resetLessonStudioE2EState(), /backend database binding/);
+    assert.ok(harness.calls.every(call => !call.args.includes('exec')));
+  });
 }
 
 test('preserve mode checks global setup and each login without mutating throttle or database state', async () => {

@@ -1,5 +1,6 @@
 const { spawnSync } = require('node:child_process');
 const path = require('node:path');
+const { URL } = require('node:url');
 const { lessonStudioWebOrigin } = require('./lesson-studio-e2e-environment.cjs');
 
 const DEFAULT_COMPOSE_FILE = path.resolve(
@@ -25,6 +26,7 @@ function buildResetCommands({
   composeFile = DEFAULT_COMPOSE_FILE,
   composeExecutable = composeExecutableFromEnvironment(),
   projectName = 'tbot-ls-e2e',
+  databaseName = 'tbot',
 } = {}) {
   const compose = [composeExecutable, '-p', projectName, '-f', composeFile];
 
@@ -44,7 +46,7 @@ function buildResetCommands({
     [
       ...compose,
       'exec', '-T', 'postgres', 'psql', '-v', 'ON_ERROR_STOP=1',
-      '-U', 'tbot', '-d', 'tbot', '-c',
+      '-U', 'tbot', '-d', databaseName, '-c',
       "DELETE FROM admin_login_attempts WHERE email IN ('lesson-author-e2e@local.invalid','lesson-author-b-e2e@local.invalid','lesson-manager-e2e@local.invalid');",
     ],
   ];
@@ -79,11 +81,11 @@ function stateModeFromEnvironment(env = process.env) {
 
 function resetLessonStudioE2EState(options = resetOptionsFromEnvironment()) {
   const stateMode = stateModeFromEnvironment();
-  preflightLessonStudioE2EStack({ projectName: options.projectName, composeFile: options.composeFile, composeExecutable: options.composeExecutable });
+  const databaseName = preflightLessonStudioE2EStack({ projectName: options.projectName, composeFile: options.composeFile, composeExecutable: options.composeExecutable, resolveDatabase: stateMode === 'reset' });
   // A recovered stack must retain authentication throttles as well as lesson data.
   // Global setup and per-login preparation both use this boundary.
   if (stateMode === 'preserve') return;
-  for (const [command, ...args] of buildResetCommands(options)) {
+  for (const [command, ...args] of buildResetCommands({ ...options, databaseName })) {
     const result = spawnSync(command, args, {
       encoding: 'utf8',
       stdio: 'inherit',
@@ -98,7 +100,7 @@ function resetLessonStudioE2EState(options = resetOptionsFromEnvironment()) {
   }
 }
 
-function preflightLessonStudioE2EStack({ env = process.env, projectName, composeFile, composeExecutable, run = (command, args) => {
+function preflightLessonStudioE2EStack({ env = process.env, projectName, composeFile, composeExecutable, resolveDatabase = false, run = (command, args) => {
   const result = spawnSync(command, args, { encoding: 'utf8', env, timeout: 10000 });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(result.stderr || `command failed: ${command}`);
@@ -114,6 +116,7 @@ function preflightLessonStudioE2EStack({ env = process.env, projectName, compose
     : ['redis', 'postgres', 'mysql', 'backend', 'seed-postgres', 'web', 'seed-mysql'];
   const backendRoot = env.TBOT_LESSON_STUDIO_BACKEND_MOUNT_ROOT || env.TBOT_BACKEND_WORKTREE;
   const firmwareRoot = env.TBOT_LESSON_STUDIO_FIRMWARE_MOUNT_ROOT || env.TBOT_FIRMWARE_WORKTREE;
+  let databaseName;
   for (const service of services) {
     const container = run(compose, ['-p', project, '-f', file, 'ps', '-q', service]);
     if (!container) throw new Error(`required ${service} service is not running`);
@@ -144,6 +147,24 @@ function preflightLessonStudioE2EStack({ env = process.env, projectName, compose
         || bindings[0].HostPort !== expectedHostPort
       ) {
         throw new Error(`started ${service} container host port binding mismatch`);
+      }
+      if (service === 'backend' && resolveDatabase) {
+        // Bind the reset to the running candidate, not the original seed database.
+        // Never pass its credential-bearing URL to psql or an error message.
+        try {
+          const entries = JSON.parse(run(env.TBOT_DOCKER_EXECUTABLE || 'docker', [
+            'inspect', '--format={{json .Config.Env}}', container,
+          ])).filter(entry => entry.startsWith('DATABASE_URL='));
+          if (entries.length !== 1) throw new Error();
+          const url = new URL(entries[0].slice('DATABASE_URL='.length));
+          databaseName = url.pathname.slice(1);
+          if (!['postgres:', 'postgresql:'].includes(url.protocol)
+            || url.hostname !== 'postgres' || (url.port && url.port !== '5432')
+            || url.username !== 'tbot' || url.search || url.hash
+            || !/^[a-zA-Z_][a-zA-Z0-9_]{0,62}$/.test(databaseName)) throw new Error();
+        } catch {
+          throw new Error('started backend database binding is not a supported local fixture');
+        }
       }
     }
     if (service === 'web') {
@@ -177,6 +198,7 @@ function preflightLessonStudioE2EStack({ env = process.env, projectName, compose
       }
     }
   }
+  return databaseName;
 }
 
 if (require.main === module) {
