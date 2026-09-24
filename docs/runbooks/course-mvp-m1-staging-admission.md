@@ -21,6 +21,13 @@ host Chrome. Standalone and ordinary production-profile replay retain their
 existing Chrome/WebKit behavior; that host-Chrome diagnostic is not frozen
 staging-browser evidence.
 
+The M1 continuity audit expects seven canonical read-only web asset mounts:
+the backend manifest, admin and ESP-TFT directories, plus firmware background,
+objects, reference and robot directories. Splitting the firmware mount preserves
+the browser media bundled in the web image. Production/default audit evidence
+still requires four mounts. Existing canonical-source, existence, read-only,
+image, disabled-assignment and no-manual-recreation checks remain mandatory.
+
 ## Pinned firmware
 
 The separate staging physical policy binds firmware commit

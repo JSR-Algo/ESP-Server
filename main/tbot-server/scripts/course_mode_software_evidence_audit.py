@@ -568,11 +568,13 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
         )
     )
     continuity = documents["02-runtime-continuity-inspection.json"]
+    # M1 splits the firmware mount into four to retain bundled browser media.
+    expected_mount_count = 7 if isinstance(candidate, dict) and candidate.get("qualificationProfile") == "m1-staging" else 4
     continuity_ok = (
         isinstance(continuity, dict)
         and continuity.get("status") == "pass"
         and continuity.get("assignmentFlags") == {"new": False, "rollback": False}
-        and continuity.get("mountCount") == 4
+        and continuity.get("mountCount") == expected_mount_count
         and continuity.get("allMountsCanonical") is True
         and continuity.get("allMountsExist") is True
         and continuity.get("allMountsReadOnly") is True
