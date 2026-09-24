@@ -24,11 +24,11 @@ staging-browser evidence.
 ## Pinned firmware
 
 The separate staging physical policy binds firmware commit
-`7edf23ac4e09a745700396330b06fd26c929e05c`, application SHA-256
-`6cdf24124d3c7469d1c2c3644300cff64f5b1a99cb305712c93e33d19c31ac0e`
+`283f88e55e918e9a7f7337f66bb04c82a246db35`, application SHA-256
+`7f348063189a9bf884215ffa2c450da3acb5fb32fb2697d30c4b9dd4e938ee41`
 (3846880 bytes), and firmware manifest SHA-256
-`ac798559639e9e6beb2183958af6ca65b9ca36c132e8e69499fc3424fca6ebe2`.
-Evidence lives in `M1/runs/20260921T094320Z/firmware-build-b/manifest.json`.
+`87d503c0ca4f2d1c821c9e27e62dacb3b6a8dd6176946ae001ea9e5566cac7b0`.
+Evidence lives in `M1/runs/20260923T031203Z/firmware-build-b/manifest.json`.
 Two independent clean staging builds have identical BIN, ELF and sdkconfig;
 configuration/artifact audits also pass for the ordinary production profile.
 
@@ -40,8 +40,8 @@ Production pins and document schemas remain unchanged. Current-session partition
 readback, actual attended safety and protected-region preservation must still be
 established; software pins do not establish those physical facts.
 
-The staging policy pins `/dev/cu.usbmodem101`, observed for USB serial
-`14:C1:9F:D1:AC:20` in M1. The production default remains
+The staging policy pins `/dev/cu.usbmodem1101`, observed for USB serial
+`14:C1:9F:D1:AC:20` on September 24 in M1. The production default remains
 `/dev/cu.usbmodem1101`. Inventory, signed robot/lease documents, receipt checks
 and publication-time exclusivity checks all use the selected policy. A missing,
 renumbered or occupied port fails admission; this pin is not a live observation.

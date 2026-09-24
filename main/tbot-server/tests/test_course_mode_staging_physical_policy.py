@@ -7,6 +7,72 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from tests.test_course_mode_physical_flash_admission import admission, documents, NOW, valid_files
 
 
+def current_staging_documents(tmp_path):
+    """Reviewed build-b identity; these test documents do not attest hardware safety."""
+    doc, identity, _, actual = documents(tmp_path, Ed25519PrivateKey.generate())
+    binding = doc['candidate']
+    binding['qualificationProfile'] = actual['qualificationProfile'] = 'm1-staging'
+    firmware_sha = '283f88e55e918e9a7f7337f66bb04c82a246db35'
+    app_sha = '7f348063189a9bf884215ffa2c450da3acb5fb32fb2697d30c4b9dd4e938ee41'
+    manifest_sha = '87d503c0ca4f2d1c821c9e27e62dacb3b6a8dd6176946ae001ea9e5566cac7b0'
+    binding['repositories']['firmware']['sha'] = actual['repositories']['firmware']['sha'] = firmware_sha
+    binding['firmware']['gitSha'] = firmware_sha
+    binding['firmware']['app'].update(sha256=app_sha, bytes=3846880)
+    binding['firmware']['manifest']['sha256'] = manifest_sha
+    actual['firmware'].update(appSha256=app_sha, appBytes=3846880, evidenceManifestSha256=manifest_sha)
+    identity['candidate'] = deepcopy(binding)
+    partitions = deepcopy(admission.EXPECTED_PARTITIONS)
+    partitions[6:7] = [
+        {'name':'application', 'offset':'0x20000', 'size':'0x3f0000', 'end':'0x410000', 'protected':False},
+        {'name':'inactive-application', 'offset':'0x410000', 'size':'0x3f0000', 'end':'0x800000', 'protected':True},
+    ]
+    identity['partitionTable'] = partitions
+    doc['flashPlan']['protectedPartitions'] = [p for p in partitions if p['protected']]
+    doc['flashPlan']['operation'].update(imageSha256=app_sha, imageBytes=3846880)
+    doc['safety']['preserveInactiveApplication'] = True
+    return doc, identity, actual
+
+
+def test_current_verified_staging_build_and_port_match_unmodified_policy(tmp_path):
+    assert validate(current_staging_documents(tmp_path), qualification_profile='m1-staging') == []
+
+
+@pytest.mark.parametrize('mutation', ['old-app', 'old-source', 'old-manifest', 'old-port', 'unsafe', 'inactive-slot', 'production'])
+def test_current_staging_binding_keeps_identity_and_safety_fail_closed(tmp_path, mutation):
+    items = current_staging_documents(tmp_path)
+    doc, identity, actual = items
+    if mutation == 'old-app':
+        old = '6cdf24124d3c7469d1c2c3644300cff64f5b1a99cb305712c93e33d19c31ac0e'
+        doc['candidate']['firmware']['app']['sha256'] = actual['firmware']['appSha256'] = old
+        doc['flashPlan']['operation']['imageSha256'] = old
+    elif mutation == 'old-source':
+        old = '7edf23ac4e09a745700396330b06fd26c929e05c'
+        doc['candidate']['firmware']['gitSha'] = old
+        doc['candidate']['repositories']['firmware']['sha'] = actual['repositories']['firmware']['sha'] = old
+    elif mutation == 'old-manifest':
+        old = 'ac798559639e9e6beb2183958af6ca65b9ca36c132e8e69499fc3424fca6ebe2'
+        doc['candidate']['firmware']['manifest']['sha256'] = actual['firmware']['evidenceManifestSha256'] = old
+    elif mutation == 'old-port':
+        doc['robot']['serialPath'] = identity['robot']['serialPath'] = '/dev/cu.usbmodem101'
+        doc['serialLease'].update(devicePath='/dev/cu.usbmodem101', discoveredDevices=['/dev/cu.usbmodem101'])
+    elif mutation == 'unsafe':
+        doc['safety']['adultObserverPresent'] = False
+    elif mutation == 'inactive-slot':
+        doc['safety']['preserveInactiveApplication'] = False
+    else:
+        assert validate(items, qualification_profile='production')
+        return
+    identity['candidate'] = deepcopy(doc['candidate'])
+    reasons = validate(items, qualification_profile='m1-staging')
+    expected = {'old-app': 'candidate.firmware.app', 'old-source': 'candidate.firmware',
+                'old-manifest': 'candidate.firmware.manifest', 'old-port': 'robot.identity'}
+    assert reasons
+    if mutation in expected:
+        assert expected[mutation] in reasons
+        assert 'candidate.identity' not in reasons
+        assert 'candidate.reference' not in reasons
+
+
 @pytest.fixture
 def staged_documents(tmp_path, monkeypatch):
     doc, identity, _, actual = documents(tmp_path, Ed25519PrivateKey.generate())

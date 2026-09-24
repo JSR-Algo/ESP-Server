@@ -42,13 +42,13 @@ EXPECTED_PARTITIONS = [
 ]
 
 # Separate reviewed software artifact; these pins do not attest physical readiness.
-# Source/build evidence: M1/runs/20260921T094320Z/firmware-build-b/manifest.json.
+# Source/build evidence: M1/runs/20260923T031203Z/firmware-build-b/manifest.json.
 M1_STAGING_POLICY = {
-    "serialPath": "/dev/cu.usbmodem101",
-    "firmwareSha": "7edf23ac4e09a745700396330b06fd26c929e05c",
-    "appSha256": "6cdf24124d3c7469d1c2c3644300cff64f5b1a99cb305712c93e33d19c31ac0e",
+    "serialPath": "/dev/cu.usbmodem1101",
+    "firmwareSha": "283f88e55e918e9a7f7337f66bb04c82a246db35",
+    "appSha256": "7f348063189a9bf884215ffa2c450da3acb5fb32fb2697d30c4b9dd4e938ee41",
     "appBytes": 3846880,
-    "manifestSha256": "ac798559639e9e6beb2183958af6ca65b9ca36c132e8e69499fc3424fca6ebe2",
+    "manifestSha256": "87d503c0ca4f2d1c821c9e27e62dacb3b6a8dd6176946ae001ea9e5566cac7b0",
     "appOffset": "0x20000",
     "partitionBytes": 4128768,
     "partitions": [
