@@ -27,10 +27,14 @@ test('real v5 next draft, edits, publication, new assignment, rollback and insig
     await adminApi(page, 'POST', `/lessons/${fixture.lesson.id}/publish`);
     const source = await adminApi(page, 'GET', `/lessons/${fixture.lesson.id}`);
     const sourceManifest = await adminApi(page, 'GET', `/lessons/${fixture.lesson.id}/manifest-preview?profile=espTft`);
+    await journal.waitForSettledRequests();
     await journal.retireDocumentForNavigation(() => page.goto(`/#/course-lessons?courseId=${fixture.course.id}`));
     await expect(page.getByText(source.title).first()).toBeVisible();
+    await journal.waitForSettledRequests();
     await journal.retireDocumentForNavigation(() => page.goto(`/#/lesson-editor?lessonId=${source.id}`));
     const nextResponse = page.waitForResponse(r => r.request().method() === 'POST' && r.url().endsWith(`/lessons/${source.id}/new-version`));
+    await expect(page.getByTestId('create-next-version')).toBeVisible();
+    await journal.waitForSettledRequests();
     await page.getByTestId('create-next-version').click();
     const response = await nextResponse;
     expect(response.status()).toBe(201);
@@ -40,6 +44,8 @@ test('real v5 next draft, edits, publication, new assignment, rollback and insig
     const before = await adminApi(page, 'GET', `/lessons/${nextId}/course-mode`);
     const timeline = page.getByTestId('course-mode-activity-timeline');
     const context = timeline.locator('.activity-card').first().locator('.el-form-item').filter({ hasText: 'Context' }).locator('input');
+    await expect(context).toBeVisible();
+    await journal.waitForSettledRequests();
     await context.fill(`t08-${fixture.runId}`);
     const duration = timeline.locator('.activity-card').first().locator('.el-form-item').filter({ hasText: 'Duration (seconds)' }).getByRole('spinbutton');
     const durationValue = changedActivityDuration(before.contract.activities[0]);
@@ -126,6 +132,7 @@ test('real v5 next draft, edits, publication, new assignment, rollback and insig
     expect(typeof childName).toBe('string'); expect(childName.trim().length).toBeGreaterThan(0);
     const lessonKey = published.lesson_key || published.lessonKey;
     await waitForPublishedPack(page, published, published.manifest_checksum || published.manifestChecksum, journal.evidence.packReadiness);
+    await journal.waitForSettledRequests();
     await journal.retireDocumentForNavigation(() => page.goto(`/#/course-lessons?courseId=${fixture.course.id}`));
     await page.locator('.filter-row input').first().fill(published.title);
     const lessonRow = page.locator('.el-table__body-wrapper tbody tr').filter({ hasText: lessonKey }).filter({ hasText: published.title });
@@ -198,6 +205,7 @@ test('real v5 next draft, edits, publication, new assignment, rollback and insig
     const course = quality.courses.find(row => row.courseId === fixture.course.id);
     expect(course).toMatchObject({ courseKey: fixture.course.course_key || fixture.course.courseKey });
     expect(course.assignments).toBeGreaterThanOrEqual(2);
+    await journal.waitForSettledRequests();
     await journal.retireDocumentForNavigation(() => page.goto('/#/course-insights')); await expect(page.getByRole('heading', { name: /learner & quality/i })).toBeVisible();
     await journal.checkpoint(testInfo, 'assignment-rollback-insights', { created, rollback, history, quality });
     journal.assertHappyPath();

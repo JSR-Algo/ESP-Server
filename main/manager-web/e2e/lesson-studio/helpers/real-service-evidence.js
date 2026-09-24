@@ -144,6 +144,10 @@ function expectObservedFault(page, method, path, status, label) {
   journals.get(page)?.expectFault(method, path, status, label);
 }
 
+async function waitForObservedRequests(page) {
+  await journals.get(page)?.waitForSettledRequests();
+}
+
 async function assertHttpMedia(page, manifest) {
   const crypto = require('node:crypto');
   for (const asset of manifest.assets) {
@@ -206,4 +210,4 @@ async function waitForPublishedPack(page, lesson, checksum, evidence) {
   }, { timeout: 30000, intervals: [500, 1000, 2000], message: `exact published pack required for ${lessonId} v${lessonVersion}` }).toBe(true);
 }
 
-module.exports = { observeJourney, expectObservedFault, assertHttpMedia, assertDecodedStage, waitForPublishedPack };
+module.exports = { observeJourney, expectObservedFault, waitForObservedRequests, assertHttpMedia, assertDecodedStage, waitForPublishedPack };

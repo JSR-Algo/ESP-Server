@@ -1,4 +1,5 @@
 const { expect } = require('@playwright/test');
+const { waitForObservedRequests } = require('./real-service-evidence');
 
 async function visitPersistedPhases(page, manifest, onPhase) {
   const stage = page.getByTestId('esp-tft-stage');
@@ -11,12 +12,14 @@ async function visitPersistedPhases(page, manifest, onPhase) {
     const phases = manifest.cinematicPhases.filter(phase => phase.templateId === 'layeredCinematic'
       && phase.activityIds.includes(activityId));
     expect(phases.length, `persisted phases for ${activityId}`).toBeGreaterThan(0);
+    await waitForObservedRequests(page);
     await steps.nth(stepIndex).click();
     await expect(steps.nth(stepIndex)).toHaveClass(/\bactive\b/);
     await expect(page.getByTestId('v5-preview-context')).toContainText(step.prompt);
     await expect(controls.getByRole('button')).toHaveText(phases.map(phase => phase.phaseId));
     for (const phase of phases) {
       const button = controls.getByRole('button', { name: phase.phaseId, exact: true });
+      await waitForObservedRequests(page);
       await button.click();
       await expect(button).toHaveAttribute('aria-pressed', 'true');
       for (const [slot, layerId] of [['backgroundScene', 'background'], ['teachingObject', 'teachingObject'], ['robotOverlay', 'robotOverlay']]) {
