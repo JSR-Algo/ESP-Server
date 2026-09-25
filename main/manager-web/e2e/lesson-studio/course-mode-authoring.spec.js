@@ -211,10 +211,37 @@ test('renders persisted seven-phase bindings in the exact 480x320 renderer-v5 pr
   await expect(stage).toBeVisible();
   expect(await stage.evaluate((element) => ({ width: element.clientWidth, height: element.clientHeight })))
     .toEqual({ width: 480, height: 320 });
-  if (testInfo.project.name.includes('mobile')) {
-    const box = await stage.boundingBox();
-    expect(box.x).toBeGreaterThanOrEqual(0);
-    expect(box.x + box.width).toBeLessThanOrEqual(page.viewportSize().width);
+  const assertStageFits = async (label) => {
+    const measure = () => stage.evaluate(element => {
+      const shell = element.parentElement;
+      const rect = element.getBoundingClientRect();
+      const outer = shell.getBoundingClientRect();
+      const css = getComputedStyle(shell);
+      const left = outer.left + shell.clientLeft + parseFloat(css.paddingLeft);
+      const available = shell.clientWidth - parseFloat(css.paddingLeft) - parseFloat(css.paddingRight);
+      return { width: rect.width, height: rect.height, left: rect.left, right: rect.right,
+        contentLeft: left, contentRight: left + available, available, scrollLeft: shell.scrollLeft,
+        sourceWidth: element.clientWidth, sourceHeight: element.clientHeight };
+    });
+    await expect.poll(async () => {
+      const box = await measure();
+      return Math.abs(box.width - Math.min(480, box.available)) < 1
+        && box.left >= box.contentLeft - 0.5 && box.right <= box.contentRight + 0.5;
+    }, { message: label }).toBe(true);
+    const box = await measure();
+    expect(box.sourceWidth).toBe(480);
+    expect(box.sourceHeight).toBe(320);
+    expect(box.scrollLeft).toBe(0);
+    expect(box.left).toBeGreaterThanOrEqual(0);
+    expect(box.right).toBeLessThanOrEqual(page.viewportSize().width);
+    expect(Math.abs(box.height - box.width * 320 / 480)).toBeLessThan(1);
+    await testInfo.attach(label, { body: JSON.stringify(box), contentType: 'application/json' });
+  };
+  await assertStageFits('initial-stage-bounds');
+  const originalViewport = page.viewportSize();
+  for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }, originalViewport]) {
+    await page.setViewportSize(viewport);
+    await assertStageFits(`stage-bounds-${viewport.width}x${viewport.height}`);
   }
   // Opening/recall phases intentionally omit objects; inspect a persisted three-layer phase.
   const objectPhase = manifest.cinematicPhases.find(phase =>

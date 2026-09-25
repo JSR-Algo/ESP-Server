@@ -659,6 +659,8 @@ export default {
 .flattened-status { box-sizing: border-box; min-height: 320px; margin: 0; padding: 24px; border: 2px dashed #bd7b32; background: #fff5df; color: #6c3d0c; font-size: 14px; font-weight: 800; line-height: 1.5; }
 .stage-shell { width: 100%; overflow-x: auto; padding: 14px; box-sizing: border-box; border-radius: 18px; background: repeating-linear-gradient(135deg, #18231d, #18231d 10px, #202f26 10px, #202f26 20px); }
 .stage { position: relative; width: 480px; height: 320px; margin: 0 auto; overflow: hidden; background: #dce8c2; box-shadow: 0 12px 30px rgba(0, 0, 0, .35); font-family: "Trebuchet MS", sans-serif; }
+.projection-shell { height: calc(var(--projection-height, 320px) + 28px); overflow: hidden; }
+.projection-shell .stage { transform: scale(var(--projection-scale, 1)); transform-origin: top left; }
 .truth-note { margin:7px 2px 0; color:#68766c; font-size:12px; }
 .preview-context { margin-top: 10px; padding: 8px 12px; border: 1px solid #cbd8cf; background: #f5f8f4; font-size: 12px; }
 .preview-context p { margin: 5px 0; }
@@ -714,6 +716,6 @@ export default {
 @keyframes entranceFade { 0% { opacity: 0; } 100% { opacity: 1; } }
 @media (max-width: 1100px) { .cinematic-comparison--enabled { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 720px) { .contract-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
-@media (max-width: 560px) { .contract-head { flex-direction:column; }.contract-grid { grid-template-columns:1fr; }.stage-shell { height: 240px; padding: 8px; }.projection-shell { height: calc(var(--projection-height, 320px) + 16px); overflow: hidden; }.stage { margin: 0; transform: scale(var(--projection-scale, 1)); transform-origin: top left; } .preview-toolbar label { width: 100%; margin-left: 0; } }
+@media (max-width: 560px) { .contract-head { flex-direction:column; }.contract-grid { grid-template-columns:1fr; }.stage-shell { height: 240px; padding: 8px; }.projection-shell { height: calc(var(--projection-height, 320px) + 16px); }.stage { margin: 0; } .preview-toolbar label { width: 100%; margin-left: 0; } }
 @media (prefers-reduced-motion: reduce) { .layer-robotOverlay { animation: none; } }
 </style>

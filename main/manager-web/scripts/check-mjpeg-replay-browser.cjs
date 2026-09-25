@@ -4,7 +4,7 @@ const path = require('node:path');
 const os = require('node:os');
 const http = require('node:http');
 const crypto = require('node:crypto');
-const { chromium, webkit } = require('@playwright/test');
+const { chromium, webkit, devices } = require('@playwright/test');
 
 const root = path.resolve(__dirname, '..');
 const identity = require('../tests/fixtures/mjpeg/current-flyIn.json');
@@ -66,10 +66,10 @@ async function main() {
         body = componentModule(file);
       } else if (url === '/') {
         type = 'text/html';
-        body = '<!doctype html><title>MJPEG replay regression</title><script src="/vue.js"></script><div id="app"></div>'
+        body = '<!doctype html><meta name="viewport" content="width=device-width, initial-scale=1"><title>MJPEG replay regression</title><script src="/vue.js"></script><div id="app"></div>'
           + '<script type="module">import Preview from "/component/RobotEspTftProjectionPreview.vue";'
-          + 'window.mountFixture=async manifest=>{if(window.host)window.host.$destroy();document.body.innerHTML="<div id=app></div>";'
-          + 'window.host=new Vue({data:{manifest},render(h){return h(Preview,{ref:"preview",props:{manifest:this.manifest}})}}).$mount("#app");'
+          + 'window.mountFixture=async (manifest,width)=>{if(window.host)window.host.$destroy();document.body.innerHTML="<div id=app></div>";'
+          + 'window.host=new Vue({data:{manifest},render(h){return h(Preview,{ref:"preview",style:width?{width:width+"px"}:{},props:{manifest:this.manifest}})}}).$mount("#app");'
           + 'window.preview=window.host.$refs.preview;await Vue.nextTick();};window.fixtureReady=true;</script>';
       } else { response.writeHead(404); response.end(); return; }
       response.writeHead(200, { 'Content-Type': type, 'Content-Length': Buffer.byteLength(body) }); response.end(body);
@@ -83,12 +83,37 @@ async function main() {
       const row = { name, scope: 'Actual local mounted Vue controls and JPEG decode; unregistered fixtures', pageErrors: [] };
       try {
         browser = await engine.launch({ headless: true, ...options }); row.version = browser.version();
-        const page = await browser.newPage(); page.on('pageerror', error => row.pageErrors.push(error.message));
-        await page.goto('http://127.0.0.1:' + server.address().port); await page.waitForFunction(() => window.fixtureReady);
-        await page.addScriptTag({ path: path.join(root, 'tests/browser/mjpeg-replay-checks.js') });
-        row.cases = await page.evaluate(async ([first, next]) => window.verifyMjpegReplay(first, next), [manifest('1'), manifest('2')]);
-        await page.setViewportSize({ width: 390, height: 844 });
-        row.cases.push(...await page.evaluate(first => window.verifyResponsiveStage(first), manifest('1')));
+        row.cases = [];
+        row.requestFailures = [];
+        for (const mobile of [false, true]) {
+          const lane = name.toLowerCase() + (mobile ? '-mobile' : '-desktop');
+          const context = await browser.newContext(mobile
+            ? { ...devices[name === 'WebKit' ? 'iPhone 13' : 'Pixel 7'], viewport: { width: 390, height: 844 } }
+            : { viewport: { width: 1440, height: 900 } });
+          await context.tracing.start({ screenshots: true, snapshots: true, sources: true });
+          try {
+            const page = await context.newPage();
+            page.on('pageerror', error => row.pageErrors.push({ lane, error: error.message }));
+            page.on('requestfailed', request => row.requestFailures.push({ lane, url: request.url(), error: request.failure() }));
+            page.on('response', response => { if (response.status() >= 400) row.requestFailures.push({ lane, url: response.url(), status: response.status() }); });
+            await page.goto('http://127.0.0.1:' + server.address().port); await page.waitForFunction(() => window.fixtureReady);
+            await page.addScriptTag({ path: path.join(root, 'tests/browser/mjpeg-replay-checks.js') });
+            const replay = await page.evaluate(async ([first, next]) => window.verifyMjpegReplay(first, next), [manifest('1'), manifest('2')]);
+            row.cases.push(...replay.map(item => ({ lane, ...item })));
+            const viewports = mobile ? [[390, 844], [844, 390], [390, 844]] : [[1440, 900], [561, 900], [560, 900], [1024, 768]];
+            for (let index = 0; index < viewports.length; index++) {
+              const [width, height] = viewports[index];
+              await page.setViewportSize({ width, height });
+              const geometry = await page.evaluate(([first, mount]) => window.verifyResponsiveStage(first, mount), [manifest('1'), index === 0]);
+              row.cases.push(...geometry.map(item => ({ lane, viewport: { width, height }, ...item })));
+              await page.waitForFunction(() => window.preview.cinematicMediaReady());
+              await page.screenshot({ path: path.join(output, `${lane}-${index}.png`), fullPage: true });
+            }
+          } finally {
+            await context.tracing.stop({ path: path.join(output, `${lane}-trace.zip`) });
+            await context.close();
+          }
+        }
         row.failures = row.cases.filter(item => !item.pass).length;
       } catch (error) { row.error = String(error); row.failures = 1; }
       finally { if (browser) await browser.close(); results.push(row); }
@@ -97,6 +122,6 @@ async function main() {
   fs.writeFileSync(path.join(output, 'replay-results.json'), JSON.stringify(results, null, 2));
   console.log(JSON.stringify(results.map(row => ({ browser: row.name, version: row.version,
     cases: row.cases && row.cases.length, failures: row.failures, pageErrors: row.pageErrors })), null, 2));
-  assert.equal(results.reduce((count, row) => count + row.failures + row.pageErrors.length, 0), 0, 'Mounted replay regressions');
+  assert.equal(results.reduce((count, row) => count + row.failures + row.pageErrors.length + (row.requestFailures || []).length, 0), 0, 'Mounted replay regressions');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });
