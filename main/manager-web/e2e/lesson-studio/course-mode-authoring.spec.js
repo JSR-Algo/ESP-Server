@@ -222,7 +222,9 @@ test('renders persisted seven-phase bindings in the exact 480x320 renderer-v5 pr
   expect(objectPhase, 'a persisted object phase is required for geometry proof').toBeTruthy();
   const objectStep = manifest.steps.findIndex(step => objectPhase.activityIds.includes(String(step.activityId || step.id)));
   expect(objectStep).toBeGreaterThanOrEqual(0);
+  await waitForObservedRequests(page);
   await page.getByLabel('Lesson steps', { exact: true }).locator('.step-nav__item').nth(objectStep).click();
+  await waitForObservedRequests(page);
   await page.getByLabel('Persisted cinematic phases').getByRole('button', { name: objectPhase.phaseId, exact: true }).click();
   await expect(stage.locator('.layer-background')).toBeVisible();
   await expect(stage.locator('.layer-teachingObject')).toBeVisible();
@@ -253,8 +255,43 @@ test('renders persisted seven-phase bindings in the exact 480x320 renderer-v5 pr
   // The configured source may vary; compare exact decoded pixels when seeking back.
   expect(await stage.locator('.cinematic-canvas').evaluate(canvas => canvas.toDataURL())).toBe(firstFrame);
   if (testInfo.project.name.includes('webkit')) {
-    // Repeatability does not replace the independently reviewed visual baseline.
-    await expect(stage).toHaveScreenshot('course-mode-step-1.png', {
+    // Persisted sources vary; each source/geometry combination needs its own reviewed baseline.
+    const baselineInput = [
+      'teebot-lesson-renderer.v5', 480, 320, objectPhase.phaseId,
+      objectPhase.playbackMode, objectPhase.timing.durationMs, 400,
+      ...objectPhase.layers.slice().sort((a, b) => a.slot.localeCompare(b.slot)).map(layer => {
+        const metadata = layer.metadata;
+        const rect = metadata.rect;
+        const key = metadata.chromaKey;
+        return [layer.slot, layer.sha256, rect.x, rect.y, rect.width, rect.height,
+          metadata.fit ?? null, metadata.width, metadata.height, metadata.codec ?? null,
+          metadata.fps ?? null, metadata.frameCount ?? null, metadata.durationMs ?? null,
+          key?.keyColor ?? null, key?.tolerance ?? null, key?.featherPx ?? null];
+      }),
+    ];
+    const baselineJson = JSON.stringify(baselineInput);
+    const baselineHash = require('node:crypto').createHash('sha256').update(baselineJson).digest('hex');
+    await testInfo.attach('visual-baseline-input', { body: baselineJson, contentType: 'application/json' });
+    await stage.screenshot({ path: testInfo.outputPath('visual-baseline-candidate.png'), animations: 'disabled', scale: 'css' });
+    if (testInfo.project.name.includes('mobile')) {
+      const clipping = await stage.evaluate(element => {
+        const box = element.getBoundingClientRect();
+        const ancestors = [];
+        for (let parent = element.parentElement; parent; parent = parent.parentElement) {
+          if (!['auto', 'scroll', 'hidden', 'clip'].includes(getComputedStyle(parent).overflowX)) continue;
+          const rect = parent.getBoundingClientRect();
+          ancestors.push({ className: parent.className, left: rect.left + parent.clientLeft,
+            right: rect.left + parent.clientLeft + parent.clientWidth, scrollLeft: parent.scrollLeft });
+        }
+        return { left: box.left, right: box.right, ancestors };
+      });
+      await testInfo.attach('stage-clipping', { body: JSON.stringify(clipping), contentType: 'application/json' });
+      for (const ancestor of clipping.ancestors) {
+        expect(clipping.left, `stage left clipped by ${ancestor.className}`).toBeGreaterThanOrEqual(ancestor.left - 0.5);
+        expect(clipping.right, `stage right clipped by ${ancestor.className}`).toBeLessThanOrEqual(ancestor.right + 0.5);
+      }
+    }
+    await expect(stage).toHaveScreenshot(`renderer-v5-${baselineHash}.png`, {
       animations: 'disabled',
       maxDiffPixels: 1200,
       maxDiffPixelRatio: 0.01,

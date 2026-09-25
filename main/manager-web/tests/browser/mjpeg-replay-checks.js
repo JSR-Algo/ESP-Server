@@ -1,4 +1,35 @@
 // Runs in a mounted fixture using the actual preview, controls and image decoder.
+window.verifyResponsiveStage = async function verifyResponsiveStage(manifest) {
+  const rows = [];
+  await window.mountFixture(manifest);
+  try {
+    const root = window.preview.$el;
+    for (const width of [314, 240, 360, 314]) {
+      root.style.width = width + 'px';
+      const stage = root.querySelector('[data-testid="esp-tft-stage"]');
+      const shell = stage.parentElement;
+      let geometry;
+      for (let attempt = 0; attempt < 100; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 10));
+        const bounds = stage.getBoundingClientRect();
+        const outer = shell.getBoundingClientRect();
+        const css = getComputedStyle(shell);
+        const available = shell.clientWidth - parseFloat(css.paddingLeft) - parseFloat(css.paddingRight);
+        geometry = { width: bounds.width, available, left: bounds.left, right: bounds.right,
+          shellLeft: outer.left, shellRight: outer.right, clientWidth: stage.clientWidth,
+          clientHeight: stage.clientHeight, scrollLeft: shell.scrollLeft };
+        if (Math.abs(bounds.width - available) < 1 && bounds.left >= outer.left
+          && bounds.right <= outer.right && stage.clientWidth === 480 && stage.clientHeight === 320) break;
+      }
+      rows.push({ action: 'responsive-stage-' + width, ...geometry,
+        pass: Math.abs(geometry.width - geometry.available) < 1
+          && geometry.left >= geometry.shellLeft && geometry.right <= geometry.shellRight
+          && geometry.clientWidth === 480 && geometry.clientHeight === 320 && geometry.scrollLeft === 0 });
+    }
+  } finally { window.host.$destroy(); }
+  return rows;
+};
+
 window.verifyMjpegReplay = async function verifyMjpegReplay(manifest, replacement) {
   const rows = [];
   const waitFor = async (predicate, label) => {

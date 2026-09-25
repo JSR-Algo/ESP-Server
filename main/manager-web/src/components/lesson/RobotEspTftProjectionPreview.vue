@@ -39,7 +39,7 @@
     >
       <section :class="['cinematic-panel', { 'cinematic-panel--legacy': !cinematicComparisonEnabled }]">
         <h3 v-if="cinematicComparisonEnabled" class="cinematic-panel__label">3 Layers</h3>
-        <div class="stage-shell">
+        <div ref="projectionShell" class="stage-shell projection-shell">
           <div class="stage" data-testid="esp-tft-stage">
         <template v-for="layer in projection.layers">
           <CinematicVideoLayer
@@ -403,13 +403,34 @@ export default {
   },
   mounted() {
     this.armImageDeadline();
+    this.projectionResizeObserver = new ResizeObserver(() => {
+      if (this.projectionResizeFrame != null) cancelAnimationFrame(this.projectionResizeFrame);
+      this.projectionResizeFrame = requestAnimationFrame(() => {
+        this.projectionResizeFrame = null;
+        this.fitProjection();
+      });
+    });
+    this.projectionResizeObserver.observe(this.$refs.projectionShell);
+    this.fitProjection();
   },
   beforeDestroy() {
+    if (this.projectionResizeObserver) this.projectionResizeObserver.disconnect();
+    if (this.projectionResizeFrame != null) cancelAnimationFrame(this.projectionResizeFrame);
     this.clearImageDeadline();
     this.clearPlayTimer();
     this.stopCinematicClock();
   },
   methods: {
+    fitProjection() {
+      const shell = this.$refs.projectionShell;
+      if (!shell || this._isBeingDestroyed || this._isDestroyed) return;
+      const style = window.getComputedStyle(shell);
+      const width = shell.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+      // Scale presentation only; layer coordinates remain in the firmware's 480x320 space.
+      const scale = Math.min(1, Math.max(0, width / 480));
+      shell.style.setProperty('--projection-scale', String(scale));
+      shell.style.setProperty('--projection-height', `${320 * scale}px`);
+    },
     clearImageDeadline() {
       this.imageLoadGeneration = (this.imageLoadGeneration || 0) + 1;
       if (this.imageLoadTimer !== null) clearTimeout(this.imageLoadTimer);
@@ -693,6 +714,6 @@ export default {
 @keyframes entranceFade { 0% { opacity: 0; } 100% { opacity: 1; } }
 @media (max-width: 1100px) { .cinematic-comparison--enabled { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 720px) { .contract-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
-@media (max-width: 560px) { .contract-head { flex-direction:column; }.contract-grid { grid-template-columns:1fr; }.stage-shell { height: 240px; padding: 8px; }.stage { margin: 0; transform: scale(.7); transform-origin: top left; } .preview-toolbar label { width: 100%; margin-left: 0; } }
+@media (max-width: 560px) { .contract-head { flex-direction:column; }.contract-grid { grid-template-columns:1fr; }.stage-shell { height: 240px; padding: 8px; }.projection-shell { height: calc(var(--projection-height, 320px) + 16px); overflow: hidden; }.stage { margin: 0; transform: scale(var(--projection-scale, 1)); transform-origin: top left; } .preview-toolbar label { width: 100%; margin-left: 0; } }
 @media (prefers-reduced-motion: reduce) { .layer-robotOverlay { animation: none; } }
 </style>

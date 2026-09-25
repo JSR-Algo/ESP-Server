@@ -87,6 +87,8 @@ async function main() {
         await page.goto('http://127.0.0.1:' + server.address().port); await page.waitForFunction(() => window.fixtureReady);
         await page.addScriptTag({ path: path.join(root, 'tests/browser/mjpeg-replay-checks.js') });
         row.cases = await page.evaluate(async ([first, next]) => window.verifyMjpegReplay(first, next), [manifest('1'), manifest('2')]);
+        await page.setViewportSize({ width: 390, height: 844 });
+        row.cases.push(...await page.evaluate(first => window.verifyResponsiveStage(first), manifest('1')));
         row.failures = row.cases.filter(item => !item.pass).length;
       } catch (error) { row.error = String(error); row.failures = 1; }
       finally { if (browser) await browser.close(); results.push(row); }
