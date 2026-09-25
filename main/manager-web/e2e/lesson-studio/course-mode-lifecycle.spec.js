@@ -192,6 +192,7 @@ test('deduplicates identical retries and rejects a stale second-admin draft writ
 
 test('fails closed for missing auth, role-equivalent manager-only auth, IDOR, and unsafe assignment', async ({ page }) => {
   await loginAsLessonAuthor(page);
+  const foreign = await createCourseModeDraft(page);
   const authless = await page.request.get(`${apiRoot}/courses`);
   expect(authless.status()).toBe(401);
 
@@ -224,7 +225,7 @@ test('fails closed for missing auth, role-equivalent manager-only auth, IDOR, an
   );
   expect(ownScoped.status()).toBe(404);
   const idor = await page.request.get(
-    `${apiRoot}/lessons/00000006-0002-0000-0000-000000000001/course-mode`,
+    `${apiRoot}/lessons/${foreign.lesson.id}/course-mode`,
     { headers: managerHeaders },
   );
   expect(idor.status()).toBe(403);
@@ -232,7 +233,7 @@ test('fails closed for missing auth, role-equivalent manager-only auth, IDOR, an
     headers: managerHeaders,
     data: {
       deviceId: '00000000-0000-4000-8000-000000000000',
-      lessonId: '00000006-0002-0000-0000-000000000001',
+      lessonId: foreign.lesson.id,
       lessonVersion: 1,
       childId: '00000000-0000-4000-8000-000000000000',
       profile: 'espTft',

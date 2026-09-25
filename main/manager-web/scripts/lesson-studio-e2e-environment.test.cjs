@@ -155,7 +155,7 @@ test('security journey uses the real manager session and exact authorization out
   assert.match(lifecycle, /lesson-manager-e2e@local\.invalid/);
   assert.match(lifecycle, /lesson-author-b-e2e@local\.invalid/);
   assert.match(lifecycle, /expect\(ownScoped\.status\(\)\)\.toBe\(404\)/);
-  assert.match(lifecycle, /00000006-0002-0000-0000-000000000001/);
+  assert.doesNotMatch(lifecycle, /00000006-0002-0000-0000-000000000001/);
   assert.match(lifecycle, /expect\(managerOnly\.status\(\)\)\.toBe\(403\)/);
   assert.match(lifecycle, /expect\(idor\.status\(\)\)\.toBe\(403\)/);
   assert.match(lifecycle, /expect\(assignment\.status\(\)\)\.toBe\(403\)/);

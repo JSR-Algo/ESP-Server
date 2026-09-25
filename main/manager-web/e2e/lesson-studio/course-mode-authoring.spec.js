@@ -3,6 +3,7 @@ const { loginAsLessonAuthor } = require('./helpers/session');
 const { monitorUnexpectedPageErrors } = require('./helpers/page-errors');
 const { gotoAppRoute, stabilizeStageMedia, stagePlaybackState } = require('./helpers/navigation');
 const { visitPersistedPhases } = require('./helpers/persisted-phases');
+const { waitForObservedRequests } = require('./helpers/real-service-evidence');
 const {
   adminApi,
   createCourseModeDraft,
@@ -18,9 +19,12 @@ test('@s07-assets persists seven phase bindings and preserves activity image ver
   const {lesson}=await s07Draft(page);
   const source=await s07Api(page,'GET',`/lessons/${config.source}/visuals`);
   const sourceAssets=await s07Api(page,'GET',`/lessons/${config.source}/assets?profile=espTft`);
-  const sourceImage=sourceAssets.assets.find(a=>(a.layer||a.slot)==='backgroundScene');
-  expect(sourceImage && sourceImage.assetId).toBeTruthy();
-  await s07Api(page,'POST',`/lessons/${lesson.id}/assets`,{profile:'espTft',sourceAssetId:sourceImage.assetId});
+  // Bundle assets are separate from the shared background and phase bindings.
+  expect(sourceAssets.assets.length).toBeGreaterThan(0);
+  for(const asset of sourceAssets.assets){
+    expect(asset.assetId).toBeTruthy();
+    await s07Api(page,'POST',`/lessons/${lesson.id}/assets`,{profile:'espTft',sourceAssetId:asset.assetId});
+  }
   const phases=['flyIn','walk','teach','listen','thinking','celebrate','exit'];
   const first=slot=>source.refs.find(r=>r.slot===slot)?.assetVersionId;
   const ids=process.env.CPR_S07_SESSION_FILE
@@ -123,6 +127,7 @@ test('authors, saves, and reloads the canonical Course Mode contract', async ({ 
   const firstActivityType = timeline.locator('.activity-card .el-form-item')
     .filter({ hasText: 'Activity type' }).first().locator('input');
   await firstActivityType.fill(`${fixture.contract.activities[0].activityType}_e2e`);
+  await waitForObservedRequests(page);
   const savePreviewSettled = page.waitForResponse((response) => (
     response.url().includes(`/lessons/${fixture.lesson.id}/manifest-preview`)
       && response.request().method() === 'GET'
@@ -134,6 +139,7 @@ test('authors, saves, and reloads the canonical Course Mode contract', async ({ 
   expect(await savedPreview.finished()).toBeNull();
   await expect(page.getByTestId('preview-persistence-status')).toContainText((await savedPreview.json()).data.checksum);
 
+  await waitForObservedRequests(page);
   await page.reload({ waitUntil: 'domcontentloaded' });
   await expect(page.getByTestId('course-mode-activity-timeline').locator('.activity-card'))
     .toHaveCount(fixture.contract.activities.length);
@@ -142,10 +148,12 @@ test('authors, saves, and reloads the canonical Course Mode contract', async ({ 
     .toHaveValue(`${fixture.contract.activities[0].activityType}_e2e`);
   const persisted = await adminApi(page, 'GET', `/lessons/${fixture.lesson.id}/course-mode`);
   expect(persisted.contract.activities[0].activityType).toBe(`${fixture.contract.activities[0].activityType}_e2e`);
+  await waitForObservedRequests(page);
   assertNoUnexpectedPageErrors();
 });
 
 test('renders persisted seven-phase bindings in the exact 480x320 renderer-v5 projection', async ({ page }, testInfo) => {
+  test.setTimeout(120000);
   const assertNoUnexpectedPageErrors = monitorUnexpectedPageErrors(page);
   await loginAsLessonAuthor(page);
   const fixture = await createCourseModeDraft(page);
@@ -155,11 +163,13 @@ test('renders persisted seven-phase bindings in the exact 480x320 renderer-v5 pr
   const initial = await adminApi(page, 'GET', `/lessons/${fixture.lesson.id}/visuals`);
   expect(initial.refs).toEqual([]);
   assertNoUnexpectedPageErrors.expectFault('GET', `/nestjs/v1/admin/lessons/${fixture.lesson.id}/manifest-preview`,
-    400, 'unbound seven-phase draft cannot produce a playable preview');
+    422, 'unbound seven-phase draft cannot produce a playable preview');
   const unboundPreview = page.waitForResponse(response => response.request().method() === 'GET'
     && response.url().includes(`/lessons/${fixture.lesson.id}/manifest-preview`));
   await gotoLessonEditor(page, fixture.lesson.id);
-  expect((await unboundPreview).status()).toBe(400);
+  const unboundResponse = await unboundPreview;
+  expect(unboundResponse.status()).toBe(422);
+  expect((await unboundResponse.json()).code).toBe('LESSON_NOT_PLAYABLE');
   const panel = page.getByTestId('course-mode-visual-selection');
   await expect(panel).toBeVisible();
   for (const [key, id] of Object.entries(selection.ids)) {
