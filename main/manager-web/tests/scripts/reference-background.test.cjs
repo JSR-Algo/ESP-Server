@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
-function embed() {
+function embed(search = '?embed=1') {
   const html = fs.readFileSync(path.resolve(__dirname, '../../public/tvideo-demo/index.html'), 'utf8');
   const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)];
   function element(src = '') {
@@ -16,15 +16,42 @@ function embed() {
       load() { this.loads++; }, pause() { this.pauses++; }, play() { this.plays++; return Promise.resolve(); } };
   }
   const video = element('initial.mp4'); const image = element();
+  const objectTag = html.match(/<div class="object" id="obj">\s*<img([^>]*)>/)[1];
+  const object = element(objectTag.match(/src="([^"]*)"/)?.[1]);
   let receive;
   vm.runInNewContext(scripts.at(-1)[1], {
-    URLSearchParams, location: { search: '?embed=1' }, navigator: { userAgent: 'Safari' },
+    URLSearchParams, location: { search }, navigator: { userAgent: 'Safari' },
     document: { readyState: 'complete', documentElement: { classList: { add() {} } },
-      getElementById: id => ({ bgv: video, bgi: image })[id], querySelector: () => null },
+      getElementById: id => ({ bgv: video, bgi: image })[id],
+      querySelector: selector => selector === '#obj img' ? object : null },
     window: { addEventListener: (event, handler) => { if (event === 'message') receive = handler; } },
   });
-  return { video, image, apply: payload => receive({ data: { type: 'tvideo-params', payload } }) };
+  return { video, image, object, apply: payload => receive({ data: { type: 'tvideo-params', payload } }) };
 }
+
+test('embedded object waits for authoring and retains the selected image on empty updates', () => {
+  const fixture = embed();
+  assert.equal(fixture.object.src, '');
+  fixture.apply({ obj: 'selected.png' });
+  fixture.apply({ obj: '' });
+  fixture.apply({ word: 'hello' });
+  assert.equal(fixture.object.src, 'selected.png');
+});
+
+test('first missing or empty object retains the standalone fallback choice', () => {
+  for (const payload of [{}, { obj: '' }, { replay: true }]) {
+    const fixture = embed();
+    fixture.apply(payload);
+    assert.equal(fixture.object.src, 'assets/objects/barn.png');
+    fixture.apply({ obj: 'selected.png' });
+    assert.equal(fixture.object.src, 'selected.png');
+  }
+});
+
+test('query object initializes directly to the authored source', () => {
+  const fixture = embed('?embed=1&obj=selected.png');
+  assert.equal(fixture.object.src, 'selected.png');
+});
 
 test('reference preview displays original image bytes through an image element', () => {
   const fixture = embed();

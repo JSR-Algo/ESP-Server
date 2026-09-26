@@ -126,6 +126,8 @@ test('authors, saves, and reloads the canonical Course Mode contract', async ({ 
 
   const firstActivityType = timeline.locator('.activity-card .el-form-item')
     .filter({ hasText: 'Activity type' }).first().locator('input');
+  // Editing invalidates the persisted preview and disposes its media loader.
+  await waitForObservedRequests(page);
   await firstActivityType.fill(`${fixture.contract.activities[0].activityType}_e2e`);
   await waitForObservedRequests(page);
   const savePreviewSettled = page.waitForResponse((response) => (

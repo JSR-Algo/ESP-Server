@@ -186,9 +186,15 @@
 
     <!-- L2 · teaching object — anchored above the REAL barn -->
     <div class="object" id="obj">
-      <img src="assets/objects/barn.png" alt="clay barn icon">
+      <img alt="clay barn icon">
       <span class="tagword">barn</span>
     </div>
+    <script>
+      // As with the background, embedded authoring supplies its selected object.
+      if (new URLSearchParams(location.search).get('embed') !== '1') {
+        document.querySelector('#obj img').src = 'assets/objects/barn.png';
+      }
+    </script>
 
     <!-- L3 · robot sprite — two-clip performance: flight (lean, straighten) then
          greeting loop (blinks, looks around, talks, flappy arms); sprite = fallback -->
@@ -486,7 +492,8 @@ document.getElementById('rawcode').addEventListener('click',async e=>{
           }
         }
       }
-      if (p.obj) { var oi = document.querySelector('#obj img'); if (oi) oi.src = p.obj; }
+      var oi = document.querySelector('#obj img');
+      if (oi && (p.obj || !oi.getAttribute('src'))) oi.src = p.obj || 'assets/objects/barn.png';
       if (p.word !== undefined) { var tw = document.querySelector('#obj .tagword'); if (tw) tw.textContent = p.word; var im = document.querySelector('#obj img'); if (im) im.alt = p.word; }
       if (p.stepId !== undefined || p.stepText !== undefined) { var k = document.querySelector('.stepcard .k'); if (k) k.innerHTML = '<b>' + esc(p.stepId || '') + '</b> ' + esc(p.stepText || ''); }
       if (p.prompt !== undefined) { var pp = document.querySelector('.stepcard p'); if (pp) pp.textContent = p.prompt || ''; }

@@ -23,9 +23,18 @@ async function main() {
         for (const embed of [true, false]) {
           const page = await browser.newPage();
           const videoRequests = [];
+          const objectRequests = [];
+          page.on('request', req => { if (req.url() === origin + '/assets/objects/barn.png') objectRequests.push(req); });
           page.on('request', req => { if (req.url() === origin + videoPath) videoRequests.push(req); });
           await page.goto(`${origin}/index.html${embed ? '?embed=1' : ''}`, { waitUntil: 'domcontentloaded' });
           if (embed) {
+            assert.equal(await page.locator('#obj img').getAttribute('src'), null, 'embedded preview must wait for authored object');
+            assert.equal(objectRequests.length, 0, 'embedded preview must not start an unused default object request');
+            await page.evaluate(() => window.postMessage({ type: 'tvideo-params', payload: { obj: 'assets/objects/barn.png?selected=1', word: 'selected barn' } }, location.origin));
+            await page.waitForFunction(() => { const img = document.querySelector('#obj img'); return img.complete && img.naturalWidth > 0; });
+            assert.equal(await page.locator('#obj img').getAttribute('src'), 'assets/objects/barn.png?selected=1');
+            assert.equal(await page.locator('#obj img').getAttribute('alt'), 'selected barn');
+            assert.equal(objectRequests.length, 0);
             assert.equal(await page.locator('#bgv').getAttribute('src'), null, 'embedded preview must wait for authored background');
             await page.evaluate(() => window.postMessage({ type: 'tvideo-params', payload: { bg: 'assets/scenes/scene-07-farm.png' } }, location.origin));
             await page.waitForFunction(() => { const img = document.getElementById('bgi'); return img.complete && img.naturalWidth > 0; });
@@ -36,6 +45,11 @@ async function main() {
           }
           assert.equal(await page.locator('#bgv').getAttribute('src'), 'assets/scenes/deep-barn-farm-background-6s.mp4');
           assert.ok(videoRequests.length > 0);
+          if (!embed) {
+            await page.waitForFunction(() => { const img = document.querySelector('#obj img'); return img.complete && img.naturalWidth > 0; });
+            assert.equal(await page.locator('#obj img').getAttribute('src'), 'assets/objects/barn.png');
+            assert.ok(objectRequests.length > 0, 'standalone demo retains its default object');
+          }
           console.log(JSON.stringify({ engine: name, embed, originalVideoRequestedWhenSelected: true, pass: true }));
           await page.close();
         }
