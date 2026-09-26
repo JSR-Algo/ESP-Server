@@ -266,9 +266,40 @@ document.documentElement.style.setProperty('--walk-dur',WALK_DUR+'s');
 
 /* Alpha clips: Safari needs HEVC-alpha .mov; Chrome/Edge/Firefox need VP9-alpha .webm.
    (Chrome would PLAY the .mov but drop the alpha layer → black box, so we pick by engine,
-   not by <source> order. file:// safe — no fetch, just video load events.) */
+   not by <source> order. file:// keeps direct video loading.) */
 const isSafari=/^((?!chrome|chromium|android|crios|edg).)*safari/i.test(navigator.userAgent);
 const EXT=isSafari?'mov':'webm';
+const referenceClipSources=new WeakMap();
+const referenceClipDownloads=new Map();
+function setReferenceClipSource(el,src){
+  if(referenceClipSources.get(el)?.src===src)return Promise.resolve(false);
+  const selection={src};
+  referenceClipSources.set(el,selection);
+  const apply=url=>{
+    if(referenceClipSources.get(el)!==selection)return false;
+    el.src=url;el.load();return true;
+  };
+  if(!/^https?:$/.test(location.protocol))return Promise.resolve(apply(src));
+  // Inline the original alpha bytes so native tail-index seeking needs no ranges.
+  // The four fixed clips are cached only for this document's lifetime.
+  if(!referenceClipDownloads.has(src)){
+    const download=fetch(src).then(response=>{
+      if(!response.ok)throw new Error('Reference clip HTTP '+response.status);
+      return response.blob();
+    }).then(blob=>new Promise((resolve,reject)=>{
+      const reader=new FileReader();
+      reader.onload=()=>resolve(reader.result);
+      reader.onerror=()=>reject(reader.error);
+      reader.readAsDataURL(blob);
+    }));
+    referenceClipDownloads.set(src,download);
+    download.catch(()=>referenceClipDownloads.delete(src));
+  }
+  return referenceClipDownloads.get(src).then(apply).catch(error=>{
+    if(referenceClipSources.get(el)===selection)referenceClipSources.delete(el);
+    throw error;
+  });
+}
 function loadClip(el,name){
   return new Promise(res=>{
     /* Alpha clips + the 6MB background clip load concurrently inside the authoring
@@ -276,8 +307,8 @@ function loadClip(el,name){
     const giveUp=setTimeout(()=>res(false),20000);
     el.addEventListener('loadeddata',()=>{clearTimeout(giveUp);res(true)},{once:true});
     el.addEventListener('error',()=>{clearTimeout(giveUp);res(false)},{once:true});
-    el.src='assets/robot-alive/flight/'+name+'.'+EXT;
-    el.load();
+    setReferenceClipSource(el,'assets/robot-alive/flight/'+name+'.'+EXT)
+      .catch(()=>{clearTimeout(giveUp);res(false);});
   });
 }
 function show(which){
@@ -443,13 +474,12 @@ document.getElementById('rawcode').addEventListener('click',async e=>{
     var g = document.getElementById('greetv');
     if (!g) return;
     var want = 'assets/robot-alive/flight/' + (kind === 'celebrate' ? 'celebrate' : 'greet-loop') + '.' + CLIP_EXT;
-    if (g.getAttribute('src') === want) return;
-    g.setAttribute('src', want);
-    try { g.load(); } catch (e) {}
-    if (getComputedStyle(g).display !== 'none') {
-      g.currentTime = 0;
-      var pl = g.play(); if (pl && pl.catch) pl.catch(function () {});
-    }
+    setReferenceClipSource(g, want).then(function (changed) {
+      if (changed && getComputedStyle(g).display !== 'none') {
+        g.currentTime = 0;
+        var pl = g.play(); if (pl && pl.catch) pl.catch(function () {});
+      }
+    }).catch(function () {});
   }
 
   function apply(p) {
