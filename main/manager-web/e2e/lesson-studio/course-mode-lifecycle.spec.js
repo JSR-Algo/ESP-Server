@@ -40,6 +40,8 @@ test('binds the selected seven-phase Course Mode sources through the admin picke
   const initial = await adminApi(page, 'GET', `/lessons/${fixture.lesson.id}/visuals`);
   await gotoAppRoute(page, `#/lesson-editor?lessonId=${fixture.lesson.id}`);
   const panel = page.getByTestId('course-mode-visual-selection');
+  await expect(panel).toBeVisible();
+  await assertNoUnexpectedPageErrors.waitForSettledRequests();
   for (const [slot, id] of Object.entries(selection.ids)) {
     await panel.getByTestId(`course-visual-${slot}`).locator('select').selectOption(id);
   }
