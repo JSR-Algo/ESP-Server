@@ -88,6 +88,8 @@ test('@s07-assets persists seven phase bindings and preserves activity image ver
   const firstStep=current.refs[0].stepKey;
   expect(override.refs.filter(r=>r.slot!=='backgroundScene'||r.stepKey!==firstStep)).toEqual(current.refs.filter(r=>r.slot!=='backgroundScene'||r.stepKey!==firstStep));
   expect(override.refs.find(r=>r.slot==='backgroundScene'&&r.stepKey===firstStep).assetVersionId).not.toBe(replacements.background);
+  // Finish frame decoding before replacing the document for the persistence check.
+  await stabilizeStageMedia(page.getByTestId('esp-tft-stage'));
   // Delay the real catalog response until saved refs render, exercising dynamic option hydration.
   await page.route(libraryRoute,async route=>{const response=await route.fetch();await new Promise(resolve=>setTimeout(resolve,500));await route.fulfill({response});});
   await page.reload();await expect(panel.getByTestId('course-visual-teach').locator('select')).toHaveValue(alternativeId);
