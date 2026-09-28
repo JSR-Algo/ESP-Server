@@ -206,6 +206,23 @@ async function chooseSelect(page, item, label) {
 
 test('canonical source imports, customizes, previews, publishes, and preserves v1 immutability', async ({ page }, testInfo) => {
   const assertNoUnexpectedPageErrors = monitorUnexpectedPageErrors(page);
+  const courseModePath = (lessonId) => `${apiRoot}/lessons/${lessonId}/course-mode`;
+  const expectMissingCourseMode = (lessonId) => {
+    const path = courseModePath(lessonId);
+    assertNoUnexpectedPageErrors.expectFault('GET', path, 404, 'legacy v1 lesson has no Course Mode contract');
+    return page.waitForResponse(response => response.request().method() === 'GET'
+      && new URL(response.url()).pathname === path);
+  };
+  const assertMissingCourseMode = async (responsePromise, lessonId) => {
+    const response = await responsePromise;
+    expect(response.request().method()).toBe('GET');
+    expect(new URL(response.url()).pathname).toBe(courseModePath(lessonId));
+    expect(response.status()).toBe(404);
+    expect(await response.json()).toMatchObject({
+      code: 'NOT_FOUND', message: 'Course Mode contract is not configured', retryable: false,
+      error: { code: 'NOT_FOUND', message: 'Course Mode contract is not configured' },
+    });
+  };
   const settleEditor = () => assertNoUnexpectedPageErrors.waitForSettledRequests();
   const previewBodies = new Map();
   const isManifestPreview = (response) => response.request().method() === 'GET'
@@ -293,7 +310,9 @@ test('canonical source imports, customizes, previews, publishes, and preserves v
     })]));
   }
 
+  const initialCourseMode = expectMissingCourseMode(fixture.lesson.id);
   await page.goto(`/login#/lesson-editor?lessonId=${fixture.lesson.id}&demoSource=tvideo-raw-code`);
+  await assertMissingCourseMode(initialCourseMode, fixture.lesson.id);
   await expect(page.getByRole('heading', { name: new RegExp(source.lesson.title) })).toBeVisible();
   await settleEditor();
   const sourceVideo = page.getByTestId('canonical-source-video');
@@ -350,7 +369,9 @@ test('canonical source imports, customizes, previews, publishes, and preserves v
   await finishResponse(saveResponse);
 
   await settleBeforeNavigation();
+  const reloadCourseMode = expectMissingCourseMode(fixture.lesson.id);
   await page.reload();
+  await assertMissingCourseMode(reloadCourseMode, fixture.lesson.id);
   await expect(page.getByRole('heading', { name: new RegExp(customizedTitle) })).toBeVisible();
   await settleEditor();
   await page.locator('.step-nav__item').nth(3).click();
@@ -391,13 +412,17 @@ test('canonical source imports, customizes, previews, publishes, and preserves v
   await page.goto('/login#/lesson-visual-library');
   await expect(page.getByRole('heading', { name: 'Shared visual library' })).toBeVisible();
   await settleBeforeNavigation();
+  const returnCourseMode = expectMissingCourseMode(fixture.lesson.id);
   await page.goto(`/login#/lesson-editor?lessonId=${fixture.lesson.id}`);
+  await assertMissingCourseMode(returnCourseMode, fixture.lesson.id);
   await expect(page.locator('.step-nav__item')).toHaveCount(originalStepCount + 1);
   await settleEditor();
   await page.locator('.step-nav__item').last().click();
   await expect(page.getByTestId('lesson-step-prompt')).toHaveValue(lifecyclePrompt);
   await settleBeforeNavigation();
+  const lifecycleReloadCourseMode = expectMissingCourseMode(fixture.lesson.id);
   await page.reload();
+  await assertMissingCourseMode(lifecycleReloadCourseMode, fixture.lesson.id);
   await expect(page.locator('.step-nav__item')).toHaveCount(originalStepCount + 1);
   await settleEditor();
   await page.locator('.step-nav__item').last().click();
@@ -490,8 +515,10 @@ test('canonical source imports, customizes, previews, publishes, and preserves v
   const publishResponse = page.waitForResponse((response) => response.url().endsWith(`/lessons/${fixture.lesson.id}/publish`) && response.status() === 200);
   await expect(page.getByRole('button', { name: /^publish$/i })).toBeEnabled();
   await page.getByRole('button', { name: /^publish$/i }).click();
+  const publishedCourseMode = expectMissingCourseMode(fixture.lesson.id);
   await confirmPublishReview(page);
   const published = (await (await finishResponse(publishResponse)).json()).data;
+  await assertMissingCourseMode(publishedCourseMode, fixture.lesson.id);
   // The confirmation shows twice: the page banner and the review dialog's result alert.
   await expect(page.locator('.el-alert__title')
     .filter({ hasText: `Published v${published.lessonVersion}` }).first()).toBeVisible();
@@ -518,7 +545,9 @@ test('canonical source imports, customizes, previews, publishes, and preserves v
   // Creating the next editable version moved out of the lesson list and onto the
   // lesson editor, as "Create editable version" (data-testid create-next-version).
   await settleBeforeNavigation();
+  const publishedReturnCourseMode = expectMissingCourseMode(fixture.lesson.id);
   await page.goto(`/login#/lesson-editor?lessonId=${fixture.lesson.id}`);
+  await assertMissingCourseMode(publishedReturnCourseMode, fixture.lesson.id);
   await expect(page.getByRole('heading', { name: new RegExp(customizedTitle) })).toBeVisible();
   await expect(page.locator('.step-nav__item')).toHaveCount(originalStepCount);
   await settleBeforeNavigation();
@@ -527,11 +556,33 @@ test('canonical source imports, customizes, previews, publishes, and preserves v
   await expect(page.getByTestId('create-course-mode-v5-version')).toHaveCount(0);
   const nextDraftResponse = page.waitForResponse((response) => response.url().endsWith(`/lessons/${fixture.lesson.id}/new-version`)
     && response.request().method() === 'POST' && response.status() === 201);
-  await newVersionButton.click();
-  const nextDraftHttpResponse = await finishResponse(nextDraftResponse);
+  let childCourseModeRequest;
+  const registerChildCourseMode = (request) => {
+    const path = new URL(request.url()).pathname;
+    if (childCourseModeRequest || request.method() !== 'GET'
+      || !/^\/nestjs\/v1\/admin\/lessons\/[0-9a-f-]{36}\/course-mode$/.test(path)) return;
+    // The child ID is unknown until creation completes. Register one concrete
+    // Request before its response, then prove its ID against the creation body.
+    childCourseModeRequest = request;
+    page.off('request', registerChildCourseMode);
+    assertNoUnexpectedPageErrors.expectFault('GET', path, 404, 'legacy v1 child has no Course Mode contract');
+  };
+  page.on('request', registerChildCourseMode);
+  const childCourseModeResponse = page.waitForResponse(response => response.request() === childCourseModeRequest);
+  let nextDraftHttpResponse;
+  let childMissingCourseMode;
+  try {
+    await newVersionButton.click();
+    nextDraftHttpResponse = await finishResponse(nextDraftResponse);
+    childMissingCourseMode = await childCourseModeResponse;
+  } finally {
+    page.off('request', registerChildCourseMode);
+  }
   expect(nextDraftHttpResponse.request().postDataJSON()).toEqual({});
   const nextDraft = (await nextDraftHttpResponse.json()).data;
   expect(nextDraft.manifest_version || nextDraft.manifestVersion).toBe('teebot-lesson-renderer.v1');
+  expect(childCourseModeRequest, 'created child must request its missing legacy contract').toBeTruthy();
+  await assertMissingCourseMode(childMissingCourseMode, nextDraft.id);
   await expect(page).toHaveURL(new RegExp(`lessonId=${nextDraft.id}`));
   await expect(page.getByRole('button', { name: 'Publish', exact: true })).toBeVisible();
   // Must differ from what v1 published (the parent draft already pinned corn
@@ -562,5 +613,12 @@ test('canonical source imports, customizes, previews, publishes, and preserves v
   const originalProjectionAfterDraftEdit = await api(page, 'GET', `/lessons/${fixture.lesson.id}/manifest-preview?profile=espTft`);
   expect(pinnedVisualIdentity(originalProjectionAfterDraftEdit.manifest)).toEqual(publishedPinnedVisuals);
   await settleBeforeNavigation();
+  const courseModeFaults = assertNoUnexpectedPageErrors.evidence.expectedFaults
+    .filter(fault => fault.path.endsWith('/course-mode'));
+  expect(courseModeFaults).toHaveLength(7);
+  expect(courseModeFaults.filter(fault => fault.method === 'GET'
+    && fault.path === courseModePath(fixture.lesson.id) && fault.status === 404)).toHaveLength(6);
+  expect(courseModeFaults.filter(fault => fault.method === 'GET'
+    && fault.path === courseModePath(nextDraft.id) && fault.status === 404)).toHaveLength(1);
   assertNoUnexpectedPageErrors();
 });

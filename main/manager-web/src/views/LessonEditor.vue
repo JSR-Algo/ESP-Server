@@ -144,7 +144,7 @@
           muted
           controls
           playsinline
-          preload="metadata"
+          preload="auto"
           :poster="canonicalDemo.adminPreview.posterUrl"
           :src="canonicalDemo.adminPreview.url"
         />
