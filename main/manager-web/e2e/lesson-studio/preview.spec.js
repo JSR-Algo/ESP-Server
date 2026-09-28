@@ -46,13 +46,22 @@ test('real admin previews the exact espTft scene and all response paths', async 
   // soon as steps load, so the 200 can land before any click.
   const previewResponse = page.waitForResponse((response) =>
     response.url().includes(`/lessons/${lesson.id}/manifest-preview`) && response.status() === 200);
+  const courseModePath = `/nestjs/v1/admin/lessons/${lesson.id}/course-mode`;
+  assertNoUnexpectedPageErrors.expectFault('GET', courseModePath, 404, 'legacy v1 lesson has no Course Mode contract');
+  const courseModeResponse = page.waitForResponse(response =>
+    response.request().method() === 'GET' && new URL(response.url()).pathname === courseModePath);
   await page.goto(`/login#/lesson-editor?lessonId=${lesson.id}`);
   await expect(page.getByRole('heading', { name: `Preview lesson ${runId}` })).toBeVisible();
-  // "Generate preview" lives in the empty state (v-else on previewManifest), so
-  // it is absent once the auto-preview has succeeded. Click it only if shown.
-  const generatePreview = page.getByRole('button', { name: 'Generate preview' });
-  if (await generatePreview.isVisible().catch(() => false)) await generatePreview.click();
-  await previewResponse;
+  const missingCourseMode = await courseModeResponse;
+  expect(missingCourseMode.status()).toBe(404);
+  expect(await missingCourseMode.json()).toMatchObject({
+    code: 'NOT_FOUND', message: 'Course Mode contract is not configured', retryable: false,
+    error: { code: 'NOT_FOUND', message: 'Course Mode contract is not configured' },
+  });
+  // The empty-state button disappears during auto-preview; await its actual body.
+  const preview = (await (await previewResponse).json()).data;
+  expect(preview.manifest.profile).toBe('espTft');
+  await assertNoUnexpectedPageErrors.waitForSettledRequests();
 
   const stage = page.getByTestId('esp-tft-stage');
   await expect(stage).toBeVisible();
@@ -92,6 +101,9 @@ test('real admin previews the exact espTft scene and all response paths', async 
   }
   await expect(stage.locator('.missing-visual')).toContainText('MOON');
   await expect(stage.locator('img.layer-teachingObject')).toHaveCount(0);
+  await assertNoUnexpectedPageErrors.waitForSettledRequests();
+  expect(assertNoUnexpectedPageErrors.evidence.expectedFaults.filter(fault =>
+    fault.method === 'GET' && fault.path === courseModePath && fault.status === 404)).toHaveLength(1);
   assertNoUnexpectedPageErrors();
 });
 

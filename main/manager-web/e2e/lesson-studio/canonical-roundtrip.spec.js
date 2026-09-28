@@ -204,8 +204,61 @@ async function chooseSelect(page, item, label) {
   await expect(option).toBeHidden();
 }
 
-test('canonical source imports, customizes, previews, publishes, and preserves v1 immutability', async ({ page }) => {
+test('canonical source imports, customizes, previews, publishes, and preserves v1 immutability', async ({ page }, testInfo) => {
   const assertNoUnexpectedPageErrors = monitorUnexpectedPageErrors(page);
+  const settleEditor = () => assertNoUnexpectedPageErrors.waitForSettledRequests();
+  const previewBodies = new Map();
+  const isManifestPreview = (response) => response.request().method() === 'GET'
+    && /\/lessons\/[^/]+\/manifest-preview\?profile=espTft$/.test(response.url());
+  page.on('response', (response) => {
+    if (!isManifestPreview(response) || response.status() !== 200) return;
+    const etag = response.headers().etag;
+    // Keep the actual browser's representation, not an APIRequestContext cache.
+    previewBodies.set(`${response.url()}\n${etag}`, response.json()
+      .then((body) => ({ body }), (error) => ({ error: error.message })));
+  });
+  const finishResponse = async (responsePromise) => {
+    const response = await responsePromise;
+    expect(await response.finished(), `complete response body: ${response.url()}`).toBeNull();
+    // Mutation callbacks start readback and sometimes an automatic preview.
+    await settleEditor();
+    return response;
+  };
+  const finishPreview = async (responsePromise) => {
+    const response = await finishResponse(responsePromise);
+    const etag = response.headers().etag;
+    expect(etag, 'manifest HTTP representation must have an ETag').toBeTruthy();
+    if (response.status() === 304) {
+      expect(await response.request().headerValue('if-none-match')).toBe(etag);
+    }
+    const cached = previewBodies.get(`${response.url()}\n${etag}`);
+    expect(cached, 'preview must reference an observed browser 200 representation').toBeTruthy();
+    const representation = await cached;
+    expect(representation.error).toBeUndefined();
+    const fresh = await page.request.get(response.url(), { headers: await adminAuthHeaders(page) });
+    expect(fresh.status()).toBe(200);
+    expect(fresh.headers().etag).toBe(etag);
+    const freshBody = await fresh.json();
+    expect(representation.body).toEqual(freshBody);
+    expect(freshBody.data.checksum).toBeTruthy();
+    expect(freshBody.data.etag).toBeTruthy();
+    await expect(page.getByTestId('preview-persistence-status')).toContainText(freshBody.data.checksum);
+  };
+  const settleBeforeNavigation = async () => {
+    await settleEditor();
+    const video = page.getByTestId('canonical-source-video');
+    if (await video.count()) {
+      // Metadata and a progressing clock do not prove the media request finished.
+      await video.evaluate((element) => { element.preload = 'auto'; });
+      await expect.poll(() => video.evaluate((element) => (
+        !element.error && element.networkState === HTMLMediaElement.NETWORK_IDLE
+        && Number.isFinite(element.duration) && element.buffered.length > 0
+        && element.buffered.start(0) === 0
+        && element.buffered.end(element.buffered.length - 1) >= element.duration - 0.05
+      )), { timeout: 15_000, message: 'canonical video fully buffered and network idle before navigation' }).toBe(true);
+    }
+    await settleEditor();
+  };
   test.setTimeout(240_000);
   const { source, assetManifest } = loadCanonicalFixture();
   const runId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
@@ -242,6 +295,7 @@ test('canonical source imports, customizes, previews, publishes, and preserves v
 
   await page.goto(`/login#/lesson-editor?lessonId=${fixture.lesson.id}&demoSource=tvideo-raw-code`);
   await expect(page.getByRole('heading', { name: new RegExp(source.lesson.title) })).toBeVisible();
+  await settleEditor();
   const sourceVideo = page.getByTestId('canonical-source-video');
   await expect(sourceVideo).toBeVisible();
   await expect(sourceVideo).toHaveAttribute('src', `/tvideo-demo/${assetManifest.adminPreview.path}`);
@@ -268,7 +322,7 @@ test('canonical source imports, customizes, previews, publishes, and preserves v
   const renameResponse = page.waitForResponse((response) => response.url().endsWith(`/lessons/${fixture.lesson.id}`)
     && response.request().method() === 'PATCH' && response.status() === 200);
   await renameDialog.getByRole('button', { name: 'Save' }).click();
-  await renameResponse;
+  await finishResponse(renameResponse);
   await expect(page.getByRole('heading', { name: new RegExp(customizedTitle) })).toBeVisible();
 
   await page.locator('.step-nav__item').nth(3).click();
@@ -293,10 +347,12 @@ test('canonical source imports, customizes, previews, publishes, and preserves v
 
   const saveResponse = page.waitForResponse((response) => response.url().includes(`/lessons/${fixture.lesson.id}/steps/`) && response.request().method() === 'PATCH' && response.status() === 200);
   await page.getByRole('button', { name: 'Save step' }).click();
-  await saveResponse;
+  await finishResponse(saveResponse);
 
+  await settleBeforeNavigation();
   await page.reload();
   await expect(page.getByRole('heading', { name: new RegExp(customizedTitle) })).toBeVisible();
+  await settleEditor();
   await page.locator('.step-nav__item').nth(3).click();
   await expect(page.getByTestId('lesson-step-prompt')).toHaveValue('Listen carefully, then greet the cow.');
   await expect(interactionItem(page, 'English teaching word').locator('input')).toHaveValue('BARN');
@@ -321,7 +377,7 @@ test('canonical source imports, customizes, previews, publishes, and preserves v
   const addStepResponse = page.waitForResponse((response) => response.url().endsWith(`/lessons/${fixture.lesson.id}/steps`)
     && response.request().method() === 'POST' && response.status() === 201);
   await stepDialog.getByRole('button', { name: 'Save' }).click();
-  await addStepResponse;
+  await finishResponse(addStepResponse);
   await expect(page.locator('.step-nav__item')).toHaveCount(originalStepCount + 1);
 
   await page.locator('.step-nav__item').last().click();
@@ -331,13 +387,19 @@ test('canonical source imports, customizes, previews, publishes, and preserves v
   await page.locator('.step-nav__item').last().click();
   await expect(page.getByTestId('lesson-step-prompt')).toHaveValue(lifecyclePrompt);
 
+  await settleBeforeNavigation();
   await page.goto('/login#/lesson-visual-library');
   await expect(page.getByRole('heading', { name: 'Shared visual library' })).toBeVisible();
+  await settleBeforeNavigation();
   await page.goto(`/login#/lesson-editor?lessonId=${fixture.lesson.id}`);
   await expect(page.locator('.step-nav__item')).toHaveCount(originalStepCount + 1);
+  await settleEditor();
   await page.locator('.step-nav__item').last().click();
   await expect(page.getByTestId('lesson-step-prompt')).toHaveValue(lifecyclePrompt);
+  await settleBeforeNavigation();
   await page.reload();
+  await expect(page.locator('.step-nav__item')).toHaveCount(originalStepCount + 1);
+  await settleEditor();
   await page.locator('.step-nav__item').last().click();
   await expect(page.getByTestId('lesson-step-prompt')).toHaveValue(lifecyclePrompt);
 
@@ -345,13 +407,13 @@ test('canonical source imports, customizes, previews, publishes, and preserves v
   const reorderResponse = page.waitForResponse((response) => response.url().endsWith(`/lessons/${fixture.lesson.id}/steps/reorder`)
     && response.request().method() === 'POST' && response.status() === 200);
   await lifecycleRow.getByRole('button', { name: '↑' }).click();
-  await reorderResponse;
+  await finishResponse(reorderResponse);
   await expect(page.locator('.step-nav__item').nth(originalStepCount - 1)).toContainText(lifecyclePrompt);
   const deleteResponse = page.waitForResponse((response) => response.url().includes(`/lessons/${fixture.lesson.id}/steps/`)
     && response.request().method() === 'DELETE' && response.status() === 200);
   await page.getByRole('row').filter({ hasText: lifecyclePrompt }).getByRole('button', { name: 'Delete' }).click();
   await page.getByRole('button', { name: /ok|confirm/i }).last().click();
-  await deleteResponse;
+  await finishResponse(deleteResponse);
   await expect(page.locator('.step-nav__item')).toHaveCount(originalStepCount);
   await page.locator('.step-nav__item').nth(3).click();
   await expect(page.getByTestId('lesson-step-prompt')).toHaveValue('Listen carefully, then greet the cow.');
@@ -377,25 +439,30 @@ test('canonical source imports, customizes, previews, publishes, and preserves v
 
   const validateResponse = page.waitForResponse((response) => response.url().endsWith(`/lessons/${fixture.lesson.id}/validate`) && response.status() === 200);
   await page.getByRole('button', { name: /validate/i }).click();
-  await validateResponse;
+  await finishResponse(validateResponse);
   await expect(page.locator('.readiness')).toContainText('READY');
   // budgetRows renders the branch-termination row as label "All paths" + PASS/FAIL.
   await expect(page.locator('.readiness')).toContainText('All pathsPASS');
 
-  const previewResponse = page.waitForResponse((response) => response.url().includes(`/lessons/${fixture.lesson.id}/manifest-preview`) && response.status() === 200);
+  await expect(page.getByRole('button', { name: /^preview$/i })).toBeEnabled();
+  const previewResponse = page.waitForResponse((response) => isManifestPreview(response)
+    && response.url().includes(`/lessons/${fixture.lesson.id}/manifest-preview`)
+    && [200, 304].includes(response.status()));
   await page.getByRole('button', { name: /^preview$/i }).click();
-  await previewResponse;
-  const screenshotDir = resolve(process.cwd(), 'output/playwright');
+  await finishPreview(previewResponse);
   for (const minutes of [3, 5, 8]) {
     await page.locator('label[role="radio"]').filter({ hasText: new RegExp(`^${minutes} min$`) }).click();
     const durationSave = page.waitForResponse((response) => response.url().includes(`/lessons/${fixture.lesson.id}/steps/`)
       && response.request().method() === 'PATCH' && response.status() === 200);
     await page.getByRole('button', { name: 'Save step' }).click();
-    await durationSave;
-    const durationPreview = page.waitForResponse((response) => response.url().includes(`/lessons/${fixture.lesson.id}/manifest-preview`) && response.status() === 200);
+    await finishResponse(durationSave);
+    await expect(page.getByRole('button', { name: /^preview$/i })).toBeEnabled();
+    const durationPreview = page.waitForResponse((response) => isManifestPreview(response)
+      && response.url().includes(`/lessons/${fixture.lesson.id}/manifest-preview`)
+      && [200, 304].includes(response.status()));
     await page.getByRole('button', { name: /^preview$/i }).click();
-    await durationPreview;
-    await page.getByTestId('esp-tft-stage').screenshot({ path: resolve(screenshotDir, `canonical-preview-${minutes}m.png`) });
+    await finishPreview(durationPreview);
+    await page.getByTestId('esp-tft-stage').screenshot({ path: testInfo.outputPath(`canonical-preview-${minutes}m.png`) });
   }
   // Scope to the response-path toolbar: labels like "Correct" also name
   // LessonSimulationPanel preset buttons, so an unscoped lookup is ambiguous.
@@ -412,19 +479,19 @@ test('canonical source imports, customizes, previews, publishes, and preserves v
   const revalidateResponse = page.waitForResponse((response) =>
     response.url().endsWith(`/lessons/${fixture.lesson.id}/validate`) && response.status() === 200);
   await page.getByRole('button', { name: /validate/i }).click();
-  await revalidateResponse;
+  await finishResponse(revalidateResponse);
 
   const simulateResponse = page.waitForResponse((response) =>
     response.url().includes(`/lessons/${fixture.lesson.id}/simulate`) && response.status() === 200);
   await page.getByRole('button', { name: 'Simulate', exact: true }).click();
-  await simulateResponse;
+  await finishResponse(simulateResponse);
   await expect(page.locator('.simulation-result')).toContainText('lesson_completed');
 
   const publishResponse = page.waitForResponse((response) => response.url().endsWith(`/lessons/${fixture.lesson.id}/publish`) && response.status() === 200);
   await expect(page.getByRole('button', { name: /^publish$/i })).toBeEnabled();
   await page.getByRole('button', { name: /^publish$/i }).click();
   await confirmPublishReview(page);
-  const published = (await (await publishResponse).json()).data;
+  const published = (await (await finishResponse(publishResponse)).json()).data;
   // The confirmation shows twice: the page banner and the review dialog's result alert.
   await expect(page.locator('.el-alert__title')
     .filter({ hasText: `Published v${published.lessonVersion}` }).first()).toBeVisible();
@@ -445,19 +512,23 @@ test('canonical source imports, customizes, previews, publishes, and preserves v
   const publishedRobotAsset = publishedProjection.manifest.steps[0].scene.robotOverlay.asset;
   expect(publishedRobotAsset.assetKey).toBe(`canonical.${runId}.${source.visuals.robotOverlay}`);
 
+  await settleBeforeNavigation();
   await page.goto(`/login#/course-lessons?courseId=${fixture.course.id}&title=${encodeURIComponent(fixture.course.title)}`);
   await expect(page.getByRole('row').filter({ hasText: customizedTitle }).first()).toContainText('published');
   // Creating the next editable version moved out of the lesson list and onto the
   // lesson editor, as "Create editable version" (data-testid create-next-version).
+  await settleBeforeNavigation();
   await page.goto(`/login#/lesson-editor?lessonId=${fixture.lesson.id}`);
   await expect(page.getByRole('heading', { name: new RegExp(customizedTitle) })).toBeVisible();
+  await expect(page.locator('.step-nav__item')).toHaveCount(originalStepCount);
+  await settleBeforeNavigation();
   const newVersionButton = page.getByTestId('create-next-version');
   await expect(newVersionButton).toHaveCount(1);
   await expect(page.getByTestId('create-course-mode-v5-version')).toHaveCount(0);
   const nextDraftResponse = page.waitForResponse((response) => response.url().endsWith(`/lessons/${fixture.lesson.id}/new-version`)
     && response.request().method() === 'POST' && response.status() === 201);
   await newVersionButton.click();
-  const nextDraftHttpResponse = await nextDraftResponse;
+  const nextDraftHttpResponse = await finishResponse(nextDraftResponse);
   expect(nextDraftHttpResponse.request().postDataJSON()).toEqual({});
   const nextDraft = (await nextDraftHttpResponse.json()).data;
   expect(nextDraft.manifest_version || nextDraft.manifestVersion).toBe('teebot-lesson-renderer.v1');
@@ -474,7 +545,7 @@ test('canonical source imports, customizes, previews, publishes, and preserves v
   const childVisualTile = page.getByTestId('lesson-object-selector').locator('.asset-tile')
     .filter({ hasText: childVisualKey });
   await childVisualTile.locator('.asset-tile__select').click();
-  const childVisualSaveResponse = await childVisualSave;
+  const childVisualSaveResponse = await finishResponse(childVisualSave);
   const childVisualPayload = childVisualSaveResponse.request().postDataJSON();
   expect(childVisualPayload).toEqual({
     backgroundAssetVersionId: fixture.versions.get(source.visuals.backgroundScene),
@@ -490,5 +561,6 @@ test('canonical source imports, customizes, previews, publishes, and preserves v
   expect(originalAfterDraftEdit.manifest_checksum || originalAfterDraftEdit.manifestChecksum).toBe(published.checksum);
   const originalProjectionAfterDraftEdit = await api(page, 'GET', `/lessons/${fixture.lesson.id}/manifest-preview?profile=espTft`);
   expect(pinnedVisualIdentity(originalProjectionAfterDraftEdit.manifest)).toEqual(publishedPinnedVisuals);
+  await settleBeforeNavigation();
   assertNoUnexpectedPageErrors();
 });

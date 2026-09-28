@@ -55,13 +55,15 @@ async function createLegacyFixtureCourse(page, courseKey) {
   const sourceLessonId = process.env.LESSON_STUDIO_E2E_VISUAL_SOURCE_LESSON_ID
     || '00000006-0002-0000-0000-000000000001';
   const sourceBundle = await adminApi(page, 'GET', `/lessons/${sourceLessonId}/assets?profile=espTft`);
-  const sourceAsset = sourceBundle.assets.find(asset => asset.profile === 'espTft'
+  const sourceAssets = sourceBundle.assets.filter(asset => asset.profile === 'espTft'
     && /^image\/(png|jpeg)$/.test(asset.mediaType) && /^https?:\/\//.test(asset.url || '')
     && asset.width > 0 && asset.height > 0 && asset.width * asset.height * 2 <= 153600
     && (asset.layer === 'backgroundScene' ? asset.width <= 480 && asset.height <= 320
       : ['teachingObject', 'robotOverlay'].includes(asset.layer) && Math.max(asset.width, asset.height) <= 192));
-  expect(sourceAsset, `source lesson ${sourceLessonId} must have a real legacy-compatible espTft image bundle`).toBeTruthy();
-  await verifyImageBytes(page, { ...sourceAsset, asset_key: sourceAsset.assetKey, mime_type: sourceAsset.mediaType });
+  expect(sourceAssets.length, `source lesson ${sourceLessonId} must have a real legacy-compatible espTft image bundle`).toBeGreaterThan(0);
+  for (const asset of sourceAssets) {
+    await verifyImageBytes(page, { ...asset, asset_key: asset.assetKey, mime_type: asset.mediaType });
+  }
   const course = await adminApi(page, 'POST', '/courses', { courseKey, title: courseKey, locale: 'en-US', ageBand: '4-6' });
   const lesson = await adminApi(page, 'POST', `/courses/${course.id}/lessons`, {
     lessonKey: courseKey, title: courseKey, locale: 'en-US', ageBand: '4-6',
@@ -79,14 +81,16 @@ async function createLegacyFixtureCourse(page, courseKey) {
       },
     }));
   }
-  // Visual refs do not create bundles. The canonical attachment command does.
-  await adminApi(page, 'POST', `/lessons/${lesson.id}/assets`, { profile: 'espTft', sourceAssetId: sourceAsset.assetId });
+  // Attach the whole verified image set, including the poses required by authored steps.
+  for (const asset of sourceAssets) {
+    await adminApi(page, 'POST', `/lessons/${lesson.id}/assets`, { profile: 'espTft', sourceAssetId: asset.assetId });
+  }
   const attached = await adminApi(page, 'GET', `/lessons/${lesson.id}/assets?profile=espTft`);
   expect(attached.profiles, 'fixture must have an actual espTft bundle before preview/publish').toContain('espTft');
-  expect(attached.assets).toEqual(expect.arrayContaining([expect.objectContaining({
-    assetKey: sourceAsset.assetKey, sha256: sourceAsset.sha256, bytes: sourceAsset.bytes,
-    mediaType: sourceAsset.mediaType, width: sourceAsset.width, height: sourceAsset.height,
-  })]));
+  expect(attached.assets).toEqual(expect.arrayContaining(sourceAssets.map(asset => expect.objectContaining({
+    assetKey: asset.assetKey, sha256: asset.sha256, bytes: asset.bytes,
+    mediaType: asset.mediaType, width: asset.width, height: asset.height,
+  }))));
   return { course, lesson, steps, stepKey: steps[0].step_key };
 }
 
