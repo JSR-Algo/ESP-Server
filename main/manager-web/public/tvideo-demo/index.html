@@ -523,7 +523,8 @@ document.getElementById('rawcode').addEventListener('click',async e=>{
         }
       }
       var oi = document.querySelector('#obj img');
-      if (oi && (p.obj || !oi.getAttribute('src'))) oi.src = p.obj || 'assets/objects/barn.png';
+      if (oi && p.obj) oi.src = p.obj;
+      else if (oi && !oi.getAttribute('src') && params.get('embed') !== '1') oi.src = 'assets/objects/barn.png';
       if (p.word !== undefined) { var tw = document.querySelector('#obj .tagword'); if (tw) tw.textContent = p.word; var im = document.querySelector('#obj img'); if (im) im.alt = p.word; }
       if (p.stepId !== undefined || p.stepText !== undefined) { var k = document.querySelector('.stepcard .k'); if (k) k.innerHTML = '<b>' + esc(p.stepId || '') + '</b> ' + esc(p.stepText || ''); }
       if (p.prompt !== undefined) { var pp = document.querySelector('.stepcard p'); if (pp) pp.textContent = p.prompt || ''; }

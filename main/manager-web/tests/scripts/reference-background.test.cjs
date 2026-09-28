@@ -38,9 +38,19 @@ test('embedded object waits for authoring and retains the selected image on empt
   assert.equal(fixture.object.src, 'selected.png');
 });
 
-test('first missing or empty object retains the standalone fallback choice', () => {
+test('first missing or empty embedded object waits for authored content', () => {
   for (const payload of [{}, { obj: '' }, { replay: true }]) {
     const fixture = embed();
+    fixture.apply(payload);
+    assert.equal(fixture.object.src, '');
+    fixture.apply({ obj: 'selected.png' });
+    assert.equal(fixture.object.src, 'selected.png');
+  }
+});
+
+test('standalone missing or empty object retains the barn fallback', () => {
+  for (const payload of [{}, { obj: '' }, { replay: true }]) {
+    const fixture = embed('');
     fixture.apply(payload);
     assert.equal(fixture.object.src, 'assets/objects/barn.png');
     fixture.apply({ obj: 'selected.png' });

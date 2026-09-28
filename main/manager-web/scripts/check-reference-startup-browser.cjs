@@ -2,7 +2,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const http = require('node:http');
-const { chromium, webkit } = require('@playwright/test');
+const { chromium, webkit, expect } = require('@playwright/test');
 
 async function main() {
   const root = path.resolve(__dirname, '../public/tvideo-demo');
@@ -30,6 +30,18 @@ async function main() {
           if (embed) {
             assert.equal(await page.locator('#obj img').getAttribute('src'), null, 'embedded preview must wait for authored object');
             assert.equal(objectRequests.length, 0, 'embedded preview must not start an unused default object request');
+            await page.evaluate(() => {
+              window.__emptyObjectUpdates = 0;
+              addEventListener('message', event => {
+                if (event.data?.type === 'tvideo-params' && !event.data.payload?.obj) window.__emptyObjectUpdates++;
+              });
+              for (const payload of [{ obj: '', word: '' }, { prompt: 'Waiting for selected content' }, { replay: true }]) {
+                window.postMessage({ type: 'tvideo-params', payload }, location.origin);
+              }
+            });
+            await page.waitForFunction(() => window.__emptyObjectUpdates === 3);
+            assert.equal(await page.locator('#obj img').getAttribute('src'), null, 'empty embedded updates must not choose the standalone barn');
+            assert.equal(objectRequests.length, 0, 'empty embedded updates must not fetch default barn bytes');
             await page.evaluate(() => window.postMessage({ type: 'tvideo-params', payload: { obj: 'assets/objects/barn.png?selected=1', word: 'selected barn' } }, location.origin));
             await page.waitForFunction(() => { const img = document.querySelector('#obj img'); return img.complete && img.naturalWidth > 0; });
             assert.equal(await page.locator('#obj img').getAttribute('src'), 'assets/objects/barn.png?selected=1');
@@ -44,7 +56,7 @@ async function main() {
             await selected;
           }
           assert.equal(await page.locator('#bgv').getAttribute('src'), 'assets/scenes/deep-barn-farm-background-6s.mp4');
-          assert.ok(videoRequests.length > 0);
+          await expect.poll(() => videoRequests.length).toBeGreaterThan(0);
           if (!embed) {
             await page.waitForFunction(() => { const img = document.querySelector('#obj img'); return img.complete && img.naturalWidth > 0; });
             assert.equal(await page.locator('#obj img').getAttribute('src'), 'assets/objects/barn.png');
