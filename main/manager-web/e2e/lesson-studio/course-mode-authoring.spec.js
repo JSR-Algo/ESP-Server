@@ -88,14 +88,57 @@ test('@s07-assets persists seven phase bindings and preserves activity image ver
   const firstStep=current.refs[0].stepKey;
   expect(override.refs.filter(r=>r.slot!=='backgroundScene'||r.stepKey!==firstStep)).toEqual(current.refs.filter(r=>r.slot!=='backgroundScene'||r.stepKey!==firstStep));
   expect(override.refs.find(r=>r.slot==='backgroundScene'&&r.stepKey===firstStep).assetVersionId).not.toBe(replacements.background);
-  // Finish frame decoding before replacing the document for the persistence check.
-  await stabilizeStageMedia(page.getByTestId('esp-tft-stage'));
   // Delay the real catalog response until saved refs render, exercising dynamic option hydration.
   await page.route(libraryRoute,async route=>{const response=await route.fetch();await new Promise(resolve=>setTimeout(resolve,500));await route.fulfill({response});});
-  await page.reload();await expect(panel.getByTestId('course-visual-teach').locator('select')).toHaveValue(alternativeId);
+  // Request reload at the native decode boundary; retain settlement timing separately.
+  const stage = page.getByTestId('esp-tft-stage');
+  await expect.poll(async () => (await stagePlaybackState(stage)).ready).toBe(true);
+  const navigation = page.waitForNavigation();
+  const reloadToken = require('node:crypto').randomUUID();
+  await stage.evaluate((element, token) => {
+    const player = element.querySelector('.layer-robotOverlay').__vue__._mjpeg;
+    const decode = player.decode;
+    const key = 'c04-decode-reload';
+    sessionStorage.removeItem(key);
+    player.decode = blob => {
+      player.decode = decode;
+      const pending = decode(blob);
+      if (!pending || typeof pending.then !== 'function') throw new Error('Expected native decode promise');
+      const evidence = { token, started: true, settled: false, settledAtReload: false, state: player.state() };
+      const save = () => sessionStorage.setItem(key, JSON.stringify(evidence));
+      save();
+      pending.then(() => { evidence.settled = true; save(); }, error => {
+        evidence.settled = true; evidence.rejection = error.message; save();
+      });
+      window.addEventListener('pagehide', () => {
+        evidence.pagehide = true; evidence.settledAtPagehide = evidence.settled; save();
+      }, { once: true });
+      location.reload();
+      return pending;
+    };
+    player.seek(player.time < 0.5 ? 0.8 : 0.1);
+  }, reloadToken);
+  await navigation;
+  const reloadEvidence = await page.evaluate(() => JSON.parse(sessionStorage.getItem('c04-decode-reload')));
+  expect(reloadEvidence.token).toBe(reloadToken);
+  expect(reloadEvidence.started).toBe(true);
+  expect(reloadEvidence.settledAtReload).toBe(false);
+  expect(reloadEvidence.rejection).toBeUndefined();
+  expect(reloadEvidence.state.pending).toBe(true);
+  expect(reloadEvidence.pagehide).toBe(true);
+  await testInfo.attach('active-decode-reload', { body: JSON.stringify(reloadEvidence), contentType: 'application/json' });
+  await expect(panel.getByTestId('course-visual-teach').locator('select')).toHaveValue(alternativeId);
   await expect(panel).not.toContainText('Loading asset library...');
   await expect(panel.getByTestId('course-visual-teach').locator('select')).toHaveValue(alternativeId);
   await page.unroute(libraryRoute);
+  await expect.poll(async () => (await stagePlaybackState(stage)).ready).toBe(true);
+  expect(await stage.evaluate(element => {
+    const canvas = element.querySelector('.layer-robotOverlay canvas');
+    if (!canvas || !canvas.width || !canvas.height) return false;
+    const pixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+    return pixels.some((value, index) => index % 4 === 3 && value > 0);
+  }), 'replacement document presents decoded overlay pixels').toBe(true);
+  await stage.screenshot({ path: testInfo.outputPath('active-reload-preview.png') });
   await expect(panel.getByTestId('course-visual-background').locator('select')).toHaveValue(override.refs.find(r=>r.slot==='backgroundScene').assetVersionId);
   await expect(panel.getByTestId('course-visual-object').locator('select')).toHaveValue(replacements.object);
   for (const width of [1440, 390]) {
