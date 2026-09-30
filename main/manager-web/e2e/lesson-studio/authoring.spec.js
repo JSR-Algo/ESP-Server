@@ -39,8 +39,32 @@ test('admin creates and persists an eight-minute safe-speaking lesson draft', as
     response.url().includes('/nestjs/v1/admin/courses/')
       && response.url().endsWith('/lessons')
       && response.request().method() === 'POST');
+  const expectedDraftReads = [];
+  const draftReadsRegistered = createLesson.then(async response => {
+    const { data: lesson } = await response.json();
+    const courseModePath = `/nestjs/v1/admin/lessons/${lesson.id}/course-mode`;
+    const previewPath = `/nestjs/v1/admin/lessons/${lesson.id}/manifest-preview`;
+    for (let count = 0; count < 2; count += 1) {
+      assertNoUnexpectedPageErrors.expectFault('GET', courseModePath, 404, 'blank draft has no Course Mode contract');
+    }
+    for (let count = 0; count < 3; count += 1) {
+      assertNoUnexpectedPageErrors.expectFault('GET', previewPath, 422, 'blank draft has no espTft asset bundle');
+    }
+    page.on('response', response => {
+      const url = new URL(response.url());
+      if (response.request().method() !== 'GET') return;
+      if (url.pathname === courseModePath) {
+        expectedDraftReads.push(response.json().then(body => ({ kind: 'courseMode', status: response.status(), body }))
+          .catch(error => ({ error: error.message })));
+      } else if (url.pathname === previewPath) {
+        expectedDraftReads.push(response.json().then(body => ({ kind: 'preview', status: response.status(),
+          profile: url.searchParams.get('profile'), body })).catch(error => ({ error: error.message })));
+      }
+    });
+  });
   await lessonDialog.getByRole('button', { name: 'Save' }).click();
   expect((await createLesson).status()).toBe(201);
+  await draftReadsRegistered;
   await expect(page.getByRole('heading', { name: new RegExp(`Safe Speaking ${runId}`) })).toBeVisible();
 
   await page.getByRole('button', { name: '+ Add step' }).click();
@@ -60,8 +84,20 @@ test('admin creates and persists an eight-minute safe-speaking lesson draft', as
   const saveStep = page.waitForResponse((response) =>
     response.url().includes('/steps/') && response.request().method() === 'PATCH');
   await page.getByRole('button', { name: 'Save step' }).click();
-  expect((await saveStep).status()).toBe(200);
+  const savedStep = await saveStep;
+  expect(savedStep.status()).toBe(200);
+  expect(await savedStep.finished()).toBeNull();
+  await assertNoUnexpectedPageErrors.waitForSettledRequests();
+  // Fonts are outside the API/image journal and must finish before reload too.
+  await page.evaluate(() => document.fonts.ready.then(() => undefined));
+  const lessonId = new URLSearchParams(page.url().split('?')[1]).get('lessonId');
+  const reloadedPreview = page.waitForResponse(response =>
+    new URL(response.url()).pathname === `/nestjs/v1/admin/lessons/${lessonId}/manifest-preview`
+      && response.request().method() === 'GET');
   await page.reload();
+  // Automatic preview temporarily disables proof actions after the editor loads.
+  expect(await (await reloadedPreview).finished()).toBeNull();
+  await assertNoUnexpectedPageErrors.waitForSettledRequests();
 
   await expect(eightMinutes.locator('input[type="radio"]')).toBeChecked();
   const authoredValues = await page.locator('input, textarea').evaluateAll((elements) =>
@@ -78,8 +114,8 @@ test('admin creates and persists an eight-minute safe-speaking lesson draft', as
     response.url().includes('/nestjs/v1/admin/lessons/')
       && response.url().endsWith('/validate')
       && response.request().method() === 'POST');
-  const lessonId = new URLSearchParams(page.url().split('?')[1]).get('lessonId');
   assertNoUnexpectedPageErrors.expectFault('POST', `/nestjs/v1/admin/lessons/${lessonId}/validate`, 422, 'draft has no asset bundle');
+  await expect(page.getByRole('button', { name: 'Validate' })).toBeEnabled();
   await page.getByRole('button', { name: 'Validate' }).click();
   const validationResponse = await validateLesson;
   expect(validationResponse.status()).toBe(422);
@@ -90,5 +126,19 @@ test('admin creates and persists an eight-minute safe-speaking lesson draft', as
   await expect(page.getByText(validationBody.message).first()).toBeVisible();
   await expect(page.getByTestId('validation-result').getByText(validationBody.message))
     .toBeVisible();
+  await assertNoUnexpectedPageErrors.waitForSettledRequests();
+  expect(expectedDraftReads).toHaveLength(5);
+  const draftReads = await Promise.all(expectedDraftReads);
+  expect(draftReads.filter(read => read.kind === 'courseMode')).toHaveLength(2);
+  expect(draftReads.filter(read => read.kind === 'preview')).toHaveLength(3);
+  for (const read of draftReads) {
+    if (read.kind === 'courseMode') {
+      expect(read).toMatchObject({ status: 404,
+        body: { code: 'NOT_FOUND', message: 'Course Mode contract is not configured' } });
+    } else {
+      expect(read).toMatchObject({ kind: 'preview', status: 422, profile: 'espTft',
+        body: { code: 'ASSET_PROFILE_UNAVAILABLE', details: { profile: 'espTft' } } });
+    }
+  }
   assertNoUnexpectedPageErrors();
 });

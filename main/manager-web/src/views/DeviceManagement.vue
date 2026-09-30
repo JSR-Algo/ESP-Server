@@ -243,6 +243,8 @@ export default {
       selectedChildId: '',
       childOptions: [],
       childLoading: false,
+      childRequestId: 0,
+      childRequestsDestroyed: false,
       loading: false,
       userApi: null,
       firmwareTypes: [],
@@ -309,6 +311,9 @@ export default {
     this.getFirmwareTypes()
     this.fetchChildOptions('')
   },
+  beforeDestroy() {
+    this.childRequestsDestroyed = true;
+  },
   methods: {
     async getFirmwareTypes() {
       try {
@@ -331,14 +336,18 @@ export default {
       this.fetchChildOptions(keyword || '');
     },
     fetchChildOptions(keyword) {
+      if (this.childRequestsDestroyed) return;
+      const requestId = ++this.childRequestId;
       this.childLoading = true;
       Api.courseInsights.listLearners(
         { keyword: (keyword || '').trim(), limit: 50 },
         (rows) => {
+          if (this.childRequestsDestroyed || requestId !== this.childRequestId) return;
           this.childLoading = false;
           this.childOptions = rows;
         },
         () => {
+          if (this.childRequestsDestroyed || requestId !== this.childRequestId) return;
           this.childLoading = false;
           this.childOptions = [];
         },

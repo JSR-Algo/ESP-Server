@@ -70,6 +70,7 @@ test('admin manages disposable shared visuals across clone, selected, global, an
   await expect(page.getByTestId('visual-detail-facts')).toContainText(`${mobileImage.width} × ${mobileImage.height}`);
   await expect(page.getByTestId('visual-detail-comparison')).toContainText(`${targetImage.width} × ${targetImage.height}`);
   await chooseSingleSelect(page, 'visual-detail-source-version', /^v1 · espTft · published$/, 'v1 · espTft · published');
+  await assertNoUnexpectedPageErrors.waitForSettledRequests();
   await expect(page.getByTestId('visual-detail-usage-table').getByRole('row')).toHaveCount(5);
   await page.getByTestId('visual-detail-target-version').click();
   await expect(page.locator('.el-select-dropdown__item:visible').filter({ hasText: /mobile/ })).toHaveCount(0);
@@ -86,9 +87,12 @@ test('admin manages disposable shared visuals across clone, selected, global, an
   const clonedDetail = await visualDetail(page, cloneResult.clonedAssetKey, cloneResult.clonedVersionId);
   expect(usageLessonIds(clonedDetail)).toEqual([fixtures.clone.lesson.id]);
 
+  // Replacement callbacks reload the original visual after the POST body resolves.
+  await assertNoUnexpectedPageErrors.waitForSettledRequests();
   await page.reload();
   await expect(page.getByRole('heading', { name: assetKey })).toBeVisible();
   await chooseSingleSelect(page, 'visual-detail-source-version', /^v1 · espTft · published$/, 'v1 · espTft · published');
+  await assertNoUnexpectedPageErrors.waitForSettledRequests();
   await chooseSingleSelect(page, 'visual-detail-target-version', /^v2 · espTft · published$/, 'v2 · espTft · published');
   await page.getByTestId('visual-detail-replacement-mode').getByText('selectedLessons').click();
   await page.getByTestId('visual-detail-lessons').click();
@@ -106,8 +110,10 @@ test('admin manages disposable shared visuals across clone, selected, global, an
   let targetDetail = await visualDetail(page, assetKey, target.id);
   expect(usageLessonIds(targetDetail)).toEqual(expect.arrayContaining([fixtures.selected.lesson.id, selectedResult.branchedLessonIds[0]]));
 
+  await assertNoUnexpectedPageErrors.waitForSettledRequests();
   await page.reload();
   await chooseSingleSelect(page, 'visual-detail-source-version', /^v1 · espTft · published$/, 'v1 · espTft · published');
+  await assertNoUnexpectedPageErrors.waitForSettledRequests();
   await chooseSingleSelect(page, 'visual-detail-target-version', /^v2 · espTft · published$/, 'v2 · espTft · published');
   await page.getByTestId('visual-detail-replacement-mode').getByText('global').click();
   await page.getByTestId('visual-detail-review-replacement').click();
@@ -126,5 +132,6 @@ test('admin manages disposable shared visuals across clone, selected, global, an
     selectedResult.branchedLessonIds[0],
     globalResult.branchedLessonIds[0],
   ]));
+  await assertNoUnexpectedPageErrors.waitForSettledRequests();
   assertNoUnexpectedPageErrors();
 });

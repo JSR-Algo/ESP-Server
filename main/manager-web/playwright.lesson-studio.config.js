@@ -14,7 +14,12 @@ module.exports = defineConfig({
   workers: 1,
   retries: 0,
   reporter: [['list'], ['html', { outputFolder: path.join(outputRoot, 'report'), open: 'never' }]],
-  projects: courseModeConfig.projects.map(project => ({ ...project, name: project.name.replace('course-mode-', 'lesson-studio-') })),
+  projects: courseModeConfig.projects.map(project => ({
+    ...project,
+    name: project.name.replace('course-mode-', 'lesson-studio-'),
+    // Both suites use the same devices and reviewed source-bound baselines.
+    snapshotPathTemplate: `{testDir}/{testFilePath}-snapshots/{arg}-${project.name}-{platform}{ext}`,
+  })),
   use: {
     baseURL: lessonStudioWebOrigin(),
     trace: 'retain-on-failure',

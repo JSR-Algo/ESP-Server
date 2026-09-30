@@ -716,7 +716,8 @@ test('Task 4 release commands run candidate-bound NEW and ROLLBACK orchestration
   const session = readFileSync(resolve(__dirname, '../e2e/lesson-studio/helpers/session.js'), 'utf8');
   assert.match(fixture, /reachable\.port = '8443'/);
   assert.doesNotMatch(fixture, /reachable\.hostname = 'host\.docker\.internal'/);
-  assert.match(session, /page\.route\(\/\^https:\\\/\\\/task4-media\\\.localhost/);
+  assert.ok(session.includes('const task4MediaPattern = /^https:\\/\\/task4-media\\.localhost:\\d+\\/(?:tvideo-demo\\/|flattened-cinematic\\/)/;'));
+  assert.match(session, /page\.route\(task4MediaPattern,/);
   assert.match(session, /ca,\s*servername: 'task4-media\.localhost'/s);
   assert.doesNotMatch(session, /ignoreHTTPSErrors|rejectUnauthorized:\s*false/);
   assert.match(fixture, /reachable\.hostname === 'task4-media\.localhost'/);

@@ -1,4 +1,41 @@
 // Runs in a mounted fixture using the actual preview, controls and image decoder.
+window.verifyResponsiveStage = async function verifyResponsiveStage(manifest, mount = true) {
+  const rows = [];
+  if (mount) await window.mountFixture(manifest, 314);
+  const root = window.preview.$el;
+  for (const width of [314, 240, 360, 600, 314]) {
+    root.style.width = width + 'px';
+    const stage = root.querySelector('[data-testid="esp-tft-stage"]');
+    const shell = stage.parentElement;
+    let geometry;
+    for (let attempt = 0; attempt < 100; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      const bounds = stage.getBoundingClientRect();
+      const outer = shell.getBoundingClientRect();
+      const css = getComputedStyle(shell);
+      const available = shell.clientWidth - parseFloat(css.paddingLeft) - parseFloat(css.paddingRight);
+      geometry = { width: bounds.width, height: bounds.height, available, left: bounds.left, right: bounds.right,
+        shellLeft: outer.left + parseFloat(css.paddingLeft), shellRight: outer.right - parseFloat(css.paddingRight),
+        top: bounds.top, bottom: bounds.bottom, shellTop: outer.top, shellBottom: outer.bottom,
+        clientWidth: stage.clientWidth, clientHeight: stage.clientHeight, scrollLeft: shell.scrollLeft,
+        controls: [...root.querySelectorAll('button, input')].filter(el => el.getClientRects().length).map(el => {
+          const rect = el.getBoundingClientRect();
+          return { text: el.textContent || el.getAttribute('aria-label'), left: rect.left, right: rect.right };
+        }), rootLeft: root.getBoundingClientRect().left, rootRight: root.getBoundingClientRect().right };
+      if (Math.abs(bounds.width - Math.min(480, available)) < 1 && bounds.left >= geometry.shellLeft - 0.5
+        && bounds.right <= geometry.shellRight + 0.5 && stage.clientWidth === 480 && stage.clientHeight === 320) break;
+    }
+    rows.push({ action: 'responsive-stage-' + width, ...geometry,
+      pass: Math.abs(geometry.width - Math.min(480, geometry.available)) < 1
+        && Math.abs(geometry.height - geometry.width * 320 / 480) < 1
+        && geometry.left >= geometry.shellLeft - 0.5 && geometry.right <= geometry.shellRight + 0.5
+        && geometry.top >= geometry.shellTop && geometry.bottom <= geometry.shellBottom
+        && geometry.controls.every(rect => rect.left >= geometry.rootLeft && rect.right <= geometry.rootRight)
+        && geometry.clientWidth === 480 && geometry.clientHeight === 320 && geometry.scrollLeft === 0 });
+  }
+  return rows;
+};
+
 window.verifyMjpegReplay = async function verifyMjpegReplay(manifest, replacement) {
   const rows = [];
   const waitFor = async (predicate, label) => {

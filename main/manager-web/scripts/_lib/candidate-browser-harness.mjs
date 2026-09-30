@@ -97,7 +97,12 @@ async function defaultWaitForDevToolsPort(path, timeoutMs, signal) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (signal?.aborted) throw signal.reason || new Error('DevTools readiness aborted');
-    if (existsSync(path)) return readFileSync(path, 'utf8');
+    if (existsSync(path)) {
+      const contents = readFileSync(path, 'utf8');
+      // Chromium creates the file before finishing the port line.
+      const match = /^([1-9]\d{0,4})\r?\n/.exec(contents);
+      if (match && Number(match[1]) <= 65535) return contents;
+    }
     await delay(50);
   }
   throw new Error(`DevToolsActivePort timed out after ${timeoutMs}ms`);

@@ -356,6 +356,9 @@ export default {
     return {
       list: [],
       loading: false,
+      listRequestId: 0,
+      courseContextId: 0,
+      requestsDestroyed: false,
       dialogVisible: false,
       editingMetadata: false,
       saving: false,
@@ -426,6 +429,28 @@ export default {
       });
     },
   },
+  watch: {
+    courseId() {
+      this.courseContextId += 1;
+      this.listRequestId += 1;
+      this.list = [];
+      this.loading = false;
+      this.dialogVisible = false;
+      this.saving = false;
+      this.resetForm();
+      this.resetAssignmentDialog();
+      if (!this.courseId) {
+        this.$router.replace('/course-management');
+        return;
+      }
+      this.fetchList();
+    },
+  },
+  beforeDestroy() {
+    this.requestsDestroyed = true;
+    this.courseContextId += 1;
+    this.resetAssignmentDialog();
+  },
   created() {
     if (!this.courseId) {
       this.$router.replace('/course-management');
@@ -463,14 +488,19 @@ export default {
       };
     },
     fetchList() {
+      if (this.requestsDestroyed || !this.courseId) return;
+      const requestId = ++this.listRequestId;
+      const courseId = this.courseId;
       this.loading = true;
       Api.lesson.listAuthoritativeLessons(
         this.courseId,
         (rows) => {
+          if (this.requestsDestroyed || requestId !== this.listRequestId || courseId !== this.courseId) return;
           this.loading = false;
           this.list = rows;
         },
         (msg) => {
+          if (this.requestsDestroyed || requestId !== this.listRequestId || courseId !== this.courseId) return;
           this.loading = false;
           this.$message.error(msg || this.$t('lesson.loadFail'));
         },
@@ -736,6 +766,8 @@ export default {
       this.editingMetadata = false;
     },
     submit() {
+      if (this.requestsDestroyed || this.saving) return;
+      const contextId = this.courseContextId;
       const f = this.form;
       if (!f.lessonKey || !f.title || !f.locale || !f.ageBand) {
         this.$message.warning(this.$t('course.required'));
@@ -747,12 +779,14 @@ export default {
           f.lessonId,
           this.metadataPayload(),
           () => {
+            if (this.requestsDestroyed || contextId !== this.courseContextId) return;
             this.saving = false;
             this.dialogVisible = false;
             this.$message.success(this.$t('lesson.metadataSaved'));
             this.fetchList();
           },
           (msg) => {
+            if (this.requestsDestroyed || contextId !== this.courseContextId) return;
             this.saving = false;
             this.$message.error(msg);
           },
@@ -763,29 +797,38 @@ export default {
         this.courseId,
         { lessonKey: f.lessonKey, ...this.metadataPayload() },
         (lesson) => {
+          if (this.requestsDestroyed || contextId !== this.courseContextId) return;
           this.saving = false;
           this.dialogVisible = false;
           this.$message.success(this.$t('lesson.created'));
           this.openEditor(lesson);
         },
         (msg) => {
+          if (this.requestsDestroyed || contextId !== this.courseContextId) return;
           this.saving = false;
           this.$message.error(msg);
         },
       );
     },
     confirmDelete(row) {
+      if (this.requestsDestroyed) return;
+      const contextId = this.courseContextId;
       this.$confirm(this.$t('lesson.deleteConfirm', { key: row.lessonKey }), this.$t('lesson.delete'), {
         type: 'warning',
       })
         .then(() => {
+          if (this.requestsDestroyed || contextId !== this.courseContextId) return;
           Api.lesson.deleteLesson(
             row.lessonId,
             () => {
+              if (this.requestsDestroyed || contextId !== this.courseContextId) return;
               this.$message.success(this.$t('lesson.deleted'));
               this.fetchList();
             },
-            (msg) => this.$message.error(msg),
+            (msg) => {
+              if (this.requestsDestroyed || contextId !== this.courseContextId) return;
+              this.$message.error(msg);
+            },
           );
         })
         .catch(() => {});

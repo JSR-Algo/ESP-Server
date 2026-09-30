@@ -107,6 +107,15 @@ try {
   assert.equal(recovered.unenforcedVisible, false, 'warning must clear when a parseable band is chosen');
   assert.equal(recovered.customVisible, true, 'custom band must explain the minimum it enforces');
 
+  const switched = await evaluate('window.__SWITCH_COURSE__()');
+  assert.equal(switched.requested, true, 'reused route must load the newly selected course');
+  assert.equal(switched.closed, true, 'old course dialogs must close');
+  assert.equal(switched.courseId, 'course-2');
+  assert.deepEqual(switched.titles, ['Current course lesson']);
+  assert.ok(switched.text.includes('Current course lesson'));
+  assert.ok(!switched.text.includes('Stale course lesson'));
+  console.log('course route replacement: mounted Vue Router ignores old lesson response (controlled API)');
+
   assert.deepEqual(runtimeErrors, [], `page runtime errors: ${runtimeErrors.join('\n')}`);
   console.log('check-course-taxonomy-browser: OK');
   });

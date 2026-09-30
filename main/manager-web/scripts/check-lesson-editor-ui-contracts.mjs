@@ -238,9 +238,9 @@ for (const component of ['RobotEspTftProjectionPreview', 'RobotManifestServerPre
 }
 const projectionPreviewTag = extractComponentTag(lessonPreviewSource, 'RobotEspTftProjectionPreview');
 for (const [binding, reason] of [
-  [/v-if="manifest"/, 'manifest branch'],
-  [/:manifest="manifest"/, 'manifest'],
-  [/:renderer-metadata="rendererMetadata"/, 'renderer metadata'],
+  [/v-if="exactManifest"/, 'exact manifest branch'],
+  [/:manifest="exactManifest"/, 'exact manifest'],
+  [/:renderer-metadata="rendererMetadata \|\| manifestPreview"/, 'renderer metadata'],
   [/:step-index="stepIndex"/, 'step index'],
   [/:initial-path="initialPath"/, 'initial interaction path'],
   [/@path-change="\$emit\('path-change', \$event\)"/, 'path-change forwarding'],

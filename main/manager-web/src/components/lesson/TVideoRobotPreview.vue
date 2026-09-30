@@ -6,15 +6,19 @@
         <el-select v-model="cueId" size="mini" :aria-label="$t('lesson.tvideoJourney.previewCueLabel')">
           <el-option v-for="cue in cues" :key="cue.cueId" :label="`${cue.cueId} · ${cue.effect}`" :value="cue.cueId" />
         </el-select>
-        <el-button size="mini" @click="toggle">{{ playing ? $t('lesson.tvideoJourney.pause') : $t('lesson.tvideoJourney.play') }}</el-button>
+        <el-button size="mini" :disabled="!mediaReadyForPreview" @click="toggle">{{ playing ? $t('lesson.tvideoJourney.pause') : $t('lesson.tvideoJourney.play') }}</el-button>
         <el-button size="mini" @click="replay">{{ $t('lesson.tvideoJourney.replay') }}</el-button>
       </div>
     </div>
     <div class="robot-flattened__viewport">
-      <canvas ref="canvas" width="480" height="320" :aria-label="$t('lesson.tvideoJourney.canvasLabel')" />
-      <video v-if="backgroundUrl" ref="background" class="robot-flattened__media" :src="backgroundUrl" muted playsinline loop preload="auto" @loadeddata="mediaReady" @seeked="draw" />
-      <video v-if="robotUrl" ref="robot" class="robot-flattened__media" :src="robotUrl" muted playsinline loop preload="auto" @loadeddata="mediaReady" @seeked="draw" />
-      <img v-if="objectUrl" ref="object" class="robot-flattened__media" :src="objectUrl" alt="" @load="draw" />
+      <canvas v-show="mediaReadyForPreview" ref="canvas" width="480" height="320" :aria-label="$t('lesson.tvideoJourney.canvasLabel')" />
+      <p v-if="hasMediaError" class="robot-flattened__error" role="alert">{{ $t(alphaCheckFailed ? 'lesson.tvideoJourney.mediaCheckFailed' : alphaSupported === false ? 'lesson.tvideoJourney.alphaUnsupported' : 'lesson.tvideoJourney.mediaError') }}</p>
+      <p v-else-if="hasMissingMedia" class="robot-flattened__error" role="alert">{{ $t('lesson.tvideoJourney.mediaMissing') }}</p>
+      <p v-else-if="alphaSupported === null" class="robot-flattened__error" role="status">{{ $t('lesson.tvideoJourney.checkingMedia') }}</p>
+      <p v-else-if="hasLoadingMedia" class="robot-flattened__error" role="status">{{ $t('lesson.tvideoJourney.mediaLoading') }}</p>
+      <video v-if="backgroundUrl" :key="`background:${backgroundUrl}`" ref="background" class="robot-flattened__media" :src="backgroundUrl" muted playsinline loop preload="auto" @loadstart="mediaLoading" @loadeddata="mediaReady" @seeked="mediaSeeked" @error="mediaFailed" />
+      <video v-if="robotUrl" :key="`robot:${robotUrl}`" ref="robot" class="robot-flattened__media" :src="robotUrl" muted playsinline loop preload="auto" @loadstart="mediaLoading" @loadeddata="mediaReady" @seeked="mediaSeeked" @error="mediaFailed" />
+      <img v-if="objectUrl" :key="`object:${objectUrl}`" ref="object" class="robot-flattened__media" :src="objectUrl" alt="" @load="mediaReady" @error="mediaFailed" />
     </div>
     <div class="robot-flattened__identity">
       <span class="mono">{{ preset.presetId }}@{{ preset.presetVersion }}</span>
@@ -27,6 +31,7 @@
 
 <script>
 import { deterministicPreviewState, quantizeClockMs, requiredCueIds } from './tvideo-journey';
+import { supportsVp9Alpha } from './vp9-alpha-support';
 
 const EFFECTS = ['opening', 'greet', 'teach', 'listen', 'thinking', 'correct', 'retry-level-1', 'retry-level-2', 'retry-level-3', 'celebrate', 'word-transition'];
 const CONFETTI = ['#ffd166', '#ff8a6b', '#79d8bd', '#b39ddb', '#5bb8e6', '#ffffff'];
@@ -56,8 +61,12 @@ export default {
     journey: { type: Object, required: true }, preset: { type: Object, required: true },
     mediaUrl: { type: Function, required: true }, selectedStepIndex: { type: Number, default: 0 },
   },
-  data: () => ({ cueId: '', playing: false, clockMs: 0, timer: null }),
+  data: () => ({ cueId: '', playing: false, clockMs: 0, timer: null, alphaSupported: null, alphaCheckFailed: false, mediaErrors: { background: false, robot: false, object: false }, readySources: { background: null, robot: null, object: null } }),
   computed: {
+    hasMediaError() { return this.alphaCheckFailed || this.alphaSupported === false || Object.values(this.mediaErrors).some(Boolean); },
+    hasMissingMedia() { return ['background', 'robot', 'object'].some((role) => !this[`${role}Url`]); },
+    hasLoadingMedia() { return !this.hasMissingMedia && ['background', 'robot', 'object'].some((role) => this.readySources[role] !== this[`${role}Url`]); },
+    mediaReadyForPreview() { return this.alphaSupported === true && !this.hasMediaError && !this.hasMissingMedia && !this.hasLoadingMedia; },
     cues() {
       return requiredCueIds(this.journey.steps).map((cueId) => ({ cueId, effect: EFFECTS.find((effect) => cueId.endsWith(effect)) || (cueId.includes('word-transition') ? 'word-transition' : 'opening') }));
     },
@@ -161,9 +170,22 @@ export default {
   watch: {
     cues: { immediate: true, handler(value) { if (!value.some((cue) => cue.cueId === this.cueId)) this.cueId = value[0] ? value[0].cueId : ''; } },
     cueId() { this.replay(); }, journey: { deep: true, handler() { this.$nextTick(this.draw); } },
+    backgroundUrl() { this.resetSource('background'); },
+    robotUrl() { this.resetSource('robot'); },
+    objectUrl() { this.resetSource('object'); },
   },
+  mounted() { this.checkAlphaSupport(); },
   beforeDestroy() { this.stopTimer(); },
   methods: {
+    checkAlphaSupport() {
+      this.alphaCheckFailed = false;
+      supportsVp9Alpha().then((supported) => {
+        if (this._isDestroyed) return;
+        this.alphaSupported = supported;
+        this.alphaCheckFailed = supported === null;
+        this.draw();
+      });
+    },
     shortHash(value) { return value ? `${value.slice(0, 8)}…${value.slice(-6)}` : this.$t('lesson.tvideoJourney.unavailable'); },
     walkPoseAt(elapsed, keyframes, landing, teachingAnchor) {
       const frames = keyframes.length ? keyframes : [
@@ -178,18 +200,47 @@ export default {
       }
       return { ...frames[frames.length - 1] };
     },
-    toggle() { this.playing = !this.playing; if (this.playing) this.startTimer(); else this.stopTimer(); },
-    replay() { this.clockMs = 0; this.syncMediaClock(); this.draw(); if (this.playing) this.startTimer(); },
-    startTimer() { this.stopTimer(); this.timer = setInterval(() => { this.clockMs = quantizeClockMs(this.clockMs + 100); this.syncMediaClock(); this.draw(); }, 100); },
+    toggle() { if (!this.mediaReadyForPreview) return; this.playing = !this.playing; if (this.playing) this.startTimer(); else this.stopTimer(); },
+    replay() { if (this.alphaCheckFailed) this.checkAlphaSupport(); this.clockMs = 0; this.syncMediaClock(); this.draw(); if (this.playing) this.startTimer(); },
+    startTimer() { this.stopTimer(); if (!this.mediaReadyForPreview) { this.playing = false; return; } this.timer = setInterval(() => { this.clockMs = quantizeClockMs(this.clockMs + 100); this.syncMediaClock(); this.draw(); }, 100); },
     stopTimer() { if (this.timer) clearInterval(this.timer); this.timer = null; },
-    mediaReady(event) { if (event && event.target) event.target.pause(); this.syncMediaClock(); this.draw(); },
+    currentMediaRole(event) {
+      const media = event && event.target;
+      // A source can change before Vue replaces its keyed element and ref.
+      return ['background', 'robot', 'object'].find((role) => media && this.$refs[role] === media && this[`${role}Url`] && media.getAttribute('src') === this[`${role}Url`]);
+    },
+    pausePreview() {
+      this.playing = false;
+      this.stopTimer();
+      const canvas = this.$refs.canvas;
+      if (canvas) canvas.getContext('2d').clearRect(0, 0, 480, 320);
+    },
+    resetSource(role) { this.readySources[role] = null; this.mediaErrors[role] = false; this.pausePreview(); },
+    mediaLoading(event) { const role = this.currentMediaRole(event); if (role) this.resetSource(role); },
+    mediaReady(event) {
+      const role = this.currentMediaRole(event);
+      if (!role) return;
+      if (typeof event.target.pause === 'function') event.target.pause();
+      this.readySources[role] = this[`${role}Url`];
+      this.mediaErrors[role] = false;
+      this.syncMediaClock();
+      this.draw();
+    },
+    mediaSeeked(event) { if (this.currentMediaRole(event)) this.draw(); },
+    mediaFailed(event) {
+      const role = this.currentMediaRole(event);
+      if (!role) return;
+      this.mediaErrors[role] = true;
+      this.readySources[role] = null;
+      this.pausePreview();
+    },
     syncMediaClock() {
       [this.$refs.background, this.$refs.robot].forEach((media) => {
         if (!media || !Number.isFinite(media.duration) || media.duration <= 0) return;
         try { media.currentTime = (this.clockMs / 1000) % media.duration; } catch (error) { /* media can still be loading */ }
       });
     },
-    drawMedia(ctx, media, x, y, width, height) { if (!media || !(media.complete || media.readyState >= 2)) return false; try { ctx.drawImage(media, x, y, width, height); return true; } catch (error) { return false; } },
+    drawMedia(ctx, media, x, y, width, height) { if (!media || !(media.complete || media.readyState >= 2)) return false; try { ctx.drawImage(media, x, y, width, height); return true; } catch (error) { this.mediaFailed({ target: media }); return false; } },
     roundedRect(ctx, x, y, width, height, radius) {
       const value = Math.min(radius, width / 2, height / 2);
       ctx.beginPath(); ctx.moveTo(x + value, y); ctx.arcTo(x + width, y, x + width, y + height, value); ctx.arcTo(x + width, y + height, x, y + height, value); ctx.arcTo(x, y + height, x, y, value); ctx.arcTo(x, y, x + width, y, value); ctx.closePath();
@@ -235,15 +286,16 @@ export default {
     },
     draw() {
       const canvas = this.$refs.canvas; if (!canvas) return;
+      if (!this.mediaReadyForPreview) return;
       const ctx = canvas.getContext('2d'); const path = this.journey.scenePath; const state = this.previewFrameState; const effect = state.effect;
       ctx.clearRect(0, 0, 480, 320);
-      if (!this.drawMedia(ctx, this.$refs.background, 0, 0, 480, 320)) { const gradient = ctx.createLinearGradient(0, 0, 480, 320); gradient.addColorStop(0, '#9dd9cf'); gradient.addColorStop(1, '#eac875'); ctx.fillStyle = gradient; ctx.fillRect(0, 0, 480, 320); }
+      if (!this.drawMedia(ctx, this.$refs.background, 0, 0, 480, 320)) return;
       const object = path.objectAnchor; const objectBob = Math.sin(state.clockMs / 410) * 4; const transition = state.wordTransition; const objectAlpha = !state.object.visible ? 0 : transition ? (state.clockMs <= 400 ? 1 - state.clockMs / 400 : clamp01((state.clockMs - 400) / 550)) : 1;
-      ctx.save(); ctx.globalAlpha = clamp01(objectAlpha); ctx.shadowColor = 'rgba(58,58,74,.3)'; ctx.shadowBlur = 12; ctx.shadowOffsetY = 8; if (!this.drawMedia(ctx, this.$refs.object, object.x * 480 - 38, object.y * 320 - 42 + objectBob, 76, 76)) { ctx.fillStyle = '#d95f43'; ctx.fillRect(object.x * 480 - 28, object.y * 320 - 28 + objectBob, 56, 56); } ctx.restore();
+      ctx.save(); ctx.globalAlpha = clamp01(objectAlpha); ctx.shadowColor = 'rgba(58,58,74,.3)'; ctx.shadowBlur = 12; ctx.shadowOffsetY = 8; if (!this.drawMedia(ctx, this.$refs.object, object.x * 480 - 38, object.y * 320 - 42 + objectBob, 76, 76)) { ctx.restore(); ctx.clearRect(0, 0, 480, 320); return; } ctx.restore();
       const pose = state.robot.pose; const robotX = clamp01(Number(pose.x) || 0) * 480; const robotY = clamp01(Number(pose.y) || 0) * 320; const robotScale = Math.max(0.1, Number(pose.scale) || 1); const robotWidth = 108 * robotScale; const robotHeight = 150 * robotScale;
       this.drawGroundShadow(ctx, state, robotX, robotY, robotScale);
       ctx.save(); ctx.translate(robotX, robotY); ctx.scale(1, state.robot.squashY); const bounce = state.robot.pulse === 'joy' ? Math.sin(state.clockMs / 105) * 6 : state.robot.pulse !== 'none' ? Math.sin(state.clockMs / 250) * 2 : 0;
-      if (!this.drawMedia(ctx, this.$refs.robot, -robotWidth / 2, -robotHeight + bounce, robotWidth, robotHeight)) { ctx.fillStyle = '#fff4d7'; ctx.beginPath(); ctx.arc(0, -56 * robotScale + bounce, 37 * robotScale, 0, Math.PI * 2); ctx.fill(); ctx.fillStyle = '#31524a'; ctx.font = `bold ${Math.max(10, 18 * robotScale)}px sans-serif`; ctx.fillText('TB', -14 * robotScale, -50 * robotScale + bounce); } ctx.restore();
+      if (!this.drawMedia(ctx, this.$refs.robot, -robotWidth / 2, -robotHeight + bounce, robotWidth, robotHeight)) { ctx.restore(); ctx.clearRect(0, 0, 480, 320); return; } ctx.restore();
       this.drawLandingPuff(ctx, state, robotX, robotY);
       this.drawProgressDots(ctx, state);
       this.drawStepCard(ctx, state);
@@ -255,5 +307,6 @@ export default {
 </script>
 
 <style scoped>
+.robot-flattened__error{color:#fff4d7;font-weight:700;padding:24px;text-align:center}
 .robot-flattened{background:#f3eee3;border:1px solid #d9cdb7;border-radius:16px;padding:14px}.robot-flattened__head{align-items:flex-end;display:flex;gap:12px;justify-content:space-between}.robot-flattened__head h4{margin:3px 0}.robot-flattened__controls{display:flex;gap:7px}.robot-flattened__controls .el-select{width:235px}.robot-flattened__viewport{aspect-ratio:3/2;background:#243c35;border-radius:12px;margin:12px auto 0;max-width:480px;overflow:hidden;position:relative;width:100%}.robot-flattened__viewport canvas{display:block;height:100%;width:100%}.robot-flattened__media{height:1px;left:-9999px;position:absolute;width:1px}.robot-flattened__identity{color:#66736f;display:flex;font-size:11px;gap:12px;justify-content:center;margin-top:8px}.robot-flattened__notice{color:#8c3f31;font-size:12px;font-weight:700;margin:9px 0 0;text-align:center}@media(max-width:680px){.robot-flattened__head{align-items:stretch;flex-direction:column}.robot-flattened__controls{flex-wrap:wrap}.robot-flattened__controls .el-select{width:100%}.robot-flattened__identity{align-items:center;flex-direction:column;gap:3px}}@media(prefers-reduced-motion:reduce){.robot-flattened *{transition:none!important}}
 </style>

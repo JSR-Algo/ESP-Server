@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -134,6 +135,33 @@ function dependencies({ onCommand, spawnBrowser } = {}) {
     },
   };
 }
+
+test('DevTools readiness waits for a complete port line in an existing file', async () => {
+  const { withCandidateBoundBrowser } = await importHarness();
+  const profileDir = await mkdtemp(join(tmpdir(), 'devtools-port-publication-'));
+  const path = join(profileDir, 'DevToolsActivePort');
+  const deps = dependencies();
+  delete deps.waitForDevToolsPort;
+  const fetchTarget = deps.fetchDevToolsTarget;
+  deps.fetchDevToolsTarget = async (port, signal) => {
+    assert.equal(port, '9222', 'an empty or partial port must not become an HTTP target');
+    return fetchTarget(port, signal);
+  };
+  await writeFile(path, '');
+  const publication = (async () => {
+    await new Promise(resolve => setTimeout(resolve, 60));
+    await writeFile(path, '92');
+    await new Promise(resolve => setTimeout(resolve, 60));
+    await writeFile(path, '9222\n/devtools/browser/test');
+  })();
+  try {
+    await withCandidateBoundBrowser({ profileDir, label: 'partial port', ...deps }, async () => {});
+    assert.equal(deps.state.cleanupCalls, 1);
+  } finally {
+    await publication;
+    await rm(profileDir, { recursive: true, force: true });
+  }
+});
 
 test('all remaining browser gates use only the candidate-bound lifecycle helper', async () => {
   for (const script of scripts) {

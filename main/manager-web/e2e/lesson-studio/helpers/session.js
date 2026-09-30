@@ -10,32 +10,46 @@ const captcha = process.env.LESSON_STUDIO_E2E_CAPTCHA || 'E2E42';
 const authorEmail = process.env.LESSON_STUDIO_E2E_AUTHOR_EMAIL || 'lesson-author-e2e@local.invalid';
 const authorPassword = process.env.LESSON_STUDIO_E2E_AUTHOR_PASSWORD || 'TbotAuthorE2E!2026';
 
-async function installTrustedTask4MediaRoute(page) {
+const task4MediaPattern = /^https:\/\/task4-media\.localhost:\d+\/(?:tvideo-demo\/|flattened-cinematic\/)/;
+
+function task4Certificate() {
   const tlsRoot = process.env.TASK4_ASSIGNMENT_TLS_ROOT
     || (process.env.TASK4_ASSIGNMENT_RUNTIME_ROOT
       ? resolve(process.env.TASK4_ASSIGNMENT_RUNTIME_ROOT, 'tls') : null);
   const certificate = tlsRoot ? resolve(tlsRoot, 'cert.pem') : null;
-  if (!certificate || !existsSync(certificate)) return;
+  return certificate && existsSync(certificate) ? certificate : null;
+}
+
+async function trustedTask4MediaResponse(url, headers = {}) {
+  const certificate = task4Certificate();
+  if (!certificate || !task4MediaPattern.test(url)) return null;
   const ca = readFileSync(certificate);
-  await page.route(/^https:\/\/task4-media\.localhost:\d+\/(?:tvideo-demo\/|flattened-cinematic\/)/, async (route) => {
-    const reachable = new URL(route.request().url());
-    reachable.hostname = '127.0.0.1';
-    const response = await new Promise((resolveResponse, reject) => {
-      const request = httpsGet(reachable, {
-        ca,
-        servername: 'task4-media.localhost',
-        headers: route.request().headers(),
-      }, (incoming) => {
-        const chunks = [];
-        incoming.on('data', (chunk) => chunks.push(chunk));
-        incoming.on('end', () => resolveResponse({
-          status: incoming.statusCode,
-          headers: incoming.headers,
-          body: Buffer.concat(chunks),
-        }));
-      });
-      request.on('error', reject);
+  const reachable = new URL(url);
+  reachable.hostname = '127.0.0.1';
+  return new Promise((resolveResponse, reject) => {
+    const request = httpsGet(reachable, {
+      ca,
+      servername: 'task4-media.localhost',
+      headers,
+    }, (incoming) => {
+      const chunks = [];
+      incoming.on('data', (chunk) => chunks.push(chunk));
+      incoming.on('error', reject);
+      incoming.on('end', () => resolveResponse({
+        status: incoming.statusCode,
+        headers: incoming.headers,
+        body: Buffer.concat(chunks),
+      }));
     });
+    request.on('error', reject);
+    request.setTimeout(15000, () => request.destroy(new Error('Task4 media request timed out')));
+  });
+}
+
+async function installTrustedTask4MediaRoute(page) {
+  if (!task4Certificate()) return;
+  await page.route(task4MediaPattern, async (route) => {
+    const response = await trustedTask4MediaResponse(route.request().url(), route.request().headers());
     await route.fulfill(response);
   });
 }
@@ -55,6 +69,12 @@ async function loginAsLessonAuthor(page, credentials = {}) {
   await page.getByTestId('manager-login-password').fill(managerPassword);
   await page.getByTestId('manager-login-captcha').fill(captcha);
 
+  // The home header requests capabilities as soon as manager login completes.
+  // Observe that challenge before navigation can race its response.
+  const { expectObservedFault } = require('./real-service-evidence');
+  expectObservedFault(page, 'GET', '/nestjs/v1/admin/lesson-rollout-capabilities', 401, 'real author sign-in challenge');
+  const authorChallenge = page.waitForResponse(response =>
+    response.url().includes('/nestjs/v1/admin/lesson-rollout-capabilities') && response.status() === 401);
   const managerLogin = page.waitForResponse((response) =>
     response.url().includes('/tbot/user/login') && response.request().method() === 'POST');
   await page.getByTestId('manager-login-submit').click();
@@ -63,6 +83,7 @@ async function loginAsLessonAuthor(page, credentials = {}) {
   expect((await managerResponse.json()).code).toBe(0);
   await expect(page.getByText(managerUser)).toBeVisible();
   await page.waitForURL(/#\/home$/);
+  await authorChallenge;
 
   // The web container may start milliseconds before Docker DNS publishes the
   // backend alias. Verify the same-origin proxy has recovered before opening
@@ -77,14 +98,6 @@ async function loginAsLessonAuthor(page, credentials = {}) {
     });
     return response.status;
   })).toBe(200);
-
-  // The course-management view issues three authoring requests before an author session exists;
-  // each real 401 challenge is registered explicitly so no other HTTP failure is tolerated.
-  const { expectObservedFault } = require('./real-service-evidence');
-  expectObservedFault(page, 'GET', '/nestjs/v1/admin/lesson-rollout-capabilities', 401, 'real author sign-in challenge');
-  expectObservedFault(page, 'GET', '/nestjs/v1/admin/courses', 401, 'real author sign-in challenge');
-  expectObservedFault(page, 'GET', '/nestjs/v1/admin/course-insights/course-quality', 401, 'real author sign-in challenge');
-  await page.goto('/login#/course-management');
 
   const authorDialog = page.getByRole('dialog', { name: /sign in as author/i });
   if (!await authorDialog.isVisible().catch(() => false)) {
@@ -102,7 +115,8 @@ async function loginAsLessonAuthor(page, credentials = {}) {
   ]);
   expect(authorLogin.status()).toBe(200);
   await expect(authorDialog).toBeHidden();
+  await page.goto('/login#/course-management');
   await expect(page.getByRole('heading', { name: 'Courses' })).toBeVisible();
 }
 
-module.exports = { installTrustedTask4MediaRoute, loginAsLessonAuthor, managerUser };
+module.exports = { installTrustedTask4MediaRoute, trustedTask4MediaResponse, loginAsLessonAuthor, managerUser };

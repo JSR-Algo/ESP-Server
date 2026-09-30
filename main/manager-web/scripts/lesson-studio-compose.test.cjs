@@ -14,6 +14,12 @@ const rewardsOverrideFile = resolve(
 
 const compose = readFileSync(composeFile, 'utf8');
 
+test('published browser lessons have the dedicated generation worker enabled', () => {
+  const backend = serviceBlock(compose, 'backend');
+  assert.match(backend, /LESSON_ASSET_GENERATION_WORKER_ENABLED:\s*"true"/);
+  assert.doesNotMatch(backend, /TBOT_ENABLE_BACKGROUND_WORKERS:\s*"true"/);
+});
+
 function serviceBlock(compose, serviceName) {
   const marker = `  ${serviceName}:\n`;
   const start = compose.indexOf(marker);
@@ -74,11 +80,18 @@ test('the browser-and-robot origin serves canonical derivatives and seeded asset
       '${TBOT_LESSON_STUDIO_BACKEND_MOUNT_ROOT:-${TBOT_BACKEND_WORKTREE:?set the built candidate backend worktree}}/src/lessons/fixtures/tvideo-raw-code/assets/esp-tft:/usr/share/nginx/html/tvideo-demo/esp-tft:ro',
     ),
   );
-  assert.ok(
-    web.includes(
-      '${TBOT_LESSON_STUDIO_FIRMWARE_MOUNT_ROOT:-${TBOT_FIRMWARE_WORKTREE:-../../../TBOT-Firmware}}/lesson/assets:/usr/share/nginx/html/tvideo-demo/assets:ro',
-    ),
-  );
+  assert.ok(!web.includes('/lesson/assets:/usr/share/nginx/html/tvideo-demo/assets:ro'),
+    'firmware mounts must not hide bundled scenes and robot-alive previews');
+  for (const directory of ['background', 'objects', 'reference', 'robot']) {
+    assert.ok(web.includes('${TBOT_LESSON_STUDIO_FIRMWARE_MOUNT_ROOT:-${TBOT_FIRMWARE_WORKTREE:-../../../TBOT-Firmware}}/lesson/assets/'
+      + directory + ':/usr/share/nginx/html/tvideo-demo/assets/' + directory + ':ro'));
+  }
+});
+
+test('web readiness waits for the manager API as well as the static login page', () => {
+  const web = serviceBlock(compose, 'web');
+  assert.ok(web.includes("http://127.0.0.1:8002/login"));
+  assert.ok(web.includes("&& wget -q -O /dev/null 'http://127.0.0.1:8002/tbot/user/pub-config'"));
 });
 
 test('lesson studio compose isolates every named Docker resource through one prefix', () => {
