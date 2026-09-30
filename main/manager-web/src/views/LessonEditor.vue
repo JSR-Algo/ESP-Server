@@ -175,8 +175,8 @@
           <section v-if="lesson.lessonId === lessonId && !courseModeLoading && !isCourseModeV5" class="lesson-visual-pair" v-loading="savingLessonVisuals" :aria-busy="savingLessonVisuals ? 'true' : 'false'">
             <div class="lesson-visual-pair__heading">
               <div>
-                <h4>{{ $t(isCourseModeV5 ? 'lesson.visualTripleTitle' : 'lesson.visualPairTitle') }}</h4>
-                <p>{{ $t(isCourseModeV5 ? 'lesson.visualTripleWholeLesson' : 'lesson.visualPairWholeLesson') }}</p>
+                <h4>{{ $t('lesson.visualPairTitle') }}</h4>
+                <p>{{ $t('lesson.visualPairWholeLesson') }}</p>
               </div>
               <span v-if="savingLessonVisuals" role="status" aria-live="polite">{{ $t('common.loading') }}</span>
             </div>
@@ -190,12 +190,12 @@
               {{ $t('lesson.visualPairReloadFailed') }}
             </p>
             <p
-              v-else-if="pendingLessonVisualPair && (!lessonVisualPair.backgroundAssetVersionId || !lessonVisualPair.objectAssetVersionId || (isCourseModeV5 && !lessonVisualPair.robotAssetVersionId))"
+              v-else-if="pendingLessonVisualPair && (!lessonVisualPair.backgroundAssetVersionId || !lessonVisualPair.objectAssetVersionId)"
               class="lesson-visual-pair__notice"
               role="status"
               aria-live="polite"
             >
-              {{ $t(isCourseModeV5 ? 'lesson.visualTripleRequired' : 'lesson.visualPairRequired') }}
+              {{ $t('lesson.visualPairRequired') }}
             </p>
             <div v-if="lessonCapabilities.sharedVisualAuthoring || lessonCapabilities.exactEspTftPreview" class="cinematic-pickers">
               <div v-if="!isDraft" class="immutable-version-message" data-testid="immutable-version-message">
@@ -2121,6 +2121,8 @@ export default {
       const requestId = this.lessonLoadRequestId + 1;
       const lessonId = this.lessonId;
       this.lessonLoadRequestId = requestId;
+      this.renameVisible = false;
+      this.renaming = false;
       this.resetLessonAssetGenerationStatus();
       this.clearPreviewProofState();
       this.clearValidationProofState();
@@ -3236,12 +3238,15 @@ export default {
       this.renameVisible = true;
     },
     doRename() {
-      if (!this.titleDraft) return;
+      if (!this.titleDraft || this.editorDestroying || this.renaming) return;
+      const lessonId = this.lessonId;
+      const loadRequestId = this.lessonLoadRequestId;
       this.renaming = true;
       Api.lesson.updateLesson(
         this.lessonId,
         { title: this.titleDraft },
         (l) => {
+          if (this.editorDestroying || lessonId !== this.lessonId || loadRequestId !== this.lessonLoadRequestId) return;
           const currentLesson = this.lesson || {};
           const updatedLesson = {
             ...currentLesson,
@@ -3256,6 +3261,7 @@ export default {
           this.$message.success(this.$t('lesson.renamed'));
         },
         (msg, error) => {
+          if (this.editorDestroying || lessonId !== this.lessonId || loadRequestId !== this.lessonLoadRequestId) return;
           this.renaming = false;
           this.handleUncertainMutationError(error, this.fetchAll);
           this.$message.error(msg);

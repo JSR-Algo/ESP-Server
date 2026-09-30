@@ -84,3 +84,25 @@ test('delayed next-version response cannot navigate away from a different lesson
  const e={...methods,lessonId:'A',lessonLoadRequestId:1,lesson:{lessonId:'A',status:'published',lessonVersion:1},$route:{path:'/lesson-editor',query:{}},$router:{replace:v=>routes.push(v)},$message:{success:v=>notices.push(v),error:v=>notices.push(v)},$t:v=>v};
  e.submitNextVersion();e.lessonId='B';e.lessonLoadRequestId=2;done({lessonId:'A2',lessonVersion:2,status:'draft'});assert.equal(routes.length,0);assert.equal(notices.length,0);
 });
+
+for (const outcome of ['success', 'error']) test(`rename ignores replaced lesson ${outcome}`, () => {
+  const calls = []; const messages = [];
+  const block = source.slice(source.indexOf('    openRename()'), source.indexOf('    doValidate('));
+  const methods = new Function('Api', `return {${block}}`)({ lesson: { updateLesson: (...args) => calls.push(args) } });
+  const vm = { ...methods, lessonId: 'A', lessonLoadRequestId: 1, titleDraft: 'new A', lesson: { lessonId: 'A' },
+    invalidatePreview() {}, $t: x => x, $message: { success: x => messages.push(x), error: x => messages.push(x) }, handleUncertainMutationError() {} };
+  vm.doRename(); vm.lessonId = 'B'; vm.lessonLoadRequestId = 2; vm.lesson = { lessonId: 'B' }; vm.renaming = false;
+  if (outcome === 'success') calls[0][2]({ lessonId: 'A' }); else calls[0][3]('failed');
+  assert.equal(vm.lesson.lessonId, 'B'); assert.deepEqual(messages, []);
+});
+for (const value of ['', null, 'replacement', undefined]) test(`step hint PATCH preserves explicit ${JSON.stringify(value)}`, () => {
+  const api = fs.readFileSync(path.join(__dirname, '../../src/apis/module/lesson.js'), 'utf8');
+  const block = api.slice(api.indexOf('  updateStep('), api.indexOf('  // POST /v1/admin/lessons/:lessonId/steps/reorder'));
+  let request;
+  const method = new Function('nestRequest', 'getNestUrl', `return {${block}}`)(x => { request = x; }, () => '/admin');
+  method.updateStep('lesson', 'step', { helperText: value, l1TransferHint: value });
+  const sent = JSON.parse(JSON.stringify(request.data));
+  for (const field of ['helperText', 'l1TransferHint']) {
+    assert.equal(sent[field], value); assert.equal(Object.hasOwn(sent, field), value !== undefined);
+  }
+});

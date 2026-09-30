@@ -6,13 +6,13 @@ function setup(view, method, state, loading) {
   const source = readFileSync(new URL(`../../src/views/${view}.vue`, import.meta.url), 'utf8');
   const script = source.split('<script>')[1].split('</script>')[0]
     .replace(/^import[\s\S]*?from ['"][^'"]+['"];?\s*$/gm, '').replace('export default', 'return');
-  const calls = []; const messages = []; const writes = []; const navigation = [];
-  const api = { lesson: { listAuthoritativeLessons: (...args) => calls.push(args), createLesson: (...args) => writes.push(args), updateLesson: (...args) => writes.push(args), deleteLesson: (...args) => writes.push(args) }, courseInsights: { listLearners: (...args) => calls.push(args) } };
+  const versions = []; const calls = []; const messages = []; const writes = []; const navigation = [];
+  const api = { course: Object.fromEntries(['getCourseList', 'createCourse', 'updateCourse', 'cloneCourse', 'setTemplate', 'deleteCourse'].map(name => [name, (...args) => (name === 'getCourseList' ? calls : writes).push(args)])), lesson: { listLessons: (...args) => versions.push(args), listAuthoritativeLessons: (...args) => calls.push(args), createLesson: (...args) => writes.push(args), updateLesson: (...args) => writes.push(args), deleteLesson: (...args) => writes.push(args) }, courseInsights: { getCourseQuality: (...args) => calls.push(args), listLearners: (...args) => calls.push(args) } };
   const component = new Function('Api', 'HeaderBar', 'AddDeviceDialog', 'ManualAddDeviceDialog', 'VersionFooter', 'DEFAULT_LOCALE', 'DEFAULT_AGE_BAND', 'AGE_BANDS', 'LOCALES', script)(api, {}, {}, {}, {}, 'vi', '3-5', [], []);
-  const vm = { ...component.data.call({ $route: { query: {} } }), courseId: 'course-A', $t: key => key, $router: { push: route => navigation.push(route), replace: route => navigation.push(route) }, $message: { error: msg => messages.push(msg), success: msg => messages.push(msg) } };
+  const vm = { ...component.data.call({ $route: { query: {} } }), courseId: 'course-A', $t: key => key, $router: { push: route => navigation.push(route), replace: route => navigation.push(route) }, $message: { warning: msg => messages.push(msg), error: msg => messages.push(msg), success: msg => messages.push(msg) } };
   for (const [key, value] of Object.entries(component.methods)) vm[key] = value.bind(vm);
   vm[state] = [{ id: 'existing' }];
-  return { vm, calls, messages, writes, navigation, request: keyword => vm[method](keyword), changeCourse: id => { vm.courseId = id; component.watch?.courseId?.call(vm, id); }, destroy: () => component.beforeDestroy?.call(vm), state, loading };
+  return { vm, calls, versions, messages, writes, navigation, component, request: keyword => vm[method](keyword), changeCourse: id => { vm.courseId = id; component.watch?.courseId?.call(vm, id); }, destroy: () => component.beforeDestroy?.call(vm), state, loading };
 }
 
 const lessons = () => setup('CourseLessons', 'fetchList', 'list', 'loading');
@@ -80,6 +80,7 @@ const succeed = (call, rows) => call.at(-2)(rows);
 const fail = call => call.at(-1)('failed');
 
 for (const [view, method, state, loading] of [
+  ['CourseManagement', 'fetchList', 'list', 'loading'],
   ['CourseLessons', 'fetchList', 'list', 'loading'],
   ['DeviceManagement', 'fetchChildOptions', 'childOptions', 'childLoading'],
 ]) {
@@ -107,7 +108,61 @@ for (const [view, method, state, loading] of [
   test(`${view} current failure retains existing error behavior`, () => {
     const { vm, calls, messages, request } = setup(view, method, state, loading);
     request('current'); fail(calls[0]); assert.equal(vm[loading], false);
-    assert.deepEqual(vm[state], view === 'CourseLessons' ? [{ id: 'existing' }] : []);
-    assert.deepEqual(messages, view === 'CourseLessons' ? ['failed'] : []);
+    assert.deepEqual(vm[state], view !== 'DeviceManagement' ? [{ id: 'existing' }] : []);
+    assert.deepEqual(messages, view !== 'DeviceManagement' ? ['failed'] : []);
   });
 }
+
+for (const view of ['CourseManagement', 'CourseLessons']) {
+  for (const outcome of ['success', 'error']) test(`${view} old modal save cannot close or unlock a newly opened draft (${outcome})`, () => {
+    const { vm, writes, navigation, messages } = setup(view, 'fetchList', 'list', 'loading');
+    const open = view === 'CourseManagement' ? 'openEdit' : 'openMetadata';
+    const row = id => ({ courseId: id, courseKey: id, lessonId: id, lessonKey: id, title: id, locale: 'vi', ageBand: '3-5' });
+    vm[open](row('A')); vm.submit(); vm.resetForm(); vm[open](row('B')); vm.submit();
+    assert.equal(writes.length, 2);
+    if (outcome === 'success') succeed(writes[0]); else fail(writes[0]);
+    assert.equal(vm.dialogVisible, true); assert.equal(vm.saving, true); assert.equal(vm.form.title, 'B');
+    assert.deepEqual(messages, []); assert.deepEqual(navigation, []);
+    succeed(writes[1]); assert.equal(vm.saving, false); assert.equal(vm.dialogVisible, false);
+  });
+}
+test('CourseManagement duplicate submit dispatches once', () => {
+  const { vm, writes } = setup('CourseManagement', 'fetchList', 'list', 'loading');
+  vm.openCreate(); Object.assign(vm.form, { courseKey: 'course', title: 'title' });
+  vm.submit(); vm.submit(); assert.equal(writes.length, 1);
+});
+for (const outcome of ['success', 'error']) test(`CourseManagement obsolete clone cannot navigate or alter a later dialog (${outcome})`, () => {
+  const { vm, writes, navigation, messages } = setup('CourseManagement', 'fetchList', 'list', 'loading');
+  vm.openClone({ courseId: 'A', courseKey: 'A', title: 'A' }); vm.doClone(); vm.doClone();
+  assert.equal(writes.length, 1);
+  vm.resetClone(); vm.openClone({ courseId: 'B', courseKey: 'B', title: 'B' }); vm.doClone();
+  if (outcome === 'success') succeed(writes[0], { courseId: 'clone-A' }); else fail(writes[0]);
+  assert.equal(vm.cloneVisible, true); assert.equal(vm.cloning, true); assert.equal(vm.cloneSource.courseId, 'B');
+  assert.deepEqual(navigation, []); assert.deepEqual(messages, []);
+});
+test('CourseManagement quality callback after destruction is ignored', () => {
+  const { vm, calls, destroy, messages } = setup('CourseManagement', 'fetchList', 'list', 'loading');
+  vm.fetchQuality(); destroy(); fail(calls[0]); assert.deepEqual(messages, []);
+});
+
+test('published rows expose their latest draft without replacing published identity', () => {
+  const { vm, calls, versions, component } = lessons(); vm.fetchList();
+  succeed(calls[0], [{ lessonId: 'published', lessonKey: 'key', status: 'published' }]);
+  succeed(versions[0], [{ lessonId: 'old', lessonKey: 'key', status: 'archived', lessonVersion: 1 }, { lessonId: 'draft', lessonKey: 'key', status: 'draft', lessonVersion: 3 }]);
+  const drafts = component.computed.draftsByKey.call(vm);
+  assert.equal(vm.list[0].lessonId, 'published'); assert.equal(drafts.key.lessonId, 'draft');
+  assert.equal(vm.draftsFailed, false); assert.equal(vm.statuses.includes('archived'), false);
+});
+for (const outcome of ['success', 'error']) test(`draft versions reject obsolete ${outcome} on course change`, () => {
+  const { vm, versions, changeCourse } = lessons(); vm.fetchList(); changeCourse('B');
+  if (outcome === 'success') succeed(versions[0], [{ lessonId: 'A-draft' }]); else fail(versions[0]);
+  assert.deepEqual(vm.draftVersions, []); assert.equal(vm.draftsFailed, false);
+  fail(versions[1]); assert.equal(vm.draftsFailed, true);
+});
+
+test('draft keys cannot resolve inherited object members', () => {
+ const { vm, component } = lessons();
+ assert.equal(component.computed.draftsByKey.call(vm).constructor, undefined);
+ vm.draftVersions = [{ lessonKey: 'constructor', lessonId: 'draft', status: 'draft', lessonVersion: 2 }];
+ assert.equal(component.computed.draftsByKey.call(vm).constructor.lessonId, 'draft');
+});

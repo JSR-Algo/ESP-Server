@@ -39,6 +39,7 @@
       </div>
 
       <el-card class="content-area" shadow="never">
+        <el-alert v-if="draftsFailed" type="warning" :closable="false" :title="$t('lesson.draftsUnavailable')" show-icon />
         <div class="filter-row">
           <el-input
             v-model="filters.keyword"
@@ -111,11 +112,15 @@
               </el-tag>
             </template>
           </el-table-column>
-          <el-table-column :label="$t('lesson.colActions')" width="330" fixed="right">
+          <el-table-column :label="$t('lesson.colActions')" width="220" fixed="right">
             <template slot-scope="scope">
               <el-button type="text" size="small" @click="openEditor(scope.row)">
                 {{ $t('lesson.editSteps') }}
               </el-button>
+              <el-button
+                v-if="scope.row.status === 'published' && draftsByKey[scope.row.lessonKey]"
+                type="text" size="small" @click="openEditor(draftsByKey[scope.row.lessonKey])"
+              >{{ $t('lesson.resumeDraft') }}</el-button>
               <el-button v-if="scope.row.status === 'draft'" type="text" size="small" @click="openMetadata(scope.row)">
                 {{ $t('lesson.editMetadata') }}
               </el-button>
@@ -148,7 +153,7 @@
       </el-card>
     </div>
 
-    <el-dialog :title="dialogTitle" :visible.sync="dialogVisible" width="560px" @closed="resetForm">
+    <el-dialog class="metadata-dialog" :title="dialogTitle" :visible.sync="dialogVisible" width="min(560px, calc(100vw - 24px))" @close="resetForm">
       <el-form :model="form" label-width="150px" size="small">
         <el-form-item :label="$t('lesson.colKey')" required>
           <el-input v-model="form.lessonKey" :disabled="editingMetadata" :placeholder="$t('lesson.keyPlaceholder')" />
@@ -355,9 +360,12 @@ export default {
   data() {
     return {
       list: [],
+      draftVersions: [],
+      draftsFailed: false,
       loading: false,
       listRequestId: 0,
       courseContextId: 0,
+      formSession: 0,
       requestsDestroyed: false,
       dialogVisible: false,
       editingMetadata: false,
@@ -371,7 +379,7 @@ export default {
         difficultyBand: '',
         monitorable: '',
       },
-      statuses: ['draft', 'published', 'archived'],
+      statuses: ['draft', 'published'],
       difficultyOptions: ['beginner', 'basic', 'intermediate', 'advanced'],
       ageBands: AGE_BANDS,
       locales: LOCALES,
@@ -381,6 +389,14 @@ export default {
     };
   },
   computed: {
+    draftsByKey() {
+      return this.draftVersions.reduce((drafts, row) => {
+        if (row.status === 'draft' && (!drafts[row.lessonKey] || row.lessonVersion > drafts[row.lessonKey].lessonVersion)) {
+          drafts[row.lessonKey] = row;
+        }
+        return drafts;
+      }, Object.create(null));
+    },
     ageBandSeverity() {
       return ageBandSeverity(this.form.ageBand);
     },
@@ -434,6 +450,8 @@ export default {
       this.courseContextId += 1;
       this.listRequestId += 1;
       this.list = [];
+      this.draftVersions = [];
+      this.draftsFailed = false;
       this.loading = false;
       this.dialogVisible = false;
       this.saving = false;
@@ -491,6 +509,18 @@ export default {
       if (this.requestsDestroyed || !this.courseId) return;
       const requestId = ++this.listRequestId;
       const courseId = this.courseId;
+      this.draftVersions = [];
+      this.draftsFailed = false;
+      Api.lesson.listLessons(courseId,
+        (rows) => {
+          if (this.requestsDestroyed || requestId !== this.listRequestId || courseId !== this.courseId) return;
+          this.draftVersions = rows.filter(row => row.status === 'draft');
+        },
+        () => {
+          if (this.requestsDestroyed || requestId !== this.listRequestId || courseId !== this.courseId) return;
+          this.draftsFailed = true;
+        },
+      );
       this.loading = true;
       Api.lesson.listAuthoritativeLessons(
         this.courseId,
@@ -743,11 +773,13 @@ export default {
       }, context);
     },
     openCreate() {
+      this.resetForm();
       this.editingMetadata = false;
       this.form = blankForm();
       this.dialogVisible = true;
     },
     openMetadata(row) {
+      this.resetForm();
       this.editingMetadata = true;
       this.form = {
         lessonId: row.lessonId,
@@ -762,12 +794,15 @@ export default {
       this.dialogVisible = true;
     },
     resetForm() {
+      this.formSession += 1;
+      this.saving = false;
       this.form = blankForm();
       this.editingMetadata = false;
     },
     submit() {
       if (this.requestsDestroyed || this.saving) return;
       const contextId = this.courseContextId;
+      const formSession = this.formSession;
       const f = this.form;
       if (!f.lessonKey || !f.title || !f.locale || !f.ageBand) {
         this.$message.warning(this.$t('course.required'));
@@ -779,14 +814,14 @@ export default {
           f.lessonId,
           this.metadataPayload(),
           () => {
-            if (this.requestsDestroyed || contextId !== this.courseContextId) return;
+            if (this.requestsDestroyed || contextId !== this.courseContextId || formSession !== this.formSession) return;
             this.saving = false;
             this.dialogVisible = false;
             this.$message.success(this.$t('lesson.metadataSaved'));
             this.fetchList();
           },
           (msg) => {
-            if (this.requestsDestroyed || contextId !== this.courseContextId) return;
+            if (this.requestsDestroyed || contextId !== this.courseContextId || formSession !== this.formSession) return;
             this.saving = false;
             this.$message.error(msg);
           },
@@ -797,14 +832,14 @@ export default {
         this.courseId,
         { lessonKey: f.lessonKey, ...this.metadataPayload() },
         (lesson) => {
-          if (this.requestsDestroyed || contextId !== this.courseContextId) return;
+          if (this.requestsDestroyed || contextId !== this.courseContextId || formSession !== this.formSession) return;
           this.saving = false;
           this.dialogVisible = false;
           this.$message.success(this.$t('lesson.created'));
           this.openEditor(lesson);
         },
         (msg) => {
-          if (this.requestsDestroyed || contextId !== this.courseContextId) return;
+          if (this.requestsDestroyed || contextId !== this.courseContextId || formSession !== this.formSession) return;
           this.saving = false;
           this.$message.error(msg);
         },
@@ -815,6 +850,7 @@ export default {
       const contextId = this.courseContextId;
       this.$confirm(this.$t('lesson.deleteConfirm', { key: row.lessonKey }), this.$t('lesson.delete'), {
         type: 'warning',
+        customClass: 'course-delete-confirm',
       })
         .then(() => {
           if (this.requestsDestroyed || contextId !== this.courseContextId) return;
@@ -838,6 +874,9 @@ export default {
 </script>
 
 <style lang="scss" scoped>
+.metadata-dialog {
+  width: 100vw;
+}
 .operation-bar {
   display: flex;
   justify-content: space-between;
@@ -849,6 +888,7 @@ export default {
   align-items: center;
   gap: 12px;
   min-width: 0;
+  max-width: 100%;
 }
 .page-title {
   margin: 0;

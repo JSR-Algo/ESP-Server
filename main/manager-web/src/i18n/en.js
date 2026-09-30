@@ -46,7 +46,8 @@ export default {
 
   // Course customization (NestJS authoring API via /nestjs proxy)
   'course.pageTitle': 'Courses',
-  'course.backendHint': 'Backed by the NestJS authoring API (/v1/admin) via proxy',
+  'lesson.resumeDraft': 'Resume draft',
+  'lesson.draftsUnavailable': 'Draft versions could not be loaded. Refresh to retry.',
   'course.createBtn': 'Create course',
   'course.refresh': 'Refresh',
   'course.createTitle': 'Create course',

@@ -46,7 +46,8 @@ export default {
 
   // Course customization (NestJS authoring API qua proxy /nestjs)
   'course.pageTitle': 'Khoá học',
-  'course.backendHint': 'Dùng NestJS authoring API (/v1/admin) qua proxy',
+  'lesson.resumeDraft': 'Tiếp tục bản nháp',
+  'lesson.draftsUnavailable': 'Không tải được các bản nháp. Hãy làm mới để thử lại.',
   'course.createBtn': 'Tạo khoá học',
   'course.refresh': 'Tải lại',
   'course.createTitle': 'Tạo khoá học',
