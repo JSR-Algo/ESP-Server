@@ -30,3 +30,6 @@ select:-webkit-autofill:focus {
     border-top-color: #e4e7ed !important;
    }
 }
+.course-delete-confirm {
+  max-width: calc(100vw - 24px);
+}

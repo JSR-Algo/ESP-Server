@@ -11,7 +11,6 @@
         </el-radio-group>
       </div>
       <div class="right-operations">
-        <span class="backend-hint">{{ $t('course.backendHint') }}</span>
         <el-button size="small" @click="$router.push('/lesson-monitoring')">
           {{ $t('lesson.monitor') }}
         </el-button>
@@ -158,7 +157,7 @@
       :title="editing ? $t('course.editTitle') : $t('course.createTitle')"
       :visible.sync="dialogVisible"
       width="480px"
-      @closed="resetForm"
+      @close="resetForm"
     >
       <el-form ref="form" :model="form" label-width="110px" size="small">
         <el-form-item :label="$t('course.colKey')" required>
@@ -215,7 +214,7 @@
       </span>
     </el-dialog>
 
-    <el-dialog :title="$t('course.cloneTitle')" :visible.sync="cloneVisible" width="480px" @closed="resetClone">
+    <el-dialog :title="$t('course.cloneTitle')" :visible.sync="cloneVisible" width="480px" @close="resetClone">
       <p class="muted">{{ $t('course.cloneHint', { source: cloneSource.courseKey }) }}</p>
       <el-form :model="cloneForm" label-width="110px" size="small">
         <el-form-item :label="$t('course.colKey')" required>
@@ -259,6 +258,10 @@ export default {
     return {
       list: [],
       loading: false,
+      listSequence: 0,
+      requestsDestroyed: false,
+      formSession: 0,
+      cloneSession: 0,
       dialogVisible: false,
       editing: false,
       saving: false,
@@ -334,6 +337,13 @@ export default {
     this.fetchList();
     this.fetchQuality();
   },
+  beforeDestroy() {
+    this.requestsDestroyed = true;
+    this.listSequence += 1;
+    this.qualitySequence += 1;
+    this.formSession += 1;
+    this.cloneSession += 1;
+  },
   methods: {
     qualityFor(row) {
       return this.qualityByCourse[row.courseId] || this.qualityByCourse[row.courseKey] || {};
@@ -354,13 +364,17 @@ export default {
       return 'warning';
     },
     fetchList() {
+      if (this.requestsDestroyed) return;
+      const sequence = ++this.listSequence;
       this.loading = true;
       Api.course.getCourseList(
         (rows) => {
+          if (this.requestsDestroyed || sequence !== this.listSequence) return;
           this.loading = false;
           this.list = rows;
         },
         (msg) => {
+          if (this.requestsDestroyed || sequence !== this.listSequence) return;
           this.loading = false;
           this.$message.error(msg || this.$t('course.loadFail'));
         },
@@ -374,6 +388,7 @@ export default {
     // refetches on every change, and a slow 90-day response landing after a
     // fast 7-day one would otherwise paint stale scores.
     fetchQuality() {
+      if (this.requestsDestroyed) return;
       const sequence = ++this.qualitySequence;
       this.qualityLoading = true;
       Api.courseInsights.getCourseQuality(
@@ -412,6 +427,7 @@ export default {
       });
     },
     openClone(row) {
+      this.resetClone();
       this.cloneSource = row;
       this.cloneForm = {
         courseKey: row.courseKey + '-custom',
@@ -420,10 +436,14 @@ export default {
       this.cloneVisible = true;
     },
     resetClone() {
+      this.cloneSession += 1;
+      this.cloning = false;
       this.cloneForm = { courseKey: '', title: '' };
       this.cloneSource = {};
     },
     doClone() {
+      if (this.requestsDestroyed || this.cloning) return;
+      const session = this.cloneSession;
       const f = this.cloneForm;
       if (!f.courseKey || !f.title) {
         this.$message.warning(this.$t('course.required'));
@@ -434,12 +454,14 @@ export default {
         this.cloneSource.courseId,
         { courseKey: f.courseKey, title: f.title },
         (course) => {
+          if (this.requestsDestroyed || session !== this.cloneSession) return;
           this.cloning = false;
           this.cloneVisible = false;
           this.$message.success(this.$t('course.cloned'));
           this.openLessons(course); // jump into the new custom course's lessons
         },
         (msg) => {
+          if (this.requestsDestroyed || session !== this.cloneSession) return;
           this.cloning = false;
           this.$message.error(msg);
         },
@@ -458,11 +480,13 @@ export default {
       );
     },
     openCreate() {
+      this.resetForm();
       this.editing = false;
       this.form = blankCourseForm();
       this.dialogVisible = true;
     },
     openEdit(row) {
+      this.resetForm();
       this.editing = true;
       this.form = {
         courseId: row.courseId,
@@ -474,9 +498,13 @@ export default {
       this.dialogVisible = true;
     },
     resetForm() {
+      this.formSession += 1;
+      this.saving = false;
       this.form = blankCourseForm();
     },
     submit() {
+      if (this.requestsDestroyed || this.saving) return;
+      const session = this.formSession;
       const f = this.form;
       if (!f.courseKey || !f.title || !f.locale || !f.ageBand) {
         this.$message.warning(this.$t('course.required'));
@@ -484,6 +512,7 @@ export default {
       }
       this.saving = true;
       const onErr = (msg) => {
+        if (this.requestsDestroyed || session !== this.formSession) return;
         this.saving = false;
         this.$message.error(msg);
       };
@@ -493,6 +522,7 @@ export default {
           f.courseId,
           { title: f.title, locale: f.locale, ageBand: f.ageBand },
           () => {
+            if (this.requestsDestroyed || session !== this.formSession) return;
             this.saving = false;
             this.dialogVisible = false;
             this.$message.success(this.$t('course.updated'));
@@ -504,6 +534,7 @@ export default {
         Api.course.createCourse(
           { courseKey: f.courseKey, title: f.title, locale: f.locale, ageBand: f.ageBand },
           () => {
+            if (this.requestsDestroyed || session !== this.formSession) return;
             this.saving = false;
             this.dialogVisible = false;
             this.$message.success(this.$t('course.created'));
@@ -517,7 +548,7 @@ export default {
       this.$confirm(
         this.$t('course.deleteConfirm', { key: row.courseKey }),
         this.$t('course.delete'),
-        { type: 'warning' },
+        { type: 'warning', customClass: 'course-delete-confirm' },
       )
         .then(() => {
           Api.course.deleteCourse(
@@ -558,10 +589,6 @@ export default {
   display: flex;
   align-items: center;
   gap: 10px;
-}
-.backend-hint {
-  color: #909399;
-  font-size: 12px;
 }
 .main-wrapper {
   padding: 16px 24px;

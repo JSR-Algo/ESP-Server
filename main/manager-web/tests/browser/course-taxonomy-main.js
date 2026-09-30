@@ -24,6 +24,7 @@ localStorage.setItem('token', 'course-taxonomy-test-session');
 const calls = { created: [], updated: [], errors: [], warnings: [], pendingLessons: [], deferLessons: false };
 
 Object.assign(Api.lesson, {
+  listLessons(courseId, ok) { ok([]); },
   listAuthoritativeLessons(courseId, ok) {
     if (calls.deferLessons) { calls.pendingLessons.push({ courseId, ok }); return; }
     ok([
