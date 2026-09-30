@@ -74,6 +74,7 @@ services:
       LESSON_SHARED_VISUAL_AUTHORING_ENABLED: "true"
       LESSON_EXACT_ESPTFT_PREVIEW_ENABLED: "true"
       COURSE_MODE_V2_PUBLISH_ENABLED: "true"
+      LESSON_ASSET_GENERATION_WORKER_ENABLED: "true"
       LESSON_ROLLOUT_ADMIN_ID_ALLOWLIST: 11111111-1111-4111-8111-111111111111
       LESSON_ROLLOUT_DEVICE_ALLOWLIST: e2e-robot-1
       LESSON_STUDIO_NEW_ASSIGNMENTS_ENABLED: "false"
@@ -145,9 +146,13 @@ services:
       - ${TBOT_LESSON_STUDIO_BACKEND_MOUNT_ROOT:-${TBOT_BACKEND_WORKTREE:?set the built candidate backend worktree}}/src/lessons/fixtures/tvideo-raw-code/assets/asset-manifest.json:/usr/share/nginx/html/tvideo-demo/asset-manifest.json:ro
       - ${TBOT_LESSON_STUDIO_BACKEND_MOUNT_ROOT:-${TBOT_BACKEND_WORKTREE:?set the built candidate backend worktree}}/src/lessons/fixtures/tvideo-raw-code/assets/admin:/usr/share/nginx/html/tvideo-demo/admin:ro
       - ${TBOT_LESSON_STUDIO_BACKEND_MOUNT_ROOT:-${TBOT_BACKEND_WORKTREE:?set the built candidate backend worktree}}/src/lessons/fixtures/tvideo-raw-code/assets/esp-tft:/usr/share/nginx/html/tvideo-demo/esp-tft:ro
-      - ${TBOT_LESSON_STUDIO_FIRMWARE_MOUNT_ROOT:-${TBOT_FIRMWARE_WORKTREE:-../../../TBOT-Firmware}}/lesson/assets:/usr/share/nginx/html/tvideo-demo/assets:ro
+      # Keep bundled browser scenes and robot-alive media visible.
+      - ${TBOT_LESSON_STUDIO_FIRMWARE_MOUNT_ROOT:-${TBOT_FIRMWARE_WORKTREE:-../../../TBOT-Firmware}}/lesson/assets/background:/usr/share/nginx/html/tvideo-demo/assets/background:ro
+      - ${TBOT_LESSON_STUDIO_FIRMWARE_MOUNT_ROOT:-${TBOT_FIRMWARE_WORKTREE:-../../../TBOT-Firmware}}/lesson/assets/objects:/usr/share/nginx/html/tvideo-demo/assets/objects:ro
+      - ${TBOT_LESSON_STUDIO_FIRMWARE_MOUNT_ROOT:-${TBOT_FIRMWARE_WORKTREE:-../../../TBOT-Firmware}}/lesson/assets/reference:/usr/share/nginx/html/tvideo-demo/assets/reference:ro
+      - ${TBOT_LESSON_STUDIO_FIRMWARE_MOUNT_ROOT:-${TBOT_FIRMWARE_WORKTREE:-../../../TBOT-Firmware}}/lesson/assets/robot:/usr/share/nginx/html/tvideo-demo/assets/robot:ro
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null 'http://127.0.0.1:8002/login'"]
+      test: ["CMD-SHELL", "wget -q -O /dev/null 'http://127.0.0.1:8002/login' && wget -q -O /dev/null 'http://127.0.0.1:8002/tbot/user/pub-config'"]
       interval: 3s
       timeout: 5s
       retries: 40

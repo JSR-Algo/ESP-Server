@@ -21,10 +21,11 @@ Vue.use(VueRouter);
 Vue.config.productionTip = false;
 localStorage.setItem('token', 'course-taxonomy-test-session');
 
-const calls = { created: [], updated: [], errors: [], warnings: [] };
+const calls = { created: [], updated: [], errors: [], warnings: [], pendingLessons: [], deferLessons: false };
 
 Object.assign(Api.lesson, {
   listAuthoritativeLessons(courseId, ok) {
+    if (calls.deferLessons) { calls.pendingLessons.push({ courseId, ok }); return; }
     ok([
       {
         lessonId: 'lesson-1', lessonKey: 'w01-d01-barn', title: 'Barn',
@@ -60,6 +61,20 @@ const vm = new Vue({ router, i18n, render: (h) => h(CourseLessons) }).$mount('#a
 const view = vm.$children[0];
 
 window.__COURSE_TAXONOMY_TEST__ = { view, calls };
+window.__SWITCH_COURSE__ = async () => {
+  calls.deferLessons = true;
+  view.fetchList();
+  const oldRequest = calls.pendingLessons[0];
+  await router.replace({ path: '/', query: { courseId: 'course-2', courseKey: 'second-course', title: 'Second course' } });
+  await Vue.nextTick();
+  const currentRequest = calls.pendingLessons.find(call => call.courseId === 'course-2');
+  if (!currentRequest) return { requested: false };
+  const closed = !view.dialogVisible && !view.assignmentDialog.visible;
+  currentRequest.ok([{ lessonId: 'second', lessonKey: 'second', title: 'Current course lesson', status: 'draft', topicTags: [] }]);
+  oldRequest.ok([{ lessonId: 'stale', lessonKey: 'stale', title: 'Stale course lesson', status: 'draft', topicTags: [] }]);
+  await Vue.nextTick();
+  return { requested: true, closed, courseId: view.courseId, titles: view.list.map(row => row.title), text: view.$el.textContent };
+};
 window.__SET_AGE_BAND__ = async (band) => {
   view.form.ageBand = band;
   await Vue.nextTick();

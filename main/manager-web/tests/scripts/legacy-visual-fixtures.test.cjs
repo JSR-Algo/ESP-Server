@@ -26,6 +26,57 @@ const source = { asset_key: 'real.object', version_id: 'real-version', category:
 const bundleAsset = { assetId: 'real-bundle-asset', assetKey: 'real.object', profile: 'espTft', layer: 'teachingObject',
   mediaType: source.mime_type, sha256: source.sha256, bytes: source.bytes, width: source.width, height: source.height, url: source.url };
 
+function pageForSourceBundle(assets, { omitReadbackKey } = {}) {
+  const page = pageFor([]);
+  const fetch = page.request.fetch;
+  const attached = [];
+  page.request.fetch = async (url, options = {}) => {
+    const response = await fetch(url, options);
+    if (options.method === 'POST' && url.endsWith('/assets')) {
+      const asset = assets.find(item => item.assetId === options.data.sourceAssetId);
+      assert.ok(asset, 'attachment must reference an actual source asset');
+      attached.push(asset);
+    }
+    if (url.includes('/assets?profile=espTft')) {
+      const rows = url.includes('/lessons/created/')
+        ? attached.filter(asset => asset.assetKey !== omitReadbackKey) : assets;
+      response.json = async () => ({ data: { profiles: ['espTft'], assets: rows } });
+    }
+    return response;
+  };
+  return page;
+}
+
+const poseAssets = ['teach', 'listening', 'celebrate'].map(pose => ({
+  ...bundleAsset, assetId: `source-${pose}`, assetKey: `robotOverlay.${pose}`, layer: 'robotOverlay',
+  url: `https://assets.example.invalid/robot/${pose}.png`,
+}));
+
+test('legacy fixture persists all compatible source images including authored-step robot poses', async () => {
+  const assets = [bundleAsset, ...poseAssets];
+  const page = pageForSourceBundle([...assets,
+    { ...bundleAsset, assetId: 'oversized', width: 640 },
+    { ...bundleAsset, assetId: 'fake-url', url: 'fixture://fake.png' },
+    { ...bundleAsset, assetId: 'wrong-profile', profile: 'mobile' },
+  ]);
+  await createLegacyFixtureCourse(page, 'e2e-complete-pose-bundle');
+  const attachments = page.calls.filter(call => call.options.method === 'POST' && call.url.endsWith('/assets'));
+  assert.deepEqual(attachments.map(call => call.options.data.sourceAssetId), assets.map(asset => asset.assetId));
+  const firstWrite = page.calls.findIndex(call => call.options.method === 'POST');
+  assert.deepEqual(page.calls.slice(0, firstWrite).filter(call => call.url.startsWith('https://')).map(call => call.url), assets.map(asset => asset.url));
+});
+
+test('corrupt later source pose fails byte verification before any fixture writes', async () => {
+  const page = pageForSourceBundle([bundleAsset, { ...poseAssets[0], sha256: 'a'.repeat(64) }]);
+  await assert.rejects(createLegacyFixtureCourse(page, 'e2e-corrupt-pose'), /source SHA-256/);
+  assert.equal(page.calls.some(call => call.options.method === 'POST'), false);
+});
+
+test('successful attachment without a persisted required pose fails bundle readback', async () => {
+  const page = pageForSourceBundle([bundleAsset, ...poseAssets], { omitReadbackKey: 'robotOverlay.listening' });
+  await assert.rejects(createLegacyFixtureCourse(page, 'e2e-missing-pose-readback'), /robotOverlay.listening/);
+});
+
 test('catalog fixture preserves source metadata after HTTP bytes and decoded dimensions agree', async () => {
   const page = pageFor([source]);
   const actual = await verifiedCatalogImage(page, { category: 'teachingObject', profile: 'espTft' });

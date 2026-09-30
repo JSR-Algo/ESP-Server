@@ -141,7 +141,8 @@ assert.match(lessonEditor, /canPublishCurrentProof\(\)[\s\S]*tvideoJourneyPublis
 assert.doesNotMatch(lessonEditor, /tvideoJourney[^\n]{0,60}(?:storagePath|filesystem)/i);
 
 const packageJson = JSON.parse(pkg);
-assert.equal(packageJson.scripts['test:tvideo-journey-editor'], 'node scripts/check-tvideo-journey-editor.mjs');
+assert.ok(packageJson.scripts['test:tvideo-journey-editor'].includes('node scripts/check-tvideo-journey-editor.mjs'));
+assert.ok(packageJson.scripts['test:tvideo-journey-editor'].includes('tests/unit/tvideo-preview-media-errors.test.mjs'));
 for (const key of ['lesson.tvideoJourney.title', 'lesson.tvideoJourney.previewOnly', 'lesson.tvideoJourney.status.stale', 'lesson.tvideoJourney.tab.sources', 'lesson.tvideoJourney.canvasLabel']) {
   assert.ok(en.includes(`'${key}'`), `missing English key ${key}`);
   assert.ok(vi.includes(`'${key}'`), `missing Vietnamese key ${key}`);

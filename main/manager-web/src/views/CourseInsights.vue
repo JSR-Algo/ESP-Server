@@ -280,6 +280,12 @@ export default {
       qualityKeyword: '',
       qualityCourseId: '',
       qualityRiskFilter: 'all',
+      requestsDestroyed: false,
+      learnerRequestId: 0,
+      previewRequestId: 0,
+      qualityRequestId: 0,
+      selectionId: 0,
+      saveRequestId: 0,
     };
   },
   computed: {
@@ -316,6 +322,9 @@ export default {
     this.fetchLearners();
     this.fetchQuality();
   },
+  beforeDestroy() {
+    this.requestsDestroyed = true;
+  },
   methods: {
     handleTabChange() {
       this.refreshCurrent();
@@ -325,22 +334,27 @@ export default {
       else this.fetchLearners();
     },
     fetchLearners() {
+      if (this.requestsDestroyed) return;
+      const requestId = ++this.learnerRequestId;
       this.learnersLoading = true;
       Api.courseInsights.listLearners(
         { keyword: this.learnerKeyword.trim(), limit: 200 },
         (rows) => {
+          if (this.requestsDestroyed || requestId !== this.learnerRequestId) return;
           this.learnersLoading = false;
           this.learners = rows;
           if (!this.selectedLearner.childId && rows.length) this.selectLearner(rows[0]);
         },
         (msg) => {
+          if (this.requestsDestroyed || requestId !== this.learnerRequestId) return;
           this.learnersLoading = false;
           this.$message.error(msg || this.$t('insights.loadLearnersFail'));
         },
       );
     },
     selectLearner(row) {
-      if (!row) return;
+      if (this.requestsDestroyed || !row || row.childId === this.selectedLearner.childId) return;
+      this.selectionId += 1;
       this.selectedLearner = row;
       this.personalityForm = {
         interestsText: row.personality.interests.join(', '),
@@ -358,10 +372,13 @@ export default {
         .filter(Boolean);
     },
     savePersonality() {
-      if (!this.selectedLearner.childId) return;
+      if (this.requestsDestroyed || !this.selectedLearner.childId || this.savingPersonality) return;
+      const requestId = ++this.saveRequestId;
+      const selectionId = this.selectionId;
+      const childId = this.selectedLearner.childId;
       this.savingPersonality = true;
       Api.courseInsights.updateLearnerPersonality(
-        this.selectedLearner.childId,
+        childId,
         {
           interests: this.parseInterests(),
           learningStyle: this.personalityForm.learningStyle,
@@ -370,43 +387,61 @@ export default {
           attentionSpanSec: this.personalityForm.attentionSpanSec,
         },
         (learner) => {
+          if (this.requestsDestroyed || requestId !== this.saveRequestId) return;
           this.savingPersonality = false;
+          if (selectionId !== this.selectionId || childId !== this.selectedLearner.childId) return;
+          // Keep the editable form: it may contain changes made during this save.
           this.selectedLearner = learner;
           this.$message.success(this.$t('insights.personalitySaved'));
           this.fetchLearners();
           this.fetchPreview();
         },
         (msg) => {
+          if (this.requestsDestroyed || requestId !== this.saveRequestId) return;
           this.savingPersonality = false;
+          if (selectionId !== this.selectionId || childId !== this.selectedLearner.childId) return;
           this.$message.error(msg || this.$t('insights.saveFail'));
         },
       );
     },
     fetchPreview() {
-      if (!this.selectedLearner.childId) return;
+      if (this.requestsDestroyed || !this.selectedLearner.childId) return;
+      const requestId = ++this.previewRequestId;
+      const selectionId = this.selectionId;
+      const childId = this.selectedLearner.childId;
+      this.previewLessons = [];
       this.previewLoading = true;
       Api.courseInsights.previewLearnerLessons(
         this.selectedLearner.childId,
         { keyword: this.previewKeyword.trim(), limit: 50 },
         (payload) => {
+          if (this.requestsDestroyed || requestId !== this.previewRequestId
+            || selectionId !== this.selectionId || childId !== this.selectedLearner.childId) return;
           this.previewLoading = false;
           this.previewLessons = payload.lessons;
         },
         (msg) => {
+          if (this.requestsDestroyed || requestId !== this.previewRequestId
+            || selectionId !== this.selectionId || childId !== this.selectedLearner.childId) return;
           this.previewLoading = false;
           this.$message.error(msg || this.$t('insights.previewFail'));
         },
       );
     },
     fetchQuality() {
+      if (this.requestsDestroyed) return;
+      const requestId = ++this.qualityRequestId;
+      this.qualityRows = [];
       this.qualityLoading = true;
       Api.courseInsights.getCourseQuality(
         { windowDays: this.qualityWindow, courseId: this.qualityCourseId, keyword: this.qualityKeyword.trim() },
         (rows) => {
+          if (this.requestsDestroyed || requestId !== this.qualityRequestId) return;
           this.qualityLoading = false;
           this.qualityRows = rows;
         },
         (msg) => {
+          if (this.requestsDestroyed || requestId !== this.qualityRequestId) return;
           this.qualityLoading = false;
           this.$message.error(msg || this.$t('insights.qualityFail'));
         },
