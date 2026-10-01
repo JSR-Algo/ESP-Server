@@ -1065,12 +1065,16 @@ export default {
     },
     cinematicLibraries() {
       const libraries = this.rawCinematicLibraries || {};
+      const imagesOnly = ['teebot-lesson-renderer.v1', 'teebot-lesson-renderer.v2']
+        .includes(this.lesson && this.lesson.manifestVersion);
+      const compatible = rows => (Array.isArray(rows) ? rows : [])
+        .filter(asset => !imagesOnly || !String(asset.mimeType || '').startsWith('video/'));
       return {
-        backgroundScene: Array.isArray(libraries.backgroundScene) ? libraries.backgroundScene : [],
-        teachingObject: Array.isArray(libraries.teachingObject) ? libraries.teachingObject : [],
+        backgroundScene: compatible(libraries.backgroundScene),
+        teachingObject: compatible(libraries.teachingObject),
         robotOverlay: this.isCourseModeV5
           ? this.filterRobotVideoAssets(libraries.robotOverlay)
-          : (Array.isArray(libraries.robotOverlay) ? libraries.robotOverlay : []),
+          : compatible(libraries.robotOverlay),
       };
     },
     selectedStep() {
@@ -2850,6 +2854,12 @@ export default {
     selectCinematicLayer(selection) {
       if (!selection || !selection.assetVersionId) return;
       const asset = selection.asset || {};
+      if (['teebot-lesson-renderer.v1', 'teebot-lesson-renderer.v2']
+        .includes(this.lesson && this.lesson.manifestVersion)
+        && String(asset.mimeType || '').startsWith('video/')) {
+        this.$message.warning('This lesson renderer requires an image. Select a compatible image asset.');
+        return false;
+      }
       if (selection.slot === 'backgroundScene') {
         return this.selectBackground({ assetKey: asset.assetKey, versionId: selection.assetVersionId });
       }

@@ -76,7 +76,7 @@ try {
   await waitForReadiness('window.__LESSON_BUILDER_TEST__.editor.selectedStepIndex === 1', 'second lesson step selection');
   const committedPickerMedia = {};
   for (const [slot, kind, expectedPath, resultKey] of [
-    ['backgroundScene', 'video', '/tvideo-demo/assets/scenes/deep-barn-farm-background-6s.mp4', 'background'],
+    ['backgroundScene', 'img', '/tvideo-demo/assets/t54-layered/background-farm.jpg', 'background'],
     ['teachingObject', 'img', '/tvideo-demo/assets/objects/barn.png', 'teaching'],
   ]) {
     const selector = `[data-slot="${slot}"]`;
@@ -86,7 +86,7 @@ try {
       `JSON.stringify([...document.querySelectorAll(${JSON.stringify(selector + ' .asset-tile')})].map(tile=>({rect:tile.getBoundingClientRect().toJSON(),media:[...tile.querySelectorAll('video,img')].map(element=>({tag:element.tagName,src:element.getAttribute('src')}))})))`);
     committedPickerMedia[resultKey] = await evaluate(mediaPredicate);
   }
-  committedPickerMedia.robot = await evaluate(`(()=>{const assets=window.__LESSON_BUILDER_TEST__.editor.cinematicLibraries.robotOverlay;return assets.length===2&&assets.every(asset=>asset.mimeType==='video/webm'&&String(asset.url||'').endsWith('/tvideo-demo/assets/robot-alive/flight/greet-loop.webm'))})()`);
+  committedPickerMedia.robot = await evaluate(`(()=>{const assets=window.__LESSON_BUILDER_TEST__.editor.cinematicLibraries.robotOverlay;return assets.length===2&&assets.every(asset=>asset.mimeType==='image/png'&&String(asset.url||'').endsWith('/tvideo-demo/assets/robot-alive/poses/alive-teach.png'))})()`);
   const result = await evaluate(`(async()=>{
     const t=window.__LESSON_BUILDER_TEST__,e=t.editor, tick=()=>new Promise(r=>setTimeout(r,0)),waitFor=async(test)=>{for(let i=0;i<50&&!test();i+=1)await tick();if(!test())throw new Error('browser fixture condition timed out')};
     const setInput=(input,value)=>{input.value=value;input.dispatchEvent(new Event('input',{bubbles:true}))};
