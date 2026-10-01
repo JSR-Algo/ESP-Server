@@ -147,3 +147,34 @@ test('typed validation rejection preserves actionable findings and metrics', () 
   assert.deepEqual(vm.validationResult.metrics, { assetCount: 8 });
   assert.equal(vm.validationResult.valid, false);
 });
+
+const libraryGetter = source.slice(source.indexOf('    cinematicLibraries() {'), source.indexOf('    selectedStep() {'));
+const libraryComputed = new Function(`return {${libraryGetter}}`)();
+const selectionBlock = source.slice(source.indexOf('    selectCinematicLayer(selection) {'), source.indexOf('    selectTeachObject(obj) {'));
+for (const version of ['v1', 'v2']) {
+  test(`${version} picker excludes videos from every visual slot`, () => {
+    const image = { versionId: 'image', mimeType: 'image/png' };
+    const video = { versionId: 'video', mimeType: 'video/mp4' };
+    const vm = { lesson: { manifestVersion: `teebot-lesson-renderer.${version}` },
+      isCourseModeV5: false, rawCinematicLibraries: Object.fromEntries(
+        ['backgroundScene', 'teachingObject', 'robotOverlay'].map(slot => [slot, [image, video]])) };
+    const libraries = libraryComputed.cinematicLibraries.call(vm);
+    for (const rows of Object.values(libraries)) assert.deepEqual(rows, [image]);
+  });
+  test(`${version} rejects an incompatible selection before dispatching a write`, () => {
+    const writes = [], warnings = [];
+    const methods = new Function('Api', `return {${selectionBlock}}`)({ lesson: { setVisualRef: (...args) => writes.push(args) } });
+    const vm = { lesson: { manifestVersion: `teebot-lesson-renderer.${version}` },
+      isCourseModeV5: false, isDraft: true, selectedStep: { stepKey: 's1' },
+      $message: { warning: message => warnings.push(message) } };
+    methods.selectCinematicLayer.call(vm, { slot: 'robotOverlay', assetVersionId: 'video', asset: { mimeType: 'video/mp4' } });
+    assert.equal(writes.length, 0);
+    assert.equal(warnings.length, 1);
+  });
+}
+test('v3 picker retains supported direct-video candidates', () => {
+  const video = { versionId: 'video', mimeType: 'video/mp4' };
+  const vm = { lesson: { manifestVersion: 'teebot-lesson-renderer.v3' }, isCourseModeV5: false,
+    rawCinematicLibraries: { robotOverlay: [video] } };
+  assert.deepEqual(libraryComputed.cinematicLibraries.call(vm).robotOverlay, [video]);
+});
