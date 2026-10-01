@@ -54,7 +54,13 @@ function mergeAuthoringFields(body, patch) {
   Object.keys(mergedMotion).forEach((slot) => {
     if (!NAMED_MOTIONS.includes(mergedMotion[slot])) mergedMotion[slot] = defaults.motion[slot] || 'rest';
   });
+  const flow = {};
+  ['durationSec', 'timeoutSec', 'terminal', 'branches'].forEach((key) => {
+    if (Object.prototype.hasOwnProperty.call(next, key)) flow[key] = clone(next[key]);
+    else if (Object.prototype.hasOwnProperty.call(source, key)) flow[key] = clone(source[key]);
+  });
   return {
+    ...flow,
     durationPreset: DURATION_PRESETS.includes(requestedDuration) ? requestedDuration : defaults.durationPreset,
     teachingWord: { ...defaults.teachingWord, ...(source.teachingWord || {}), ...(next.teachingWord || {}) },
     interaction: { ...defaults.interaction, ...(source.interaction || {}), ...(next.interaction || {}) },
@@ -75,6 +81,20 @@ function engagementKind(step) {
   if (pattern && ['sillyChoice', 'soundGuess', 'missingObject', 'miniStoryRescue', 'fastSlow'].includes(pattern)) return 'minigame';
   if (body.interaction || ['listen', 'repeat', 'fillBlank', 'guess'].includes(step.stepType)) return 'voice';
   return 'passive';
+}
+
+// Display defaults are not author intent: adding an interaction to a passive
+// legacy step would change publish validation and playback when editing timing.
+function mergePersistedAuthoringFields(body, patch) {
+  const source = body && typeof body === 'object' ? body : {};
+  const next = patch && typeof patch === 'object' ? patch : {};
+  const normalized = mergeAuthoringFields(source, next);
+  const result = {};
+  Object.keys(normalized).forEach((key) => {
+    if (Object.prototype.hasOwnProperty.call(next, key)) result[key] = normalized[key];
+    else if (Object.prototype.hasOwnProperty.call(source, key)) result[key] = clone(source[key]);
+  });
+  return result;
 }
 
 function buildEngagementTrack(steps) {
@@ -518,6 +538,7 @@ function validSimulationEvidence(result, expectedPreview, authoringSteps = []) {
 }
 
 module.exports = {
+  mergePersistedAuthoringFields,
   assetDeletionImpact,
   bindClonedAssetToStep,
   clampTeachingWord,

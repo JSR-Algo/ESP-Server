@@ -17,6 +17,7 @@ const {
   DURATION_PRESETS,
   NAMED_MOTIONS,
   mergeAuthoringFields,
+  mergePersistedAuthoringFields,
   nextClonedAssetKey,
   replaceStepAssetReference,
   validSimulationEvidence,
@@ -26,6 +27,27 @@ const {
   isProjectedCourseModeStep,
   normalizeCourseModeVisualKeys,
 } = require('../src/components/lesson/lesson-builder-logic');
+
+// Legacy drafts must retain editable flow fields through the panel's merge cycle.
+const legacyFlow = {
+  durationSec: 8,
+  timeoutSec: 12,
+  terminal: false,
+  branches: { correct: { nextStepKey: 's2', audit: 'retain' }, timeout: { end: true } },
+};
+const flowEdit = mergeAuthoringFields(legacyFlow, { durationSec: 6, terminal: true });
+assert.strictEqual(flowEdit.durationSec, 6, 'step duration edit must reach save payload');
+assert.strictEqual(flowEdit.timeoutSec, 12);
+assert.strictEqual(flowEdit.terminal, true, 'author must be able to mark an explicit ending');
+assert.deepStrictEqual(flowEdit.branches, legacyFlow.branches, 'unrelated edits must preserve branches');
+assert.strictEqual(Object.hasOwn(mergeAuthoringFields({}, {}), 'terminal'), false, 'opening an old step must not invent termination');
+assert.strictEqual(Object.hasOwn(mergeAuthoringFields({}, {}), 'durationSec'), false);
+assert.strictEqual(mergeAuthoringFields(flowEdit, { terminal: false }).terminal, false);
+assert.deepStrictEqual(mergePersistedAuthoringFields({}, { durationSec: 8, terminal: true }), { durationSec: 8, terminal: true }, 'flow repair must not synthesize interaction or teaching metadata');
+assert.deepStrictEqual(mergePersistedAuthoringFields({}, {}), {});
+const explicitInteraction = mergePersistedAuthoringFields({ interaction: { funPattern: 'soundGuess' }, branches: legacyFlow.branches }, { terminal: true });
+assert.strictEqual(explicitInteraction.interaction.funPattern, 'soundGuess');
+assert.deepStrictEqual(explicitInteraction.branches, legacyFlow.branches);
 
 const protectedRecallActivity = {
   activityId: 'recall-1',
@@ -624,5 +646,43 @@ assert.ok(
 );
 assert.match(interactionPanelSource, /setTeachingWord\(\$event\)/);
 assert.match(interactionPanelSource, /clampTeachingWord\(String\(value\)\.toUpperCase\(\)\)/);
+
+const panelSandbox = { module: { exports: {} }, mergeAuthoringFields, mergePersistedAuthoringFields };
+vm.runInNewContext(interactionPanelSource.match(/<script>([\s\S]*?)<\/script>/)[1]
+  .replace(/import\s*\{[\s\S]*?\}\s*from\s*'[^']+';/g, '')
+  .replace('export default', 'module.exports ='), panelSandbox);
+const interactionPanel = panelSandbox.module.exports;
+let emittedFlow;
+const panelContext = {
+  model: flowEdit,
+  value: flowEdit,
+  $emit(event, value) { assert.strictEqual(event, 'input'); emittedFlow = value; },
+};
+Object.entries(interactionPanel.methods).forEach(([name, method]) => { panelContext[name] = method.bind(panelContext); });
+panelContext.setBranchTarget('correct', ' s3 ');
+assert.strictEqual(emittedFlow.branches.correct.nextStepKey, 's3');
+assert.strictEqual(emittedFlow.branches.correct.audit, 'retain');
+assert.strictEqual(flowEdit.branches.correct.nextStepKey, 's2', 'branch editor must not mutate saved state');
+panelContext.setBranchEnd('timeout', false);
+assert.strictEqual(emittedFlow.branches.timeout.end, false);
+assert.strictEqual(emittedFlow.branches.timeout.terminal, false);
+assert.strictEqual(interactionPanel.computed.stepDuration.call({ model: { timeoutSec: 18 } }), 18);
+assert.strictEqual(interactionPanel.computed.stepDuration.call({ model: {} }), 12);
+emittedFlow = null;
+panelContext.setDuration(undefined);
+assert.strictEqual(emittedFlow, null, 'clearing the duration must not write an invalid value');
+panelContext.setDuration(9);
+assert.strictEqual(emittedFlow.durationSec, 9);
+panelContext.value = {};
+panelContext.setDuration(7);
+assert.deepStrictEqual(emittedFlow, { durationSec: 7 }, 'panel flow edit must not turn a passive legacy step into an interaction');
+const { mergeStepBodyForSave } = require('../src/components/lesson/tvideo-template-logic');
+const savedFlow = mergeStepBodyForSave({ unrelated: { retain: true }, timeoutSec: 20 }, emittedFlow);
+assert.deepStrictEqual(savedFlow, { unrelated: { retain: true }, timeoutSec: 20, durationSec: 7 });
+const compiledPanel = require('vue/compiler-sfc').compileTemplate({
+  source: interactionPanelSource.match(/<template>([\s\S]*?)<\/template>/)[1],
+  filename: 'LessonInteractionPanel.vue',
+});
+assert.deepStrictEqual(compiledPanel.errors, [], 'flow control template must compile');
 
 console.log('lesson builder logic checks passed');

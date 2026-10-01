@@ -28,6 +28,14 @@ async function main() {
           page.on('request', req => { if (req.url() === origin + videoPath) videoRequests.push(req); });
           await page.goto(`${origin}/index.html${embed ? '?embed=1' : ''}`, { waitUntil: 'domcontentloaded' });
           if (embed) {
+            assert.equal(await page.locator('#bgv').isVisible(), false, 'source-less embedded video must not expose a native playback error');
+            if (name === 'chromium') {
+              const session = await page.context().newCDPSession(page);
+              const tree = await session.send('Accessibility.getFullAXTree');
+              assert.equal(tree.nodes.some(node => node.name?.value === 'Unable to play media.'), false,
+                'waiting for authored media must not announce a playback failure');
+              await session.detach();
+            }
             assert.equal(await page.locator('#obj img').getAttribute('src'), null, 'embedded preview must wait for authored object');
             assert.equal(objectRequests.length, 0, 'embedded preview must not start an unused default object request');
             await page.evaluate(() => {
@@ -56,6 +64,7 @@ async function main() {
             await selected;
           }
           assert.equal(await page.locator('#bgv').getAttribute('src'), 'assets/scenes/deep-barn-farm-background-6s.mp4');
+          assert.equal(await page.locator('#bgv').isVisible(), true, 'selected background video must be restored');
           await expect.poll(() => videoRequests.length).toBeGreaterThan(0);
           if (!embed) {
             await page.waitForFunction(() => { const img = document.querySelector('#obj img'); return img.complete && img.naturalWidth > 0; });

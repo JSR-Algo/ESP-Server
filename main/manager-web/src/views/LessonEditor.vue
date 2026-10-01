@@ -434,10 +434,11 @@
         <p v-else class="muted">{{ $t('lesson.draftOnly') }}</p>
       </el-card>
 
-      <!-- Asset authoring (draft only): layer + role + stable assetKey + critical
-           + robot pose picker + per-session preview list. -->
+      <!-- Published bundles still feed preview and readiness; only drafts permit mutations. -->
       <LessonAssetManager
-        v-if="isDraft"
+        v-if="lesson"
+        :key="lessonId"
+        :read-only="!isDraft"
         ref="assetManager"
         :lesson-id="lessonId"
         :subject-hint="lastSubject"
@@ -683,7 +684,7 @@ import {
   bindClonedAssetToStep,
   collectAssetReferences,
   isCourseModeAuthority as detectCourseModeAuthority,
-  mergeAuthoringFields,
+  mergePersistedAuthoringFields,
   normalizeCourseModeVisualKeys,
   replaceStepAssetReference,
   validSimulationEvidence as validateSimulationEvidence,
@@ -1172,9 +1173,9 @@ export default {
     },
     selectedAuthoring: {
       get() {
-        if (!this.selectedStep) return mergeAuthoringFields({}, {});
+        if (!this.selectedStep) return mergePersistedAuthoringFields({}, {});
         return this.selectedStepDrafts[this.selectedStep.stepKey]
-          || mergeAuthoringFields(this.selectedStep.stepBody || {}, {});
+          || mergePersistedAuthoringFields(this.selectedStep.stepBody || {}, {});
       },
       set(value) {
         if (!this.selectedStep || this.savingStep || this.lessonVisualStepMutationBlocked || this.rebindingSharedVisual) return;
@@ -2707,7 +2708,7 @@ export default {
       if (selectedAsset) {
         stepBody.teachingObject = {
           ...(stepBody.teachingObject || {}),
-          primaryWord: authored.teachingWord.text || step.subject,
+          primaryWord: (authored.teachingWord && authored.teachingWord.text) || step.subject,
           asset: {
             key: selectedAsset.assetKey,
             src: selectedAsset.path || selectedAsset.url,
@@ -3309,12 +3310,21 @@ export default {
           else if (!parsed.valid) fail(this.$t('lesson.validFail'));
           else succeed(parsed);
         },
-        (msg) => {
+        (msg, error) => {
           if (this.editorDestroying) return;
           if (requestId !== this.validationRequestId || proofVersion !== this.proofVersion
             || lessonId !== this.lessonId || lessonLoadRequestId !== this.lessonLoadRequestId) return;
           this.validating = false;
-          this.validationResult = { valid: false, profiles: [], errors: [msg], warnings: [], findings: [] };
+          const body = error && (error.data || (error.response && error.response.data));
+          const details = body && body.code === 'LESSON_PUBLISH_VALIDATION_FAILED' && body.details;
+          this.validationResult = {
+            valid: false, profiles: [],
+            errors: details && Array.isArray(details.errors) && details.errors.length ? details.errors : [msg],
+            warnings: details && Array.isArray(details.warnings) ? details.warnings : [],
+            findings: [],
+            ...(details && details.metrics && typeof details.metrics === 'object' ? { metrics: details.metrics } : {}),
+            ...(details ? { budgets: { espTft: details } } : {}),
+          };
           this.validationProofVersion = proofVersion;
           this.$message.error(msg);
           fail(msg);
