@@ -184,10 +184,10 @@ expectContains(
   'Api.lesson.listAuthoritativeLessons(',
   'normal lesson browsing must show exactly one authoritative row per lesson key',
 );
-expectNotContains(
+expectContains(
   'src/views/CourseLessons.vue',
-  'Api.lesson.listLessons(',
-  'CourseLessons must not load historical rows',
+  "this.draftVersions = rows.filter(row => row.status === 'draft')",
+  'the separate authoring list must include only drafts, not historical published versions',
 );
 expectContains(
   'src/views/LessonEditor.vue',

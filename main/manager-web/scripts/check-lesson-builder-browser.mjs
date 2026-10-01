@@ -41,6 +41,10 @@ try {
   await cdp('Page.enable'); await cdp('Runtime.enable'); await cdp('Page.navigate', { url: `http://127.0.0.1:${server.address().port}/` });
   const editorReady = 'Boolean(window.__LESSON_BUILDER_READY__) && document.querySelectorAll(".step-nav__item").length >= 2 && [...document.querySelectorAll(".right-operations button")].some((button)=>button.textContent.includes("Preview"))';
   await waitForReadiness(editorReady, 'lesson builder fixture readiness', 'JSON.stringify({ signaled: Boolean(window.__LESSON_BUILDER_READY__), lessonId: window.__LESSON_BUILDER_TEST__?.editor?.lessonId, bodyText: document.body.innerText.slice(0, 500) })');
+  const initialProof = await evaluate(`(()=>{const e=window.__LESSON_BUILDER_TEST__.editor; const r=e.$children.find(c=>c.$options.name==='LessonPublishReadiness'); return {ready:r.ready, rows:r.budgetRows.filter(row=>['offline','paths'].includes(row.key)).map(row=>({pass:row.pass,value:row.value})), failing:r.$el.querySelectorAll('.readiness__grid .is-failing').length}})()`);
+  assert.equal(initialProof.ready, false);
+  assert.ok(initialProof.rows.every(row=>row.pass===null), 'unvalidated proof must remain unknown');
+  assert.equal(initialProof.failing, 0, 'missing validation is not a failed check');
   const initialLayoutAudits = [];
   for (const width of [1440, 1024, 768, 390]) {
     initialLayoutAudits.push(await auditLayoutAt(width));
