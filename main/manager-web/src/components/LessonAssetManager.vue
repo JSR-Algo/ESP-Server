@@ -3,7 +3,7 @@
     <div slot="header" class="card-header">{{ $t('lesson.assets') }}</div>
 
     <!-- Upload controls -->
-    <div class="asset-form">
+    <div v-if="!readOnly" class="asset-form">
       <div class="field">
         <label class="field-label">{{ $t('lesson.layer') }}</label>
         <el-select v-model="layer" size="small" style="width: 180px" @change="onLayerChange">
@@ -40,7 +40,7 @@
       </div>
     </div>
 
-    <div class="add-row">
+    <div v-if="!readOnly" class="add-row">
       <el-upload
         ref="uploader"
         action="#"
@@ -85,7 +85,7 @@
               <div class="kv" v-if="a.dimensions"><span class="muted">{{ $t('lesson.assetPreview') }}</span><span class="mono">{{ a.dimensions.width }}×{{ a.dimensions.height }} {{ a.mediaType }} · {{ a.bytes }}B</span></div>
               <div class="kv"><span class="muted">sha256</span><span class="mono">{{ shortSha(a.sha256) }}</span></div>
             </div>
-            <div class="asset-actions">
+            <div v-if="!readOnly" class="asset-actions">
               <el-button size="mini" :disabled="disabled" @click="startReplace(a)">{{ $t('lesson.replaceAsset') }}</el-button>
               <el-popconfirm :title="$t('lesson.assetDeleteConfirm')" @confirm="onDelete(a)">
                 <el-button slot="reference" type="danger" size="mini" icon="el-icon-delete" :disabled="disabled" />
@@ -123,6 +123,7 @@ export default {
   props: {
     lessonId: { type: [String, Number], required: true },
     disabled: { type: Boolean, default: false },
+    readOnly: { type: Boolean, default: false },
     // Optional vocab/subject to prefill teachingObject.<subject> assetKey
     subjectHint: { type: String, default: '' },
     mutationSettler: { type: Function, required: true },
@@ -238,7 +239,7 @@ export default {
     // Prefill the upload form from a row, keeping layer/role stable so the key's
     // placement does not change on replace (upsert-by-assetKey).
     startReplace(a) {
-      if (this.disabled || this.mutationPending) return;
+      if (this.readOnly || this.disabled || this.mutationPending) return;
       if (a && a.assetId) {
         this.$emit('impact-review-request', { intent: 'replace', asset: a });
         return;
@@ -246,7 +247,7 @@ export default {
       this.confirmReplace(a);
     },
     confirmReplace(a) {
-      if (!a || this.disabled || this.mutationPending) return;
+      if (!a || this.readOnly || this.disabled || this.mutationPending) return;
       this.replaceMode = true;
       this.layer = a.layer;
       this.role = a.role;
@@ -317,7 +318,7 @@ export default {
       this.pickedFile = file.raw || file;
     },
     beginMutation() {
-      if (this.disabled || this.mutationPending) return null;
+      if (this.readOnly || this.disabled || this.mutationPending) return null;
       const id = nextAssetMutationId();
       this.mutationPending = true;
       this.activeMutationId = id;
@@ -356,7 +357,7 @@ export default {
       this.$message.error(message);
     },
     uploadAsset() {
-      if (!this.pickedFile || this.disabled || this.mutationPending) return;
+      if (!this.pickedFile || this.readOnly || this.disabled || this.mutationPending) return;
       const key = (this.assetKey || '').trim();
       if (!key) {
         this.$message.warning(this.$t('lesson.assetKeyRequired'));

@@ -5,6 +5,16 @@ const path = require('node:path');
 const source = fs.readFileSync(path.join(__dirname, '../../src/views/LessonEditor.vue'), 'utf8');
 const block = source.slice(source.indexOf('    onCourseModeDraftInput(value)'), source.indexOf('    async loadCanonicalDemo()'));
 const clone = value => JSON.parse(JSON.stringify(value));
+test('existing passive step authoring does not synthesize interaction metadata', () => {
+  const helpers = require('../../src/components/lesson/lesson-builder-logic');
+  const getter = source.slice(source.indexOf('    selectedAuthoring: {'), source.indexOf('    selectedTemplateAuthoring: {'));
+  const computed = new Function('mergeAuthoringFields', 'mergePersistedAuthoringFields', `return {${getter}}`)(helpers.mergeAuthoringFields, helpers.mergePersistedAuthoringFields);
+  const body = { durationSec: 12, terminal: true, scene: { assetId: 'retained' } };
+  const authored = computed.selectedAuthoring.get.call({ selectedStep: { stepKey: 's1', stepBody: body }, selectedStepDrafts: {} });
+  assert.equal(authored.interaction, undefined);
+  assert.equal(authored.teachingWord, undefined);
+  assert.equal(authored.durationSec, 12);
+});
 const snap = (id = 'A', letter = 'a') => ({ lessonId: id, checksum: letter.repeat(64), visualChecksum: 'b'.repeat(64), contract: { contractChecksum: letter.repeat(64), session: {}, targets: [], activities: [{ contextId: 'saved', activityId: 'a1', visual: {}, answerPolicy: {}, outcomes: {}, targetIds: [], modalities: [] }] } });
 function setup() {
   const reads = [], writes = [];
@@ -105,4 +115,35 @@ for (const value of ['', null, 'replacement', undefined]) test(`step hint PATCH 
   for (const field of ['helperText', 'l1TransferHint']) {
     assert.equal(sent[field], value); assert.equal(Object.hasOwn(sent, field), value !== undefined);
   }
+});
+
+test('published lessons mount a read-only keyed bundle reader', () => {
+  const tag = source.match(/<LessonAssetManager\b[^>]*>/)[0];
+  const attr = name => tag.match(new RegExp(name + '=\"([^\"]*)\"'))?.[1];
+  assert.ok(new Function('isDraft', 'lesson', `return ${attr('v-if')}`)(false, { status: 'published' }));
+  assert.equal(attr(':key'), 'lessonId');
+  assert.equal(attr(':read-only'), '!isDraft');
+});
+
+test('published bundle component rejects mutations even if disabled is false', () => {
+  const text = fs.readFileSync(path.join(__dirname, '../../src/components/LessonAssetManager.vue'), 'utf8');
+  const body = text.slice(text.indexOf('    beginMutation() {'), text.indexOf('    finishMutation(id)'));
+  let calls = 0;
+  const methods = new Function('nextAssetMutationId', `return {${body}}`)(() => { calls++; return 'id'; });
+  const vm = { ...methods, readOnly: true, disabled: false, mutationPending: false, $emit() {} };
+  assert.equal(vm.beginMutation(), null);
+  assert.equal(calls, 0);
+});
+
+test('typed validation rejection preserves actionable findings and metrics', () => {
+  const block = source.slice(source.indexOf('    doValidate('), source.indexOf('    validManifestPreviewResponse('));
+  let reject;
+  const methods = new Function('Api', `return {${block}}`)({ lesson: { validate(id, ok, fail) { reject = fail; } } });
+  const vm = { ...methods, lessonId: 'A', lessonLoadRequestId: 1, validationRequestId: 0, publishReviewRequestId: 0, proofVersion: 3, hasUnsafeProofState: () => false, $message: { error() {} } };
+  vm.doValidate();
+  const errors = [{ code: 'passive-run', stepKey: 's1', message: '48 exceeds 30', actual: 48, limit: 30 }];
+  reject('Validation failed', { status: 422, data: { code: 'LESSON_PUBLISH_VALIDATION_FAILED', details: { errors, warnings: [], metrics: { assetCount: 8 } } } });
+  assert.deepEqual(vm.validationResult.errors, errors);
+  assert.deepEqual(vm.validationResult.metrics, { assetCount: 8 });
+  assert.equal(vm.validationResult.valid, false);
 });
