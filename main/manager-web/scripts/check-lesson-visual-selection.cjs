@@ -219,8 +219,18 @@ assertSourceIncludes(
 );
 assertSourceIncludes(
   editorSource,
-  "$t(isCourseModeV5 ? 'lesson.visualTripleRequired' : 'lesson.visualPairRequired')",
-  'the inline missing-visual notice must use the Course Mode v5 triple copy when a robot video is also required',
+  '<CourseModeVisualSelection v-if="isCourseModeV5 && courseModeContract"',
+  'Course Mode v5 must use the phase-aware visual binding editor',
+);
+assertSourceIncludes(
+  editorSource,
+  'v-if="lesson.lessonId === lessonId && !courseModeLoading && !isCourseModeV5" class="lesson-visual-pair"',
+  'the legacy visual-pair editor must not be exposed for Course Mode v5',
+);
+assertSourceIncludes(
+  editorSource,
+  "$t('lesson.visualPairRequired')",
+  'the legacy missing-visual notice must explain the required image pair',
 );
 assertSourceIncludes(
   editorSource,
