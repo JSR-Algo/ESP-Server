@@ -12,7 +12,7 @@
     <!-- Lesson header -->
     <div class="operation-bar">
       <div class="left-title">
-        <el-button type="text" icon="el-icon-arrow-left" @click="$router.back()">
+        <el-button type="text" icon="el-icon-arrow-left" @click="$router.push(courseLessonsRoute)">
           {{ $t('lesson.pageTitle') }}
         </el-button>
         <h2 class="page-title" v-if="lesson">
@@ -939,6 +939,16 @@ export default {
     stepBaselineFingerprints() { return this.stepEditor.baselineFingerprints; },
     lessonId() {
       return this.$route.query.lessonId;
+    },
+    courseLessonsRoute() {
+      const courseId = (this.lesson && this.lesson.lessonId === this.lessonId && this.lesson.courseId)
+        || this.$route.query.courseId;
+      if (!courseId) return { path: '/course-management' };
+      const query = { courseId };
+      if (courseId === this.$route.query.courseId && this.$route.query.courseTitle) {
+        query.title = this.$route.query.courseTitle;
+      }
+      return { path: '/course-lessons', query };
     },
     flattenedDerivativeManifestVersion() {
       const manifest = this.previewManifest && this.previewManifest.manifest;

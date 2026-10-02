@@ -5,6 +5,24 @@ const path = require('node:path');
 const source = fs.readFileSync(path.join(__dirname, '../../src/views/LessonEditor.vue'), 'utf8');
 const block = source.slice(source.indexOf('    onCourseModeDraftInput(value)'), source.indexOf('    async loadCanonicalDemo()'));
 const clone = value => JSON.parse(JSON.stringify(value));
+for (const [name, lesson, query, expected] of [
+  ['loaded lesson owns course', { courseId: 'actual' }, { courseId: 'stale' }, { path: '/course-lessons', query: { courseId: 'actual' } }],
+  ['loading deep link retains course', null, { courseId: 'linked' }, { path: '/course-lessons', query: { courseId: 'linked' } }],
+  ['same-course title survives return', { courseId: 'linked' }, { courseId: 'linked', courseTitle: 'Farm' }, { path: '/course-lessons', query: { courseId: 'linked', title: 'Farm' } }],
+  ['stale lesson does not own destination', { lessonId: 'old', courseId: 'old-course' }, { courseId: 'new-course' }, { path: '/course-lessons', query: { courseId: 'new-course' } }],
+  ['missing course returns to catalog', null, {}, { path: '/course-management' }],
+]) test(`Lessons navigation: ${name}`, () => {
+  const match = source.match(/    courseLessonsRoute\(\) \{([\s\S]*?)\n    \},/);
+  assert.ok(match, 'editor must resolve the named parent instead of browser history');
+  const loaded = lesson && { lessonId: 'current', ...lesson };
+  const route = new Function(match[1]).call({ lesson: loaded, lessonId: 'current', $route: { query } });
+  assert.deepEqual(route, expected);
+  assert.ok(source.includes('@click="$router.push(courseLessonsRoute)"'));
+});
+test('course lesson list returns to the course catalog independently of history', () => {
+  const list = fs.readFileSync(path.join(__dirname, '../../src/views/CourseLessons.vue'), 'utf8');
+  assert.ok(list.includes('@click="$router.push({ path: \'/course-management\' })"'));
+});
 test('existing passive step authoring does not synthesize interaction metadata', () => {
   const helpers = require('../../src/components/lesson/lesson-builder-logic');
   const getter = source.slice(source.indexOf('    selectedAuthoring: {'), source.indexOf('    selectedTemplateAuthoring: {'));
