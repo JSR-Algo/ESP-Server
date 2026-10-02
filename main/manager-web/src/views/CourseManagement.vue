@@ -97,6 +97,7 @@
         <el-button type="text" size="mini" @click="fetchQuality">{{ $t('course.refresh') }}</el-button>
       </el-alert>
       <el-card class="content-area" shadow="never">
+        <el-alert v-if="listFailed" :title="$t('course.loadFail')" type="error" :closable="false" show-icon />
         <el-table v-loading="loading" :data="filteredList" stripe style="width: 100%">
           <el-table-column prop="courseKey" :label="$t('course.colKey')" min-width="160" />
           <el-table-column prop="title" :label="$t('course.colTitle')" min-width="160" />
@@ -257,6 +258,9 @@ export default {
   components: { HeaderBar },
   data() {
     return {
+      requestsDisposed: false,
+      listSequence: 0,
+      listFailed: false,
       list: [],
       loading: false,
       dialogVisible: false,
@@ -321,18 +325,23 @@ export default {
     },
     // An insights outage must read as "unknown", never as a healthy 0.
     avgQuality() {
-      if (this.qualityFailed) return '—';
+      if (this.qualityFailed || this.qualityLoading) return '—';
       if (!this.qualityRows.length) return 0;
       return Math.round(this.qualityRows.reduce((sum, row) => sum + row.qualityScore, 0) / this.qualityRows.length);
     },
     needsAttentionCount() {
-      if (this.qualityFailed) return '—';
+      if (this.qualityFailed || this.qualityLoading) return '—';
       return this.qualityRows.filter((row) => row.riskLevel === 'attention').length;
     },
   },
   created() {
     this.fetchList();
     this.fetchQuality();
+  },
+  beforeDestroy() {
+    this.requestsDisposed = true;
+    this.listSequence++;
+    this.qualitySequence++;
   },
   methods: {
     qualityFor(row) {
@@ -354,14 +363,21 @@ export default {
       return 'warning';
     },
     fetchList() {
+      if (this.requestsDisposed) return;
+      const sequence = ++this.listSequence;
+      this.list = [];
+      this.listFailed = false;
       this.loading = true;
       Api.course.getCourseList(
         (rows) => {
+          if (this.requestsDisposed || sequence !== this.listSequence) return;
           this.loading = false;
           this.list = rows;
         },
         (msg) => {
+          if (this.requestsDisposed || sequence !== this.listSequence) return;
           this.loading = false;
+          this.listFailed = true;
           this.$message.error(msg || this.$t('course.loadFail'));
         },
       );
@@ -374,18 +390,20 @@ export default {
     // refetches on every change, and a slow 90-day response landing after a
     // fast 7-day one would otherwise paint stale scores.
     fetchQuality() {
+      if (this.requestsDisposed) return;
       const sequence = ++this.qualitySequence;
+      this.qualityRows = [];
       this.qualityLoading = true;
       Api.courseInsights.getCourseQuality(
         { windowDays: this.qualityWindow },
         (rows) => {
-          if (sequence !== this.qualitySequence) return;
+          if (this.requestsDisposed || sequence !== this.qualitySequence) return;
           this.qualityLoading = false;
           this.qualityFailed = false;
           this.qualityRows = rows;
         },
         (msg) => {
-          if (sequence !== this.qualitySequence) return;
+          if (this.requestsDisposed || sequence !== this.qualitySequence) return;
           this.qualityLoading = false;
           this.qualityFailed = true;
           this.qualityRows = [];

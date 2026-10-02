@@ -67,6 +67,7 @@
           <span class="filter-count">{{ filteredList.length }}/{{ list.length }}</span>
         </div>
 
+        <el-alert v-if="listFailed" :title="$t('lesson.loadFail')" type="error" :closable="false" show-icon />
         <el-table v-loading="loading" :data="filteredList" stripe style="width: 100%">
           <el-table-column prop="lessonKey" :label="$t('lesson.colKey')" min-width="190" show-overflow-tooltip />
           <el-table-column prop="title" :label="$t('lesson.colTitle')" min-width="180" show-overflow-tooltip />
@@ -354,6 +355,9 @@ export default {
   components: { HeaderBar },
   data() {
     return {
+      requestsDisposed: false,
+      listSequence: 0,
+      listFailed: false,
       list: [],
       loading: false,
       dialogVisible: false,
@@ -433,6 +437,19 @@ export default {
     }
     this.fetchList();
   },
+  beforeDestroy() {
+    this.requestsDisposed = true;
+    this.listSequence++;
+    this.resetAssignmentDialog();
+  },
+  watch: {
+    courseId() {
+      this.resetAssignmentDialog();
+      this.dialogVisible = false;
+      this.resetFilters();
+      this.fetchList();
+    },
+  },
   methods: {
     statusType(status) {
       if (status === 'published') return 'success';
@@ -463,15 +480,28 @@ export default {
       };
     },
     fetchList() {
+      if (this.requestsDisposed) return;
+      const sequence = ++this.listSequence;
+      this.list = [];
+      this.listFailed = false;
+      const courseId = this.courseId;
+      if (!courseId) {
+        this.loading = false;
+        this.$router.replace('/course-management');
+        return;
+      }
       this.loading = true;
       Api.lesson.listAuthoritativeLessons(
-        this.courseId,
+        courseId,
         (rows) => {
+          if (this.requestsDisposed || sequence !== this.listSequence || courseId !== this.courseId) return;
           this.loading = false;
           this.list = rows;
         },
         (msg) => {
+          if (this.requestsDisposed || sequence !== this.listSequence || courseId !== this.courseId) return;
           this.loading = false;
+          this.listFailed = true;
           this.$message.error(msg || this.$t('lesson.loadFail'));
         },
       );

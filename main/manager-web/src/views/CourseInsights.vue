@@ -51,7 +51,7 @@
               <template slot-scope="scope">{{ scope.row.stats.completionRate }}%</template>
             </el-table-column>
             <template slot="empty">
-              <span class="muted">{{ $t('insights.noLearners') }}</span>
+              <span class="muted">{{ $t(learnersFailed ? 'insights.loadLearnersFail' : 'insights.noLearners') }}</span>
             </template>
           </el-table>
         </el-card>
@@ -136,7 +136,7 @@
               </el-table-column>
               <el-table-column prop="reasonCode" :label="$t('insights.reason')" width="150" />
               <template slot="empty">
-                <span class="muted">{{ $t('insights.noPreview') }}</span>
+                <span class="muted">{{ $t(previewFailed ? 'insights.previewFail' : 'insights.noPreview') }}</span>
               </template>
             </el-table>
           </div>
@@ -247,7 +247,7 @@
             <template slot-scope="scope">{{ formatTime(scope.row.lastActivityAt) }}</template>
           </el-table-column>
           <template slot="empty">
-            <span class="muted">{{ $t('insights.noQuality') }}</span>
+            <span class="muted">{{ $t(qualityFailed ? 'insights.qualityFail' : 'insights.noQuality') }}</span>
           </template>
         </el-table>
       </el-card>
@@ -264,6 +264,14 @@ export default {
   components: { HeaderBar },
   data() {
     return {
+      requestsDisposed: false,
+      learnersSequence: 0,
+      previewSequence: 0,
+      saveSequence: 0,
+      qualitySequence: 0,
+      learnersFailed: false,
+      previewFailed: false,
+      qualityFailed: false,
       activeTab: 'learners',
       learnerKeyword: '',
       learners: [],
@@ -287,16 +295,20 @@ export default {
       return this.learnersLoading || this.qualityLoading;
     },
     avgQuality() {
+      if (this.qualityLoading || this.qualityFailed) return '-';
       if (!this.qualityRows.length) return 0;
       return Math.round(this.qualityRows.reduce((sum, row) => sum + row.qualityScore, 0) / this.qualityRows.length);
     },
     totalAssignments() {
+      if (this.qualityLoading || this.qualityFailed) return '-';
       return this.qualityRows.reduce((sum, row) => sum + row.assignments, 0);
     },
     totalActiveChildren() {
+      if (this.qualityLoading || this.qualityFailed) return '-';
       return this.qualityRows.reduce((sum, row) => sum + row.activeChildren, 0);
     },
     attentionCourses() {
+      if (this.qualityLoading || this.qualityFailed) return '-';
       return this.qualityRows.filter((row) => row.riskLevel === 'attention').length;
     },
     filteredQualityRows() {
@@ -305,18 +317,42 @@ export default {
     },
   },
   created() {
-    if (this.$route.query.tab === 'quality') this.activeTab = 'quality';
-    if (this.$route.query.keyword) {
-      const keyword = String(this.$route.query.keyword);
+    this.loadRoute();
+  },
+  watch: {
+    '$route.query'() {
+      this.loadRoute();
+    },
+  },
+  beforeDestroy() {
+    this.requestsDisposed = true;
+    this.invalidateRequests();
+  },
+  methods: {
+    invalidateRequests() {
+      this.learnersSequence++;
+      this.previewSequence++;
+      this.saveSequence++;
+      this.qualitySequence++;
+      this.learnersLoading = false;
+      this.previewLoading = false;
+      this.savingPersonality = false;
+      this.qualityLoading = false;
+    },
+    loadRoute() {
+      this.invalidateRequests();
+      this.selectedLearner = {};
+      this.previewLessons = [];
+      this.previewFailed = false;
+      this.activeTab = this.$route.query.tab === 'quality' ? 'quality' : 'learners';
+      const keyword = String(this.$route.query.keyword || '');
       this.learnerKeyword = keyword;
       this.previewKeyword = keyword;
       this.qualityKeyword = keyword;
-    }
-    if (this.$route.query.courseId) this.qualityCourseId = String(this.$route.query.courseId);
-    this.fetchLearners();
-    this.fetchQuality();
-  },
-  methods: {
+      this.qualityCourseId = String(this.$route.query.courseId || '');
+      this.fetchLearners();
+      this.fetchQuality();
+    },
     handleTabChange() {
       this.refreshCurrent();
     },
@@ -325,22 +361,31 @@ export default {
       else this.fetchLearners();
     },
     fetchLearners() {
+      if (this.requestsDisposed) return;
+      const sequence = ++this.learnersSequence;
+      this.learners = [];
+      this.learnersFailed = false;
       this.learnersLoading = true;
       Api.courseInsights.listLearners(
         { keyword: this.learnerKeyword.trim(), limit: 200 },
         (rows) => {
+          if (this.requestsDisposed || sequence !== this.learnersSequence) return;
           this.learnersLoading = false;
           this.learners = rows;
           if (!this.selectedLearner.childId && rows.length) this.selectLearner(rows[0]);
         },
         (msg) => {
+          if (this.requestsDisposed || sequence !== this.learnersSequence) return;
           this.learnersLoading = false;
+          this.learnersFailed = true;
           this.$message.error(msg || this.$t('insights.loadLearnersFail'));
         },
       );
     },
     selectLearner(row) {
-      if (!row) return;
+      if (!row || row.childId === this.selectedLearner.childId) return;
+      this.previewSequence++;
+      this.previewLessons = [];
       this.selectedLearner = row;
       this.personalityForm = {
         interestsText: row.personality.interests.join(', '),
@@ -358,10 +403,13 @@ export default {
         .filter(Boolean);
     },
     savePersonality() {
-      if (!this.selectedLearner.childId) return;
+      if (!this.selectedLearner.childId || this.savingPersonality || this.requestsDisposed) return;
+      const sequence = ++this.saveSequence;
+      const childId = this.selectedLearner.childId;
+      const childName = this.selectedLearner.childName || childId;
       this.savingPersonality = true;
       Api.courseInsights.updateLearnerPersonality(
-        this.selectedLearner.childId,
+        childId,
         {
           interests: this.parseInterests(),
           learningStyle: this.personalityForm.learningStyle,
@@ -370,44 +418,65 @@ export default {
           attentionSpanSec: this.personalityForm.attentionSpanSec,
         },
         (learner) => {
+          if (this.requestsDisposed || sequence !== this.saveSequence) return;
           this.savingPersonality = false;
-          this.selectedLearner = learner;
-          this.$message.success(this.$t('insights.personalitySaved'));
-          this.fetchLearners();
-          this.fetchPreview();
+          // A completed write belongs to its submitted child, not the current selection.
+          this.learners = this.learners.map((row) => row.childId === childId ? learner : row);
+          this.$message.success(`${this.$t('insights.personalitySaved')}: ${childName}`);
+          if (this.selectedLearner.childId === childId) {
+            this.selectedLearner = learner;
+            this.fetchPreview();
+          }
         },
         (msg) => {
+          if (this.requestsDisposed || sequence !== this.saveSequence) return;
           this.savingPersonality = false;
+          if (this.selectedLearner.childId !== childId) return;
           this.$message.error(msg || this.$t('insights.saveFail'));
         },
       );
     },
     fetchPreview() {
       if (!this.selectedLearner.childId) return;
+      if (this.requestsDisposed) return;
+      const sequence = ++this.previewSequence;
+      const childId = this.selectedLearner.childId;
+      this.previewLessons = [];
+      this.previewFailed = false;
       this.previewLoading = true;
       Api.courseInsights.previewLearnerLessons(
-        this.selectedLearner.childId,
+        childId,
         { keyword: this.previewKeyword.trim(), limit: 50 },
         (payload) => {
+          if (this.requestsDisposed || sequence !== this.previewSequence || childId !== this.selectedLearner.childId) return;
           this.previewLoading = false;
           this.previewLessons = payload.lessons;
         },
         (msg) => {
+          if (this.requestsDisposed || sequence !== this.previewSequence || childId !== this.selectedLearner.childId) return;
           this.previewLoading = false;
+          this.previewFailed = true;
           this.$message.error(msg || this.$t('insights.previewFail'));
         },
       );
     },
     fetchQuality() {
+      if (this.requestsDisposed) return;
+      const sequence = ++this.qualitySequence;
+      this.qualityRows = [];
+      this.qualityFailed = false;
       this.qualityLoading = true;
       Api.courseInsights.getCourseQuality(
         { windowDays: this.qualityWindow, courseId: this.qualityCourseId, keyword: this.qualityKeyword.trim() },
         (rows) => {
+          if (this.requestsDisposed || sequence !== this.qualitySequence) return;
           this.qualityLoading = false;
           this.qualityRows = rows;
         },
         (msg) => {
+          if (this.requestsDisposed || sequence !== this.qualitySequence) return;
           this.qualityLoading = false;
+          this.qualityFailed = true;
           this.$message.error(msg || this.$t('insights.qualityFail'));
         },
       );
