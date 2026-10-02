@@ -137,13 +137,13 @@
               <el-button type="text" size="small" @click="openClone(scope.row)">
                 {{ $t('course.clone') }}
               </el-button>
-              <el-button type="text" size="small" @click="toggleTemplate(scope.row)">
+              <el-button type="text" size="small" :disabled="!!actionPending['template:' + scope.row.courseId]" @click="toggleTemplate(scope.row)">
                 {{ scope.row.isTemplate ? $t('course.unmarkTemplate') : $t('course.markTemplate') }}
               </el-button>
               <el-button type="text" size="small" @click="openEdit(scope.row)">
                 {{ $t('course.edit') }}
               </el-button>
-              <el-button type="text" size="small" class="danger-text" @click="confirmDelete(scope.row)">
+              <el-button type="text" size="small" class="danger-text" :disabled="!!actionPending['delete:' + scope.row.courseId]" @click="confirmDelete(scope.row)">
                 {{ $t('course.delete') }}
               </el-button>
             </template>
@@ -159,20 +159,24 @@
       :title="editing ? $t('course.editTitle') : $t('course.createTitle')"
       :visible.sync="dialogVisible"
       width="480px"
-      @closed="resetForm"
+      @closed="!dialogVisible && resetForm()"
     >
+      <el-alert v-if="formNotice" :title="formNotice" type="warning" :closable="false" />
+      <el-button v-if="editing && foundCourse" @click="allowReviewedRetry">{{ $t('course.retryReviewed') }}</el-button>
+      <el-button v-if="foundCourse" @click="openLessons(foundCourse)">{{ $t('course.reviewFound') }}</el-button>
       <el-form ref="form" :model="form" label-width="110px" size="small">
-        <el-form-item :label="$t('course.colKey')" required>
+        <el-form-item :label="$t('course.colKey')" :error="formErrors.courseKey" required>
           <el-input
             v-model="form.courseKey"
+            @keyup.enter.native="submit"
             :disabled="editing"
             :placeholder="$t('course.keyPlaceholder')"
           />
         </el-form-item>
-        <el-form-item :label="$t('course.colTitle')" required>
-          <el-input v-model="form.title" />
+        <el-form-item :label="$t('course.colTitle')" :error="formErrors.title" required>
+          <el-input v-model="form.title" @keyup.enter.native="submit" />
         </el-form-item>
-        <el-form-item :label="$t('course.colLocale')" required>
+        <el-form-item :label="$t('course.colLocale')" :error="formErrors.locale" required>
           <el-select
             v-model="form.locale"
             data-testid="course-locale"
@@ -185,7 +189,7 @@
             <el-option v-for="l in locales" :key="l" :label="l" :value="l" />
           </el-select>
         </el-form-item>
-        <el-form-item :label="$t('course.colAgeBand')" required>
+        <el-form-item :label="$t('course.colAgeBand')" :error="formErrors.ageBand" required>
           <el-select
             v-model="form.ageBand"
             data-testid="course-age-band"
@@ -210,31 +214,34 @@
       </el-form>
       <span slot="footer">
         <el-button size="small" @click="dialogVisible = false">{{ $t('course.cancel') }}</el-button>
-        <el-button type="primary" size="small" :loading="saving" @click="submit">
+        <el-button type="primary" size="small" :loading="saving" data-testid="course-submit" @click="submit">
           {{ $t('course.save') }}
         </el-button>
       </span>
     </el-dialog>
 
-    <el-dialog :title="$t('course.cloneTitle')" :visible.sync="cloneVisible" width="480px" @closed="resetClone">
+    <el-dialog :title="$t('course.cloneTitle')" :visible.sync="cloneVisible" width="480px" @closed="!cloneVisible && resetClone()">
+      <el-alert v-if="cloneNotice" :title="cloneNotice" type="warning" :closable="false" />
+      <el-button v-if="cloneFoundCourse" @click="openLessons(cloneFoundCourse)">{{ $t('course.reviewFound') }}</el-button>
       <p class="muted">{{ $t('course.cloneHint', { source: cloneSource.courseKey }) }}</p>
       <el-form :model="cloneForm" label-width="110px" size="small">
-        <el-form-item :label="$t('course.colKey')" required>
-          <el-input v-model="cloneForm.courseKey" :placeholder="$t('course.keyPlaceholder')" />
+        <el-form-item :label="$t('course.colKey')" :error="cloneErrors.courseKey" required>
+          <el-input v-model="cloneForm.courseKey" @keyup.enter.native="doClone" :placeholder="$t('course.keyPlaceholder')" />
         </el-form-item>
-        <el-form-item :label="$t('course.colTitle')" required>
-          <el-input v-model="cloneForm.title" />
+        <el-form-item :label="$t('course.colTitle')" :error="cloneErrors.title" required>
+          <el-input v-model="cloneForm.title" @keyup.enter.native="doClone" />
         </el-form-item>
       </el-form>
       <span slot="footer">
         <el-button size="small" @click="cloneVisible = false">{{ $t('course.cancel') }}</el-button>
-        <el-button type="primary" size="small" :loading="cloning" @click="doClone">{{ $t('course.clone') }}</el-button>
+        <el-button type="primary" size="small" :loading="cloning" data-testid="course-clone-submit" @click="doClone">{{ $t('course.clone') }}</el-button>
       </span>
     </el-dialog>
   </div>
 </template>
 
 <script>
+import { validateCourseForm, mutationDetails, uncertainMutation } from '@/utils/courseForm.cjs';
 import HeaderBar from '@/components/HeaderBar.vue';
 import Api from '@/apis/api';
 import {
@@ -266,6 +273,14 @@ export default {
       dialogVisible: false,
       editing: false,
       saving: false,
+      formErrors: {},
+      cloneErrors: {},
+      formNotice: '',
+      cloneNotice: '',
+      foundCourse: null,
+      cloneFoundCourse: null,
+      actionPending: {},
+      uncertainActions: {},
       kindFilter: 'all',
       courseKeyword: '',
       learnerKeyword: '',
@@ -430,7 +445,8 @@ export default {
       });
     },
     openClone(row) {
-      this.cloneSource = row;
+      this.cloneNotice = ''; this.cloneErrors = {}; this.cloneFoundCourse = null;
+      this.cloneSource = { ...row };
       this.cloneForm = {
         courseKey: row.courseKey + '-custom',
         title: this.$t('course.copyOf', { title: row.title }),
@@ -441,46 +457,100 @@ export default {
       this.cloneForm = { courseKey: '', title: '' };
       this.cloneSource = {};
     },
+    // Lock handlers as well as buttons. A captured form object is the dialog identity.
+    runCourseMutation({ action, target, form, clone = false, request, success }) {
+      if (this.requestsDisposed || this.actionPending[action]) return;
+      const current = () => !this.requestsDisposed && (!form || (clone ? this.cloneForm === form && this.cloneVisible : this.form === form && this.dialogVisible));
+      const notice = (key) => {
+        if (!current()) return;
+        if (form) this[clone ? 'cloneNotice' : 'formNotice'] = this.$t(key);
+        else this.$message.warning(this.$t(key));
+      };
+      const finish = () => {
+        this.actionPending = { ...this.actionPending, [action]: false };
+        if (form) this[clone ? 'cloning' : 'saving'] = false;
+      };
+      this.actionPending = { ...this.actionPending, [action]: true };
+      if (form) this[clone ? 'cloning' : 'saving'] = true;
+      const reconcile = () => {
+        notice('course.outcomeUnknown');
+        const failed = () => { finish(); notice('course.readbackFailed'); };
+        const found = (course) => {
+          finish();
+          if (target.courseId && !form) delete this.uncertainActions[action];
+          if (!current()) return;
+          if (form) this[clone ? 'cloneFoundCourse' : 'foundCourse'] = course;
+          notice('course.foundReview');
+          if (!form) this.fetchList();
+        };
+        if (target.courseId) {
+          Api.course.getCourse(target.courseId, found, (msg, res) => {
+            if (Number(res && res.status) === 404) { finish(); notice('course.resourceMissing'); if (!form) this.fetchList(); }
+            else failed();
+          });
+        } else {
+          Api.course.getCourseList((rows) => {
+            const match = rows.find(row => row.courseKey === target.courseKey);
+            if (match) Api.course.getCourse(match.courseId, found, failed);
+            else {
+              delete this.uncertainActions[action]; finish(); notice('course.notFoundRetry');
+              // Absence allows a deliberate same-key attempt; never replay here.
+            }
+          }, failed);
+        }
+      };
+      if (this.uncertainActions[action]) { reconcile(); return; }
+      request((payload) => {
+        finish();
+        if (current()) success(payload);
+      }, (msg, response) => {
+        const details = mutationDetails(response);
+        if (uncertainMutation(response)) {
+          this.uncertainActions[action] = { ...target };
+          reconcile(); return;
+        }
+        if (details.reason === 'duplicate') {
+          this.uncertainActions[action] = { ...target };
+          if (current() && form) this[clone ? 'cloneErrors' : 'formErrors'] = { courseKey: this.$t('course.duplicateKey') };
+          reconcile(); return;
+        }
+        finish();
+        if (!current()) return;
+        const message = details.reason === 'duplicate' ? this.$t('course.duplicateKey')
+          : details.reason === 'nonempty' ? this.$t('course.nonemptyDelete') : msg;
+        if (form && details.field) this[clone ? 'cloneErrors' : 'formErrors'] = { [details.field]: message };
+        this.$message.error(message || this.$t('course.actionFailed'));
+        if (details.reason === 'nonempty' || Number(response && response.status) === 404) this.fetchList();
+      });
+    },
     doClone() {
+      if (this.cloning) return;
       const f = this.cloneForm;
-      if (!f.courseKey || !f.title) {
-        this.$message.warning(this.$t('course.required'));
-        return;
-      }
-      this.cloning = true;
-      Api.course.cloneCourse(
-        this.cloneSource.courseId,
-        { courseKey: f.courseKey, title: f.title },
-        (course) => {
-          this.cloning = false;
-          this.cloneVisible = false;
-          this.$message.success(this.$t('course.cloned'));
-          this.openLessons(course); // jump into the new custom course's lessons
-        },
-        (msg) => {
-          this.cloning = false;
-          this.$message.error(msg);
-        },
-      );
+      this.cloneErrors = Object.fromEntries(Object.entries(validateCourseForm(f, true)).map(([k,v]) => [k,this.$t(v)]));
+      if (Object.keys(this.cloneErrors).length) return;
+      if (new TextEncoder().encode(JSON.stringify({ courseKey: f.courseKey, title: f.title })).length > 102400) { this.cloneNotice = this.$t('course.payloadTooLarge'); return; }
+      const sourceId = this.cloneSource.courseId;
+      const payload = { courseKey: f.courseKey, title: f.title };
+      this.runCourseMutation({ action: 'key:' + f.courseKey.trim(), target: { courseKey: f.courseKey.trim() }, form: f, clone: true,
+        request: (ok, fail) => Api.course.cloneCourse(sourceId, payload, ok, fail),
+        success: (course) => { this.cloneVisible = false; this.$message.success(this.$t('course.cloned')); this.openLessons(course); },
+      });
     },
     toggleTemplate(row) {
-      const next = !row.isTemplate;
-      Api.course.setTemplate(
-        row.courseId,
-        next,
-        () => {
-          this.$message.success(next ? this.$t('course.markedTemplate') : this.$t('course.unmarkedTemplate'));
-          this.fetchList();
-        },
-        (msg) => this.$message.error(msg),
-      );
+      const id = row.courseId; const next = !row.isTemplate;
+      this.runCourseMutation({ action: 'template:' + id, target: { courseId: id },
+        request: (ok, fail) => Api.course.setTemplate(id, next, ok, fail),
+        success: () => { this.$message.success(this.$t(next ? 'course.markedTemplate' : 'course.unmarkedTemplate')); this.fetchList(); },
+      });
     },
     openCreate() {
+      this.formErrors = {}; this.formNotice = ''; this.foundCourse = null;
       this.editing = false;
       this.form = blankCourseForm();
       this.dialogVisible = true;
     },
     openEdit(row) {
+      this.formErrors = {}; this.formNotice = ''; this.foundCourse = null;
       this.editing = true;
       this.form = {
         courseId: row.courseId,
@@ -494,61 +564,40 @@ export default {
     resetForm() {
       this.form = blankCourseForm();
     },
+    allowReviewedRetry() {
+      delete this.uncertainActions['edit:' + this.form.courseId];
+      this.foundCourse = null; this.formNotice = '';
+    },
     submit() {
+      if (this.saving) return;
       const f = this.form;
-      if (!f.courseKey || !f.title || !f.locale || !f.ageBand) {
-        this.$message.warning(this.$t('course.required'));
-        return;
-      }
-      this.saving = true;
-      const onErr = (msg) => {
-        this.saving = false;
-        this.$message.error(msg);
-      };
-      if (this.editing) {
-        // Course key is immutable; only mutable fields are sent.
-        Api.course.updateCourse(
-          f.courseId,
-          { title: f.title, locale: f.locale, ageBand: f.ageBand },
-          () => {
-            this.saving = false;
-            this.dialogVisible = false;
-            this.$message.success(this.$t('course.updated'));
-            this.fetchList();
-          },
-          onErr,
-        );
-      } else {
-        Api.course.createCourse(
-          { courseKey: f.courseKey, title: f.title, locale: f.locale, ageBand: f.ageBand },
-          () => {
-            this.saving = false;
-            this.dialogVisible = false;
-            this.$message.success(this.$t('course.created'));
-            this.fetchList();
-          },
-          onErr,
-        );
-      }
+      this.formErrors = Object.fromEntries(Object.entries(validateCourseForm(f)).map(([k,v]) => [k,this.$t(v)]));
+      if (Object.keys(this.formErrors).length) return;
+      const editing = this.editing;
+      const payload = { title: f.title, locale: f.locale, ageBand: f.ageBand };
+      if (!editing) payload.courseKey = f.courseKey;
+      if (new TextEncoder().encode(JSON.stringify(payload)).length > 102400) { this.formNotice = this.$t('course.payloadTooLarge'); return; }
+      this.runCourseMutation({ action: editing ? 'edit:' + f.courseId : 'key:' + f.courseKey,
+        target: editing ? { courseId: f.courseId } : { courseKey: f.courseKey }, form: f,
+        request: (ok, fail) => editing ? Api.course.updateCourse(f.courseId, payload, ok, fail) : Api.course.createCourse(payload, ok, fail),
+        success: () => { this.dialogVisible = false; this.$message.success(this.$t(editing ? 'course.updated' : 'course.created')); this.fetchList(); },
+      });
     },
     confirmDelete(row) {
-      this.$confirm(
-        this.$t('course.deleteConfirm', { key: row.courseKey }),
-        this.$t('course.delete'),
-        { type: 'warning' },
-      )
+      const id = row.courseId; const key = row.courseKey;
+      const action = 'delete:' + id;
+      if (this.actionPending[action]) return;
+      this.actionPending = { ...this.actionPending, [action]: true };
+      this.$confirm(this.$t('course.deleteConfirm', { key }), this.$t('course.delete'), { type: 'warning' })
         .then(() => {
-          Api.course.deleteCourse(
-            row.courseId,
-            () => {
-              this.$message.success(this.$t('course.deleted'));
-              this.fetchList();
-            },
-            (msg) => this.$message.error(msg),
-          );
-        })
-        .catch(() => {});
+          this.actionPending = { ...this.actionPending, [action]: false };
+          this.runCourseMutation({ action, target: { courseId: id },
+            request: (ok, fail) => Api.course.deleteCourse(id, ok, fail),
+            success: () => { this.$message.success(this.$t('course.deleted')); this.fetchList(); },
+          });
+        }).catch(() => { this.actionPending = { ...this.actionPending, [action]: false }; });
     },
+
   },
 };
 </script>

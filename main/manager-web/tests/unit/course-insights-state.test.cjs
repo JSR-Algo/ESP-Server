@@ -11,7 +11,7 @@ function setup(view = 'CourseInsights') {
   const source = fs.readFileSync(path.join(__dirname, '../../src/views', `${view}.vue`), 'utf8');
   const script = source.split('<script>')[1].split('</script>')[0]
     .replace(/import[\s\S]*?from\s+['"][^'"]+['"];?/g, '').replace('export default', 'return');
-  const component = new Function('Api', 'HeaderBar', 'AGE_BANDS', 'LOCALES', 'DEFAULT_AGE_BAND', 'DEFAULT_LOCALE', script)(api, {}, [], [], '3-5', 'en');
+  const component = new Function('Api', 'HeaderBar', 'AGE_BANDS', 'LOCALES', 'DEFAULT_AGE_BAND', 'DEFAULT_LOCALE', 'validateCourseForm', 'mutationDetails', 'uncertainMutation', script)(api, {}, [], [], '3-5', 'en', ...Object.values(require('../../src/utils/courseForm.cjs')));
   const messages = [];
   const state = { ...component.data(), $route: { query: { courseId: 'A' } }, $router: { replace() {} },
     $t: k => k, $message: Object.fromEntries(['error','warning','success'].map(k => [k, msg => messages.push([k, msg])])) };

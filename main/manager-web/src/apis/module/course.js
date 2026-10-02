@@ -13,12 +13,23 @@ export default {
   // GET /v1/admin/courses -> Course[]
   getCourseList(onSuccess, onError) {
     nestRequest({
-      url: `${getNestUrl()}/courses`,
+      url: `${getNestUrl()}/courses?kind=all`,
       method: 'GET',
-      onSuccess: (payload) =>
-        onSuccess((Array.isArray(payload) ? payload : []).map(normalizeCourse)),
+      onSuccess: (payload) => {
+        // BE-04 absence proof requires the exhaustive array contract.
+        if (!Array.isArray(payload)) {
+          if (onError) onError('', { status: 0, transport: true });
+          return;
+        }
+        onSuccess(payload.map(normalizeCourse));
+      },
       onError,
     });
+  },
+
+  getCourse(courseId, onSuccess, onError) {
+    nestRequest({ url: `${getNestUrl()}/courses/${courseId}`, method: 'GET',
+      onSuccess: (payload) => onSuccess(normalizeCourse(payload)), onError });
   },
 
   // POST /v1/admin/courses { courseKey, title, locale, ageBand }

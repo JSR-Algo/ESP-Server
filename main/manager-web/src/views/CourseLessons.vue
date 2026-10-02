@@ -149,15 +149,16 @@
       </el-card>
     </div>
 
-    <el-dialog :title="dialogTitle" :visible.sync="dialogVisible" width="560px" @closed="resetForm">
+    <el-dialog :title="dialogTitle" :visible.sync="dialogVisible" width="560px" @closed="!dialogVisible && resetForm()">
+      <el-alert v-if="formNotice" :title="formNotice" type="warning" :closable="false" />
       <el-form :model="form" label-width="150px" size="small">
-        <el-form-item :label="$t('lesson.colKey')" required>
+        <el-form-item :label="$t('lesson.colKey')" required :error="formErrors.lessonKey">
           <el-input v-model="form.lessonKey" :disabled="editingMetadata" :placeholder="$t('lesson.keyPlaceholder')" />
         </el-form-item>
-        <el-form-item :label="$t('lesson.colTitle')" required>
+        <el-form-item :label="$t('lesson.colTitle')" required :error="formErrors.title">
           <el-input v-model="form.title" />
         </el-form-item>
-        <el-form-item :label="$t('course.colLocale')" required>
+        <el-form-item :label="$t('course.colLocale')" required :error="formErrors.locale">
           <el-select
             v-model="form.locale"
             data-testid="lesson-locale"
@@ -170,7 +171,7 @@
             <el-option v-for="l in locales" :key="l" :label="l" :value="l" />
           </el-select>
         </el-form-item>
-        <el-form-item :label="$t('course.colAgeBand')" required>
+        <el-form-item :label="$t('course.colAgeBand')" required :error="formErrors.ageBand">
           <el-select
             v-model="form.ageBand"
             data-testid="lesson-age-band"
@@ -308,6 +309,7 @@
 </template>
 
 <script>
+import { validateCourseForm, mutationDetails, uncertainMutation } from '@/utils/courseForm.cjs';
 import HeaderBar from '@/components/HeaderBar.vue';
 import Api from '@/apis/api';
 import { isUncertainNestError } from '@/apis/nestHttp';
@@ -363,6 +365,11 @@ export default {
       dialogVisible: false,
       editingMetadata: false,
       saving: false,
+      formErrors: {},
+      formNotice: '',
+      metadataUncertain: {},
+      deletePending: {},
+      deleteUncertain: {},
       form: blankForm(),
       filters: {
         keyword: '',
@@ -743,11 +750,13 @@ export default {
       }, context);
     },
     openCreate() {
+      this.formErrors = {}; this.formNotice = '';
       this.editingMetadata = false;
       this.form = blankForm();
       this.dialogVisible = true;
     },
     openMetadata(row) {
+      this.formErrors = {}; this.formNotice = '';
       this.editingMetadata = true;
       this.form = {
         lessonId: row.lessonId,
@@ -766,60 +775,74 @@ export default {
       this.editingMetadata = false;
     },
     submit() {
-      const f = this.form;
-      if (!f.lessonKey || !f.title || !f.locale || !f.ageBand) {
-        this.$message.warning(this.$t('course.required'));
-        return;
+      if (this.saving || this.requestsDisposed) return;
+      const f = this.form; const courseId = this.courseId; const editing = this.editingMetadata;
+      const action = editing ? 'edit:' + f.lessonId : courseId + ':' + f.lessonKey;
+      const current = () => !this.requestsDisposed && this.form === f && this.dialogVisible && this.courseId === courseId;
+      const errors = {};
+      for (const field of ['lessonKey', 'title', 'locale', 'ageBand']) {
+        if (typeof f[field] !== 'string' || !f[field].trim() || f[field].includes('\0')) errors[field] = this.$t('course.invalidText');
       }
+      if (validateCourseForm({ ...f, courseKey: f.lessonKey }).ageBand) errors.ageBand = this.$t('course.invalidAgeBand');
+      if (!editing && (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(f.lessonKey) || f.lessonKey.length > 128)) errors.lessonKey = this.$t('lesson.invalidKey');
+      this.formErrors = errors;
+      if (Object.keys(errors).length) return;
+      if (this.metadataUncertain[action]) { this.formNotice = this.$t('lesson.metadataUncertain'); this.fetchList(); return; }
       this.saving = true;
-      if (this.editingMetadata) {
-        Api.lesson.updateLesson(
-          f.lessonId,
-          this.metadataPayload(),
-          () => {
-            this.saving = false;
-            this.dialogVisible = false;
-            this.$message.success(this.$t('lesson.metadataSaved'));
-            this.fetchList();
-          },
-          (msg) => {
-            this.saving = false;
-            this.$message.error(msg);
-          },
-        );
-        return;
-      }
-      Api.lesson.createLesson(
-        this.courseId,
-        { lessonKey: f.lessonKey, ...this.metadataPayload() },
-        (lesson) => {
-          this.saving = false;
-          this.dialogVisible = false;
-          this.$message.success(this.$t('lesson.created'));
-          this.openEditor(lesson);
-        },
-        (msg) => {
-          this.saving = false;
-          this.$message.error(msg);
-        },
-      );
+      const payload = this.metadataPayload();
+      const ok = (lesson) => {
+        this.saving = false;
+        if (!current()) return;
+        this.dialogVisible = false;
+        this.$message.success(this.$t(editing ? 'lesson.metadataSaved' : 'lesson.created'));
+        if (editing) this.fetchList(); else this.openEditor(lesson);
+      };
+      const fail = (msg, response) => {
+        this.saving = false;
+        if (uncertainMutation(response)) this.metadataUncertain[action] = true;
+        if (!current()) return;
+        if (uncertainMutation(response)) {
+          this.formNotice = this.$t('lesson.metadataUncertain'); this.fetchList();
+        } else {
+          const details = mutationDetails(response);
+          if (details.field) this.formErrors = { [details.field]: msg };
+          this.$message.error(msg || this.$t('course.actionFailed'));
+        }
+      };
+      if (editing) Api.lesson.updateLesson(f.lessonId, payload, ok, fail);
+      else Api.lesson.createLesson(courseId, { lessonKey: f.lessonKey, ...payload }, ok, fail);
     },
     confirmDelete(row) {
-      this.$confirm(this.$t('lesson.deleteConfirm', { key: row.lessonKey }), this.$t('lesson.delete'), {
-        type: 'warning',
-      })
+      const id = row.lessonId; const courseId = this.courseId;
+      if (this.deleteUncertain[id]) {
+        if (this.deletePending[id]) return;
+        this.deletePending = { ...this.deletePending, [id]: true };
+        const done = () => { this.deletePending = { ...this.deletePending, [id]: false }; };
+        Api.lesson.getLesson(id, () => {
+          done(); delete this.deleteUncertain[id];
+          if (!this.requestsDisposed && this.courseId === courseId) { this.$message.warning(this.$t('course.foundReview')); this.fetchList(); }
+        }, (msg, response) => {
+          done(); if (Number(response && response.status) === 404) delete this.deleteUncertain[id];
+          if (!this.requestsDisposed && this.courseId === courseId) { this.$message.warning(this.$t('lesson.metadataUncertain')); this.fetchList(); }
+        });
+        return;
+      }
+      if (this.deletePending[id] || this.requestsDisposed) return;
+      this.deletePending = { ...this.deletePending, [id]: true };
+      const finish = () => { this.deletePending = { ...this.deletePending, [id]: false }; };
+      this.$confirm(this.$t('lesson.deleteConfirm', { key: row.lessonKey }), this.$t('lesson.delete'), { type: 'warning' })
         .then(() => {
-          Api.lesson.deleteLesson(
-            row.lessonId,
-            () => {
-              this.$message.success(this.$t('lesson.deleted'));
-              this.fetchList();
-            },
-            (msg) => this.$message.error(msg),
-          );
-        })
-        .catch(() => {});
+          Api.lesson.deleteLesson(id, () => {
+            finish(); if (this.requestsDisposed || this.courseId !== courseId) return;
+            this.$message.success(this.$t('lesson.deleted')); this.fetchList();
+          }, (msg, response) => {
+            finish(); if (uncertainMutation(response)) this.deleteUncertain[id] = true;
+            if (this.requestsDisposed || this.courseId !== courseId) return;
+            this.$message.error(uncertainMutation(response) ? this.$t('lesson.metadataUncertain') : msg); this.fetchList();
+          });
+        }).catch(finish);
     },
+
   },
 };
 </script>

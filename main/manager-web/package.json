@@ -6,7 +6,7 @@
     "serve": "vue-cli-service serve",
     "build": "vue-cli-service build",
     "analyze": "cross-env ANALYZE=true vue-cli-service build",
-    "test:course-admin-ui": "node scripts/check-course-admin-ui.mjs",
+    "test:course-admin-ui": "node scripts/check-course-admin-ui.mjs && node --test tests/unit/course-mutation-state.test.cjs",
     "test:course-taxonomy": "node scripts/check-course-taxonomy.cjs",
     "test:course-taxonomy-browser": "node scripts/check-course-taxonomy-browser.mjs",
     "test:course-robot-e2e-ui": "node scripts/check-course-robot-e2e-ui-contracts.mjs",
