@@ -9,7 +9,7 @@
         <h2 class="page-title">{{ $t('lesson.pageTitle') }} · {{ courseTitle }}</h2>
       </div>
       <div class="right-operations">
-        <el-button type="primary" size="small" @click="openCreate">
+        <el-button type="primary" size="small" @click="openCreate" :disabled="!courseReady">
           {{ $t('lesson.createBtn') }}
         </el-button>
         <el-button size="small" :loading="loading" @click="fetchList">
@@ -67,6 +67,7 @@
           <span class="filter-count">{{ filteredList.length }}/{{ list.length }}</span>
         </div>
 
+        <el-alert v-if="historyFailed" :title="$t('lesson.historyLoadFail')" type="warning" :closable="false" show-icon data-testid="lesson-history-error" />
         <el-alert v-if="listFailed" :title="$t('lesson.loadFail')" type="error" :closable="false" show-icon />
         <el-table v-loading="loading" :data="filteredList" stripe style="width: 100%">
           <el-table-column prop="lessonKey" :label="$t('lesson.colKey')" min-width="190" show-overflow-tooltip />
@@ -116,6 +117,9 @@
             <template slot-scope="scope">
               <el-button type="text" size="small" @click="openEditor(scope.row)">
                 {{ $t('lesson.editSteps') }}
+              </el-button>
+              <el-button v-if="existingDraft(scope.row)" data-testid="edit-existing-draft" type="text" size="small" @click="openEditor(existingDraft(scope.row))">
+                {{ $t('lesson.editExistingDraft', { version: existingDraft(scope.row).lessonVersion }) }}
               </el-button>
               <el-button v-if="scope.row.status === 'draft'" type="text" size="small" @click="openMetadata(scope.row)">
                 {{ $t('lesson.editMetadata') }}
@@ -291,7 +295,7 @@
               <el-button
                 type="primary"
                 size="mini"
-                :disabled="scope.row.availability === 'busy' || assignmentDialog.submitting"
+                :disabled="scope.row.availability === 'busy' || assignmentDialog.submitting || assignmentDialog.readinessBlocked"
                 :loading="assignmentDialog.submittingDeviceId === scope.row.deviceId"
                 @click="createLessonAssignment(scope.row)"
               >
@@ -345,6 +349,7 @@ const blankAssignmentDialog = () => ({
   submittingDeviceId: '',
   statusMessage: '',
   statusType: 'info',
+  readinessBlocked: false,
   dialogSessionId: 0,
   learnerRequestToken: 0,
   deviceRequestToken: 0,
@@ -359,6 +364,9 @@ export default {
     return {
       requestsDisposed: false,
       listSequence: 0,
+      courseInfo: null,
+      draftVersions: {},
+      historyFailed: false,
       listFailed: false,
       list: [],
       loading: false,
@@ -368,6 +376,7 @@ export default {
       formErrors: {},
       formNotice: '',
       metadataUncertain: {},
+      metadataPending: {},
       deletePending: {},
       deleteUncertain: {},
       form: blankForm(),
@@ -396,10 +405,14 @@ export default {
       return ageBandMinimum(this.form.ageBand);
     },
     courseId() {
-      return this.$route.query.courseId;
+      const value = this.$route.query.courseId;
+      return typeof value === 'string' ? value : '';
     },
     courseTitle() {
-      return this.$route.query.title || this.$route.query.courseKey || '';
+      return this.courseReady ? this.courseInfo.title : '';
+    },
+    courseReady() {
+      return !this.requestsDisposed && Boolean(this.courseInfo && this.courseInfo.courseId === this.courseId);
     },
     dialogTitle() {
       return this.editingMetadata ? this.$t('lesson.editMetadataTitle') : this.$t('lesson.createTitle');
@@ -438,10 +451,6 @@ export default {
     },
   },
   created() {
-    if (!this.courseId) {
-      this.$router.replace('/course-management');
-      return;
-    }
     this.fetchList();
   },
   beforeDestroy() {
@@ -453,6 +462,8 @@ export default {
     courseId() {
       this.resetAssignmentDialog();
       this.dialogVisible = false;
+      this.saving = false;
+      this.resetForm();
       this.resetFilters();
       this.fetchList();
     },
@@ -490,33 +501,54 @@ export default {
       if (this.requestsDisposed) return;
       const sequence = ++this.listSequence;
       this.list = [];
+      this.courseInfo = null;
+      this.draftVersions = {};
+      this.historyFailed = false;
       this.listFailed = false;
       const courseId = this.courseId;
-      if (!courseId) {
+      const current = () => !this.requestsDisposed && sequence === this.listSequence && courseId === this.courseId;
+      if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(courseId)) {
         this.loading = false;
         this.$router.replace('/course-management');
         return;
       }
       this.loading = true;
-      Api.lesson.listAuthoritativeLessons(
-        courseId,
-        (rows) => {
-          if (this.requestsDisposed || sequence !== this.listSequence || courseId !== this.courseId) return;
+      const fail = (msg) => {
+        if (!current()) return;
+        this.loading = false;
+        this.listFailed = true;
+        this.$message.error(msg || this.$t('lesson.loadFail'));
+      };
+      Api.course.getCourse(courseId, (course) => {
+        if (!current()) return;
+        if (!course || course.courseId !== courseId || typeof course.title !== 'string') return fail();
+        this.courseInfo = course;
+        Api.lesson.listAuthoritativeLessons(courseId, (rows) => {
+          if (!current()) return;
           this.loading = false;
           this.list = rows;
-        },
-        (msg) => {
-          if (this.requestsDisposed || sequence !== this.listSequence || courseId !== this.courseId) return;
-          this.loading = false;
-          this.listFailed = true;
-          this.$message.error(msg || this.$t('lesson.loadFail'));
-        },
-      );
+        }, fail);
+        // History remains exhaustive here; published-first browsing must not hide
+        // an already-created draft or provoke a duplicate next-version request.
+        Api.lesson.listLessons(courseId, (rows) => {
+          if (!current()) return;
+          const drafts = Object.create(null);
+          rows.filter((row) => row.status === 'draft').forEach((row) => {
+            if (!drafts[row.lessonKey] || row.lessonVersion > drafts[row.lessonKey].lessonVersion) drafts[row.lessonKey] = row;
+          });
+          this.draftVersions = drafts;
+        }, () => { if (current()) this.historyFailed = true; });
+      }, fail);
+    },
+    existingDraft(row) {
+      const draft = row && this.draftVersions[row.lessonKey];
+      return row && row.status === 'published' && draft && draft.lessonVersion > row.lessonVersion ? draft : null;
     },
     resetFilters() {
       this.filters = { keyword: '', status: '', lessonType: '', topic: '', difficultyBand: '', monitorable: '' };
     },
     openEditor(row) {
+      if (!this.courseReady || (row.courseId && row.courseId !== this.courseId)) return;
       this.$router.push({
         path: '/lesson-editor',
         query: {
@@ -529,7 +561,7 @@ export default {
     openMonitoring(row) {
       this.$router.push({
         path: '/lesson-monitoring',
-        query: { lessonId: row.lessonId, lesson: row.title || row.lessonKey },
+        query: { lessonId: row.lessonId, lessonVersion: String(row.lessonVersion), courseId: this.courseId, lesson: row.title || row.lessonKey },
       });
     },
     openAssignmentDialog(row) {
@@ -675,7 +707,7 @@ export default {
       return this.$t('lesson.assignBusy');
     },
     createLessonAssignment(device) {
-      if (this.assignmentDialog.submitting || device.availability === 'busy') return;
+      if (this.assignmentDialog.submitting || this.assignmentDialog.readinessBlocked || device.availability === 'busy') return;
       const row = this.assignmentDialog.lesson;
       const childId = this.assignmentDialog.childId;
       if (!row || !childId) return;
@@ -719,6 +751,15 @@ export default {
         (msg, error) => {
           if (!this.isAssignmentSubmitCurrent(submitContext)) return;
           const status = Number(error && (error.status ?? (error.response && error.response.status)));
+          const body = error && (error.data || (error.response && error.response.data));
+          const code = body && (body.code || (body.error && body.error.code));
+          if (status === 409 && code === 'ASSET_PACK_NOT_READY') {
+            this.releaseAssignmentSubmit(submitContext);
+            this.assignmentDialog.readinessBlocked = true;
+            this.assignmentDialog.statusType = 'warning';
+            this.assignmentDialog.statusMessage = `${msg || this.$t('lesson.assignPackPending')} (${code})`;
+            return;
+          }
           if (status === 409) {
             this.setAssignmentStatus('warning', 'lesson.assignConflict');
             this.refreshAssignmentEligibility(() => {
@@ -750,6 +791,7 @@ export default {
       }, context);
     },
     openCreate() {
+      if (!this.courseReady) return;
       this.formErrors = {}; this.formNotice = '';
       this.editingMetadata = false;
       this.form = blankForm();
@@ -778,6 +820,7 @@ export default {
       if (this.saving || this.requestsDisposed) return;
       const f = this.form; const courseId = this.courseId; const editing = this.editingMetadata;
       const action = editing ? 'edit:' + f.lessonId : courseId + ':' + f.lessonKey;
+      if (this.metadataPending[action]) return;
       const current = () => !this.requestsDisposed && this.form === f && this.dialogVisible && this.courseId === courseId;
       const errors = {};
       for (const field of ['lessonKey', 'title', 'locale', 'ageBand']) {
@@ -789,18 +832,21 @@ export default {
       if (Object.keys(errors).length) return;
       if (this.metadataUncertain[action]) { this.formNotice = this.$t('lesson.metadataUncertain'); this.fetchList(); return; }
       this.saving = true;
+      this.metadataPending[action] = true;
       const payload = this.metadataPayload();
       const ok = (lesson) => {
-        this.saving = false;
+        delete this.metadataPending[action];
         if (!current()) return;
+        this.saving = false;
         this.dialogVisible = false;
         this.$message.success(this.$t(editing ? 'lesson.metadataSaved' : 'lesson.created'));
         if (editing) this.fetchList(); else this.openEditor(lesson);
       };
       const fail = (msg, response) => {
-        this.saving = false;
+        delete this.metadataPending[action];
         if (uncertainMutation(response)) this.metadataUncertain[action] = true;
         if (!current()) return;
+        this.saving = false;
         if (uncertainMutation(response)) {
           this.formNotice = this.$t('lesson.metadataUncertain'); this.fetchList();
         } else {

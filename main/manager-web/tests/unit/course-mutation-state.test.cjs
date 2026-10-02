@@ -15,6 +15,11 @@ function setup(view = 'CourseInsights') {
   const messages = [];
   const state = { ...component.data(), $route: { query: { courseId: 'A' } }, $router: { replace() {}, push() {} },
     $t: k => k, $message: Object.fromEntries(['error','warning','success'].map(k => [k, msg => messages.push([k, msg])])) };
+  if (view === 'CourseLessons') {
+    // These mutation cases start on an already-loaded route; initial metadata
+    // loading and invalid route denial are covered by course-route-version-state.
+    state.courseInfo = { courseId: state.$route.query.courseId, title: 'Loaded Course A' };
+  }
   for (const [k, f] of Object.entries(component.methods)) state[k] = f.bind(state);
   for (const [k, f] of Object.entries(component.computed || {})) Object.defineProperty(state, k, { get: () => f.call(state) });
   return { state, component, pending, messages };

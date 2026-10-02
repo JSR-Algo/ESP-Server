@@ -14,7 +14,7 @@
     "test:tvideo-journey-editor": "node scripts/check-tvideo-journey-editor.mjs",
     "test:tvideo-journey-browser": "node scripts/check-tvideo-journey-browser.mjs",
     "test:lesson-editor-ui": "node scripts/check-lesson-editor-ui-contracts.mjs",
-    "test:lesson-assignment-ui": "node scripts/check-lesson-assignment-ui-contracts.mjs",
+    "test:lesson-assignment-ui": "node scripts/check-lesson-assignment-ui-contracts.mjs && node --test tests/unit/course-route-version-state.test.cjs",
     "test:lesson-next-version": "node scripts/check-lesson-next-version.mjs",
     "test:flattened-cinematic-preview": "node scripts/check-flattened-cinematic-preview.mjs && node --test tests/unit/v5-preview-projection.test.cjs tests/unit/cinematic-media-lifecycle.test.mjs tests/unit/preview-dispatch.test.cjs tests/unit/mjpeg-mp4.test.mjs tests/unit/mjpeg-playback.test.mjs",
     "test:flattened-derivative-status": "node scripts/check-flattened-derivative-status.mjs",

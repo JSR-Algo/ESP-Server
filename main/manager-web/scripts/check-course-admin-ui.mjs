@@ -32,7 +32,7 @@ expectContains('src/views/CourseInsights.vue', 'this.$route.query.keyword', 'ins
 expectContains('src/views/CourseInsights.vue', 'this.$route.query.courseId', 'insights should hydrate courseId from route links');
 
 expectContains('src/views/LessonMonitoring.vue', 'filters.keyword', 'lesson monitoring needs keyword filtering');
-expectContains('src/views/LessonMonitoring.vue', 'this.$route.query.keyword', 'lesson monitoring deep links should hydrate keyword filtering');
+expectContains('src/views/LessonMonitoring.vue', 'applyRouteQuery()', 'lesson monitoring deep links must apply route query on create/update; native course-route-version-state asserts keyword and exact IDs');
 expectContains('src/apis/module/monitoring.js', 'keyword=', 'monitoring API must send keyword to backend');
 
 expectContains('src/views/DeviceManagement.vue', 'device.childProfile', 'device admin must show the child profile column');
