@@ -7,15 +7,15 @@ const B = '22222222-2222-4222-8222-222222222222';
 function setup(view = 'CourseLessons', id = A) {
   const calls = {}, notices = [], pushes = [], replaces = [];
   const module = new Proxy({}, { get: (_, name) => (...args) => {
-    const request = { args, ok: args.at(-2), fail: args.at(-1) };
+    const request = { args, ok: (rows) => args.at(-2)(rows, { page: 1, pageSize: 50, total: Array.isArray(rows) ? rows.length : 0, totalPages: Array.isArray(rows) && rows.length ? 1 : 0 }), fail: args.at(-1) };
     (calls[name] ||= []).push(request);
   } });
   const Api = { course: module, lesson: module, monitoring: module, courseInsights: module };
   const source = fs.readFileSync(path.join(__dirname, '../../src/views', view + '.vue'), 'utf8');
   const script = source.split('<script>')[1].split('</script>')[0]
     .replace(/import[\s\S]*?from\s+['"][^'"]+['"];?/g, '').replace('export default', 'return');
-  const component = new Function('Api', 'HeaderBar', 'AGE_BANDS', 'DEFAULT_AGE_BAND', 'DEFAULT_LOCALE', 'LOCALES', 'ageBandMinimum', 'ageBandSeverity', 'validateCourseForm', 'mutationDetails', 'uncertainMutation', 'isUncertainNestError', script)
-    (Api, {}, [], '4-6', 'en-US', [], () => 4, () => 'info', ...Object.values(require('../../src/utils/courseForm.cjs')), e => Number(e?.status) === 0 || Number(e?.status) >= 500);
+  const component = new Function('Api', 'HeaderBar', 'AGE_BANDS', 'DEFAULT_AGE_BAND', 'DEFAULT_LOCALE', 'LOCALES', 'ageBandMinimum', 'ageBandSeverity', 'validateCourseForm', 'mutationDetails', 'uncertainMutation', 'isUncertainNestError', 'pageFromQuery', script)
+    (Api, {}, [], '4-6', 'en-US', [], () => 4, () => 'info', ...Object.values(require('../../src/utils/courseForm.cjs')), e => Number(e?.status) === 0 || Number(e?.status) >= 500, require('../../src/utils/adminPagination.cjs').pageFromQuery);
   const s = { ...component.data(), $route: { query: { courseId: id, title: 'Forged URL title', lessonId: 'lesson-A' } }, $router: { push: x => pushes.push(x), replace: x => replaces.push(x) }, $t: x => x, $message: { error: x => notices.push(x), success: x => notices.push(x) } };
   for (const [key, f] of Object.entries(component.methods)) s[key] = f.bind(s);
   for (const [key, f] of Object.entries(component.computed || {})) Object.defineProperty(s, key, { get: () => f.call(s) });
@@ -33,7 +33,7 @@ test('deep link never trusts URL title and reads authoritative course before lis
 test('A to B clears old title/rows/actions immediately and ignores late A success', () => {
   const { s, c, component } = setup(); component.created.call(s);
   c.getCourse[0].ok(metadata(A)); c.listAuthoritativeLessons[0].ok([lesson('published-A', 1)]);
-  s.$route.query.courseId = B; component.watch.courseId.call(s, B, A);
+  s.$route.query.courseId = B; component.watch.courseId.call(s, B, A); component.watch['$route.query'].call(s);
   assert.equal(s.courseTitle, ''); assert.deepEqual(s.list, []); s.openCreate(); assert.equal(s.dialogVisible, false);
   c.getCourse[1].ok(metadata(B)); c.listAuthoritativeLessons[0].ok([lesson('late-A', 1)]);
   c.listAuthoritativeLessons[1].ok([lesson('published-B', 1)]);
@@ -41,7 +41,7 @@ test('A to B clears old title/rows/actions immediately and ignores late A succes
 });
 test('late A metadata error cannot replace B route notice', () => {
   const { s, c, component, notices } = setup(); component.created.call(s);
-  s.$route.query.courseId = B; component.watch.courseId.call(s, B, A);
+  s.$route.query.courseId = B; component.watch.courseId.call(s, B, A); component.watch['$route.query'].call(s);
   c.getCourse[1].ok(metadata(B)); c.getCourse[0].fail('late-A'); assert.deepEqual(notices, []);
 });
 for (const id of ['', '../bad', ['a', 'b']]) test('invalid course route does not call an API: ' + JSON.stringify(id), () => {
@@ -61,7 +61,7 @@ test('history exposes highest draft while published-first browsing row remains u
 });
 test('late A history never surfaces an A draft under B', () => {
   const { s, c, component } = setup(); component.created.call(s); c.getCourse[0].ok(metadata(A));
-  s.$route.query.courseId = B; component.watch.courseId.call(s, B, A); c.getCourse[1].ok(metadata(B));
+  s.$route.query.courseId = B; component.watch.courseId.call(s, B, A); component.watch['$route.query'].call(s); c.getCourse[1].ok(metadata(B));
   c.listLessons[0].ok([lesson('late-A-draft', 2, 'draft')]); assert.equal(s.existingDraft(lesson('B', 1)), null);
 });
 test('destroy suppresses pending metadata/list/history callbacks', () => {
@@ -106,7 +106,7 @@ test('monitor deep-link keyword and exact IDs hydrate on creation and clear on n
 test('pending A metadata mutation cannot leave B creation locked or change B form', () => {
   const { s, c, component } = setup(); component.created.call(s); c.getCourse[0].ok(metadata(A));
   s.openCreate(); Object.assign(s.form, { lessonKey: 'first', title: 'A', locale: 'en-US', ageBand: '4-6' }); s.submit();
-  s.$route.query.courseId = B; component.watch.courseId.call(s, B, A); c.getCourse[1].ok(metadata(B));
+  s.$route.query.courseId = B; component.watch.courseId.call(s, B, A); component.watch['$route.query'].call(s); c.getCourse[1].ok(metadata(B));
   s.openCreate(); Object.assign(s.form, { lessonKey: 'second', title: 'B', locale: 'en-US', ageBand: '4-6' }); s.submit();
   assert.equal(c.createLesson.length, 2); assert.equal(c.createLesson[1].args[0], B);
   c.createLesson[0].ok(lesson('late-A', 1, 'draft')); assert.equal(s.form.title, 'B'); assert.equal(s.dialogVisible, true);

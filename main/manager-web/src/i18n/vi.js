@@ -1,4 +1,9 @@
 export default {
+  'pagination.pageScope': 'Tổng số gồm mọi kết quả phù hợp. Các thẻ khác mô tả trang hiện tại.',
+  'pagination.localFilters': 'Lọc rủi ro và chi tiết bài học chỉ áp dụng cho trang này.',
+  'pagination.childSum': 'Số trẻ hoạt động là tổng theo khóa học; một trẻ có thể học nhiều khóa.',
+  'pagination.previewScope': 'Xem trước xếp hạng tối đa 50 bài ứng viên; không phải toàn bộ danh mục.',
+
   // Login page related prompt text
   'login.requiredUsername': 'Tên đăng nhập không được để trống',
   'login.requiredPassword': 'Mật khẩu không được để trống',

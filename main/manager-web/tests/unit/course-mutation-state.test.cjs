@@ -11,7 +11,7 @@ function setup(view = 'CourseInsights') {
   const source = fs.readFileSync(path.join(process.env.FE02_SOURCE_ROOT || path.join(__dirname, '../../src/views'), `${view}.vue`), 'utf8');
   const script = source.split('<script>')[1].split('</script>')[0]
     .replace(/import[\s\S]*?from\s+['"][^'"]+['"];?/g, '').replace('export default', 'return');
-  const component = new Function('Api', 'HeaderBar', 'AGE_BANDS', 'LOCALES', 'DEFAULT_AGE_BAND', 'DEFAULT_LOCALE', 'validateCourseForm', 'mutationDetails', 'uncertainMutation', script)(api, {}, [], [], '3-5', 'en', ...Object.values(require('../../src/utils/courseForm.cjs')));
+  const component = new Function('Api', 'HeaderBar', 'AGE_BANDS', 'LOCALES', 'DEFAULT_AGE_BAND', 'DEFAULT_LOCALE', 'validateCourseForm', 'mutationDetails', 'uncertainMutation', 'pageFromQuery', script)(api, {}, [], [], '3-5', 'en', ...Object.values(require('../../src/utils/courseForm.cjs')), require('../../src/utils/adminPagination.cjs').pageFromQuery);
   const messages = [];
   const state = { ...component.data(), $route: { query: { courseId: 'A' } }, $router: { replace() {}, push() {} },
     $t: k => k, $message: Object.fromEntries(['error','warning','success'].map(k => [k, msg => messages.push([k, msg])])) };
@@ -114,7 +114,7 @@ test('uncertain lesson deletion reconciles UUID before any repeated DELETE', asy
 
 test('reconciliation adapter rejects non-exhaustive list shape rather than proving absence', () => {
  const source=fs.readFileSync(path.join(__dirname,'../../src/apis/module/course.js'),'utf8').replace(/import[\s\S]*?from\s+['"][^'"]+['"];?/g,'').replace('export default','return');
- let request;const adapter=new Function('getNestUrl','nestRequest','normalizeCourse',source)(()=>'/v1/admin',r=>{request=r;},r=>r);
+ let request;const adapter=new Function('getNestUrl','nestRequest','normalizeCourse','decodeList','listQuery',source)(()=>'/v1/admin',r=>{request=r;},r=>r, require('../../src/utils/adminPagination.cjs').decodeList, require('../../src/utils/adminPagination.cjs').listQuery);
  let rows,failed;adapter.getCourseList(r=>{rows=r;},(msg,res)=>{failed=res;});request.onSuccess({items:[],hasMore:true});assert.equal(rows,undefined);assert.ok(failed);
 });
 

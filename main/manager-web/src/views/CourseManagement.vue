@@ -4,7 +4,7 @@
     <div class="operation-bar">
       <div class="left-title">
         <h2 class="page-title">{{ $t('course.pageTitle') }}</h2>
-        <el-radio-group v-model="kindFilter" size="small">
+        <el-radio-group v-model="kindFilter" size="small" @change="searchList(false)">
           <el-radio-button label="all">{{ $t('course.filterAll') }}</el-radio-button>
           <el-radio-button label="template">{{ $t('course.filterTemplate') }}</el-radio-button>
           <el-radio-button label="custom">{{ $t('course.filterCustom') }}</el-radio-button>
@@ -35,14 +35,19 @@
           size="small"
           clearable
           class="filter-input wide"
+          :maxlength="200"
+          @input="searchList(true)"
         />
-        <el-select v-model="riskFilter" size="small" class="filter-input">
+        <el-select v-model="statusFilter" size="small" clearable :placeholder="$t('lesson.filterStatus')" @change="searchList(false)">
+          <el-option v-for="status in ['draft', 'published', 'archived']" :key="status" :label="status" :value="status" />
+        </el-select>
+        <el-select v-model="riskFilter" size="small" class="filter-input" @change="setListPage(page)">
           <el-option :label="$t('course.riskAll')" value="all" />
           <el-option :label="$t('insights.riskAttention')" value="attention" />
           <el-option :label="$t('insights.riskWatch')" value="watch" />
           <el-option :label="$t('insights.riskHealthy')" value="healthy" />
         </el-select>
-        <el-select v-model="qualityWindow" size="small" class="filter-input" @change="fetchQuality">
+        <el-select v-model="qualityWindow" size="small" class="filter-input" @change="setListPage(page)">
           <el-option :label="$t('insights.window7')" :value="7" />
           <el-option :label="$t('insights.window14')" :value="14" />
           <el-option :label="$t('insights.window30')" :value="30" />
@@ -62,7 +67,7 @@
       <div class="course-stats">
         <div class="stat-item">
           <span class="stat-label">{{ $t('course.statTotal') }}</span>
-          <strong>{{ list.length }}</strong>
+          <strong>{{ pagination.total }}</strong>
         </div>
         <div class="stat-item">
           <span class="stat-label">{{ $t('course.statTemplates') }}</span>
@@ -97,6 +102,7 @@
         <el-button type="text" size="mini" @click="fetchQuality">{{ $t('course.refresh') }}</el-button>
       </el-alert>
       <el-card class="content-area" shadow="never">
+        <p class="muted small">{{ $t('pagination.pageScope') }} · {{ $t('pagination.localFilters') }}</p>
         <el-alert v-if="listFailed" :title="$t('course.loadFail')" type="error" :closable="false" show-icon />
         <el-table v-loading="loading" :data="filteredList" stripe style="width: 100%">
           <el-table-column prop="courseKey" :label="$t('course.colKey')" min-width="160" />
@@ -157,6 +163,7 @@
             <span class="muted">{{ $t('course.empty') }}</span>
           </template>
         </el-table>
+        <el-pagination data-testid="course-pagination" small layout="prev, pager, next, total" :current-page="page" :page-size="50" :total="pagination.total" @current-change="setListPage" />
       </el-card>
     </div>
 
@@ -268,6 +275,7 @@
 import { validateCourseForm, mutationDetails, uncertainMutation } from '@/utils/courseForm.cjs';
 import HeaderBar from '@/components/HeaderBar.vue';
 import Api from '@/apis/api';
+import { pageFromQuery } from '@/utils/adminPagination.cjs';
 import {
   AGE_BANDS,
   DEFAULT_AGE_BAND,
@@ -291,6 +299,10 @@ export default {
     return {
       requestsDisposed: false,
       listSequence: 0,
+      page: 1,
+      pagination: { page: 1, pageSize: 50, total: 0, totalPages: 0 },
+      searchTimer: null,
+      statusFilter: '',
       listFailed: false,
       list: [],
       loading: false,
@@ -337,11 +349,7 @@ export default {
       return ageBandSeverity(this.form.ageBand);
     },
     filteredList() {
-      const kw = this.courseKeyword.trim().toLowerCase();
       return this.list.filter((c) => {
-        if (this.kindFilter === 'template' && !c.isTemplate) return false;
-        if (this.kindFilter === 'custom' && c.isTemplate) return false;
-        if (kw && ![c.courseKey, c.title, c.locale, c.ageBand, c.status].some((v) => String(v || '').toLowerCase().includes(kw))) return false;
         // When the insights fetch failed there are no risk levels to match, so
         // applying the filter would silently empty the whole course list and
         // read as "no courses exist". Fall back to showing every course; the
@@ -381,15 +389,41 @@ export default {
     },
   },
   created() {
-    this.fetchList();
-    this.fetchQuality();
+    this.loadListRoute();
   },
+  watch: { '$route.query'() { this.loadListRoute(); } },
   beforeDestroy() {
     this.requestsDisposed = true;
     this.listSequence++;
     this.qualitySequence++;
+    clearTimeout(this.searchTimer);
   },
   methods: {
+    loadListRoute() {
+      clearTimeout(this.searchTimer);
+      const q = this.$route.query;
+      this.page = pageFromQuery(q);
+      this.kindFilter = ['template', 'custom'].includes(q.kind) ? q.kind : 'all';
+      this.courseKeyword = typeof q.keyword === 'string' ? q.keyword : '';
+      this.statusFilter = ['draft', 'published', 'archived'].includes(q.status) ? q.status : '';
+      this.riskFilter = ['attention', 'watch', 'healthy'].includes(q.risk) ? q.risk : 'all';
+      this.qualityWindow = [7, 14, 30, 90].includes(Number(q.windowDays)) ? Number(q.windowDays) : 30;
+      this.fetchList();
+    },
+    setListPage(page) {
+      clearTimeout(this.searchTimer);
+      const query = { ...this.$route.query, page: String(page), kind: this.kindFilter, keyword: this.courseKeyword.trim(), status: this.statusFilter, risk: this.riskFilter, windowDays: String(this.qualityWindow) };
+      if (Object.keys(query).every(k => query[k] === this.$route.query[k])) { this.fetchList(); return; }
+      this.listSequence++; this.qualitySequence++; this.list = []; this.qualityRows = [];
+      this.$router.push({ path: this.$route.path, query });
+    },
+    searchList(debounce) {
+      clearTimeout(this.searchTimer);
+      this.listSequence++; this.qualitySequence++; this.list = []; this.qualityRows = [];
+      this.loading = true;
+      if (debounce) this.searchTimer = setTimeout(() => { if (!this.requestsDisposed) this.setListPage(1); }, 300);
+      else this.setListPage(1);
+    },
     openLifecycle(row, status) {
       if (this.requestsDisposed || !['draft', 'published', 'archived'].includes(status) || this.actionPending['lifecycle:' + row.courseId]) return;
       const l = { course: { ...row }, status, loading: false, pending: false, needsReview: !!this.lifecycleUncertain[row.courseId], review: null, notice: '', details: {} };
@@ -485,13 +519,20 @@ export default {
       if (this.requestsDisposed) return;
       const sequence = ++this.listSequence;
       this.list = [];
+      this.qualitySequence++; this.qualityRows = [];
+      this.qualityLoading = false;
+      this.pagination = { page: this.page, pageSize: 50, total: 0, totalPages: 0 };
       this.listFailed = false;
       this.loading = true;
       Api.course.getCourseList(
-        (rows) => {
+        { page: this.page, pageSize: 50, keyword: this.courseKeyword.trim(), kind: this.kindFilter, status: this.statusFilter },
+        (rows, pagination) => {
           if (this.requestsDisposed || sequence !== this.listSequence) return;
+          this.pagination = pagination;
+          if (this.page > Math.max(1, pagination.totalPages)) { this.setListPage(Math.max(1, pagination.totalPages)); return; }
           this.loading = false;
           this.list = rows;
+          this.fetchQuality();
         },
         (msg) => {
           if (this.requestsDisposed || sequence !== this.listSequence) return;
@@ -512,23 +553,24 @@ export default {
       if (this.requestsDisposed) return;
       const sequence = ++this.qualitySequence;
       this.qualityRows = [];
-      this.qualityLoading = true;
-      Api.courseInsights.getCourseQuality(
-        { windowDays: this.qualityWindow },
-        (rows) => {
-          if (this.requestsDisposed || sequence !== this.qualitySequence) return;
-          this.qualityLoading = false;
-          this.qualityFailed = false;
-          this.qualityRows = rows;
-        },
-        (msg) => {
-          if (this.requestsDisposed || sequence !== this.qualitySequence) return;
-          this.qualityLoading = false;
-          this.qualityFailed = true;
-          this.qualityRows = [];
-          this.$message.warning(msg || this.$t('course.qualityLoadFail'));
-        },
-      );
+      this.qualityFailed = false;
+      let remaining = this.list.length;
+      this.qualityLoading = remaining > 0;
+      // Exact UUID reads keep quality aligned with filtered catalog rows;
+      // a separate quality page could describe a different set of courses.
+      const current = () => !this.requestsDisposed && sequence === this.qualitySequence;
+      const queue = this.list.slice();
+      const complete = () => { if (--remaining === 0) this.qualityLoading = false; next(); };
+      const next = () => {
+        if (!current() || !queue.length) return;
+        const course = queue.shift();
+        Api.courseInsights.getCourseQuality(
+          { windowDays: this.qualityWindow, courseId: course.courseId },
+          rows => { if (!current()) return; this.qualityRows.push(...rows); complete(); },
+          msg => { if (!current()) return; this.qualityFailed = true; this.$message.warning(msg || this.$t('course.qualityLoadFail')); complete(); },
+        );
+      };
+      for (let i = 0; i < Math.min(4, this.list.length); i++) next();
     },
     openInsightsForCourse(row) {
       this.$router.push({

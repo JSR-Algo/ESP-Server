@@ -4,6 +4,29 @@ const { monitorUnexpectedPageErrors } = require('./helpers/page-errors');
 const { gotoAppRoute } = require('./helpers/navigation');
 const { adminApi, createCourseModeDraft } = require('./helpers/admin-api');
 
+const pagedFixture = (route, key, rows) => {
+  const q = new URL(route.request().url()).searchParams;
+  return { [key]: rows, pagination: { page: Number(q.get('page') || 1), pageSize: Number(q.get('pageSize') || 50), total: rows.length, totalPages: rows.length ? 1 : 0 } };
+};
+
+// This live case requires the owned BE07 native scale fixture (260 learners).
+// Missing scale is a failure/prerequisite, never a skipped acceptance.
+test('real learner pages beyond 200 preserve immutable child identity and keyword scope', async ({ page }) => {
+  await loginAsLessonAuthor(page);
+  const actual = await adminApi(page, 'GET', '/course-insights/learners?page=5&pageSize=50');
+  expect(actual.pagination.total).toBeGreaterThan(200); expect(actual.learners.length).toBeGreaterThan(0);
+  const child = actual.learners[0];
+  await gotoAppRoute(page, '#/course-insights?tab=learners&page=5');
+  await expect(page.getByTestId('learner-pagination').locator('.number.active')).toHaveText('5');
+  await page.locator('.learner-list .el-table__body-wrapper .el-table__row').first().click();
+  await expect(page.locator('.detail-head')).toContainText(child.childId);
+  await page.locator('.learner-list .filter-row input').fill(child.childId);
+  await expect(page).toHaveURL(/page=1/);
+  await expect(page.locator('.learner-list .el-table__body-wrapper .el-table__row')).toHaveCount(1);
+  await page.goBack(); await expect(page).toHaveURL(/page=5/);
+  await expect(page.locator('.learner-list .el-table__body-wrapper .el-table__row').first()).toContainText(child.childName);
+});
+
 test('surfaces Course Insights and lifecycle history through the real admin session', async ({ page }) => {
   const assertNoUnexpectedPageErrors = monitorUnexpectedPageErrors(page);
   await loginAsLessonAuthor(page);
@@ -30,7 +53,7 @@ test('keeps B preview and draft when A preview and save finish late', async ({ p
   await loginAsLessonAuthor(page);
   const child = id => ({ childId: id, childName: `FE01 ${id}`, personality: { interests: [] }, stats: {} });
   const pending = {};
-  await page.route('**/course-insights/learners?*', route => route.fulfill({ json: { learners: [child('A'), child('B')] } }));
+  await page.route('**/course-insights/learners?*', route => route.fulfill({ json: pagedFixture(route, 'learners', [child('A'), child('B')]) }));
   await page.route('**/course-insights/learners/*/lesson-preview?*', route => {
     pending[route.request().url().includes('/A/') ? 'previewA' : 'previewB'] = route;
   });
@@ -66,7 +89,7 @@ test('quality refresh distinguishes empty from unavailable and ignores old error
   await requests[0].fulfill({ status: 503, json: { message: 'FE01 obsolete error' } });
   await expect(page.locator('.main-wrapper .el-loading-mask')).toBeVisible();
   await expect(page.getByText('FE01 obsolete error', { exact: true })).toHaveCount(0);
-  await requests[1].fulfill({ json: { courses: [] } });
+  await requests[1].fulfill({ json: pagedFixture(requests[1], 'courses', []) });
   await expect(page.locator('.main-wrapper .el-loading-mask')).toBeHidden();
   await expect(page.locator('.main-wrapper')).not.toContainText('Failed to load course quality');
   await page.getByRole('button', { name: 'Refresh', exact: true }).click();

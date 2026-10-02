@@ -1,4 +1,9 @@
 export default {
+  'pagination.pageScope': 'Totals count all matches. Other cards describe this page.',
+  'pagination.localFilters': 'Risk and lesson detail refinements apply to this page only.',
+  'pagination.childSum': 'Active children is the sum per course; a child may appear in several courses.',
+  'pagination.previewScope': 'Preview ranks at most 50 candidate lessons; it is not the complete catalog.',
+
   // Login page related prompt text
   'login.requiredUsername': 'Username cannot be empty',
   'login.requiredPassword': 'Password cannot be empty',

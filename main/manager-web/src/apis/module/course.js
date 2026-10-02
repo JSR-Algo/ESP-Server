@@ -1,5 +1,6 @@
 import { getNestUrl } from '../api';
 import { nestRequest, normalizeCourse } from '../nestHttp';
+import { decodeList, listQuery } from '@/utils/adminPagination.cjs';
 
 /**
  * Course customization CRUD — backed by the NestJS tbot-backend authoring API
@@ -11,17 +12,19 @@ import { nestRequest, normalizeCourse } from '../nestHttp';
 
 export default {
   // GET /v1/admin/courses -> Course[]
-  getCourseList(onSuccess, onError) {
+  getCourseList(params, onSuccess, onError) {
+    if (typeof params === 'function') { onError = onSuccess; onSuccess = params; params = {}; }
+    const p = { kind: 'all', ...params };
     nestRequest({
-      url: `${getNestUrl()}/courses?kind=all`,
+      url: `${getNestUrl()}/courses?${listQuery(p, ['kind', 'page', 'pageSize', 'keyword', 'status', 'courseKey'])}`,
       method: 'GET',
       onSuccess: (payload) => {
-        // BE-04 absence proof requires the exhaustive array contract.
-        if (!Array.isArray(payload)) {
+        let list;
+        try { list = decodeList(payload, null, p, ['id', 'course_id', 'courseId']); } catch (_) {
           if (onError) onError('', { status: 0, transport: true });
           return;
         }
-        onSuccess(payload.map(normalizeCourse));
+        onSuccess(list.rows.map(normalizeCourse), list.pagination);
       },
       onError,
     });

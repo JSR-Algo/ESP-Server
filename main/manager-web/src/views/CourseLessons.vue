@@ -22,7 +22,7 @@
       <div class="lesson-stats">
         <div class="stat-item">
           <span class="stat-label">{{ $t('lesson.statTotal') }}</span>
-          <strong>{{ list.length }}</strong>
+          <strong>{{ pagination.total }}</strong>
         </div>
         <div class="stat-item">
           <span class="stat-label">{{ $t('lesson.statMonitorable') }}</span>
@@ -46,27 +46,30 @@
             size="small"
             clearable
             class="filter-input wide"
+            :maxlength="200"
+            @input="searchList(true)"
           />
-          <el-select v-model="filters.status" :placeholder="$t('lesson.filterStatus')" size="small" clearable class="filter-select">
+          <el-select v-model="filters.status" :placeholder="$t('lesson.filterStatus')" size="small" clearable class="filter-select" @change="searchList(false)">
             <el-option v-for="s in statuses" :key="s" :label="s" :value="s" />
           </el-select>
-          <el-select v-model="filters.lessonType" :placeholder="$t('lesson.filterType')" size="small" clearable class="filter-select">
+          <el-select v-model="filters.lessonType" @change="setListPage(page)" :placeholder="$t('lesson.filterType')" size="small" clearable class="filter-select">
             <el-option v-for="t in lessonTypeOptions" :key="t" :label="t" :value="t" />
           </el-select>
-          <el-select v-model="filters.topic" :placeholder="$t('lesson.filterPersonality')" size="small" clearable filterable class="filter-select">
+          <el-select v-model="filters.topic" @change="setListPage(page)" :placeholder="$t('lesson.filterPersonality')" size="small" clearable filterable class="filter-select">
             <el-option v-for="tag in topicOptions" :key="tag" :label="tag" :value="tag" />
           </el-select>
-          <el-select v-model="filters.difficultyBand" :placeholder="$t('lesson.filterDifficulty')" size="small" clearable class="filter-select">
+          <el-select v-model="filters.difficultyBand" @change="setListPage(page)" :placeholder="$t('lesson.filterDifficulty')" size="small" clearable class="filter-select">
             <el-option v-for="d in difficultyOptions" :key="d" :label="d" :value="d" />
           </el-select>
-          <el-select v-model="filters.monitorable" :placeholder="$t('lesson.filterMonitorable')" size="small" clearable class="filter-select small-select">
+          <el-select v-model="filters.monitorable" @change="setListPage(page)" :placeholder="$t('lesson.filterMonitorable')" size="small" clearable class="filter-select small-select">
             <el-option :label="$t('lesson.monitorableYes')" value="yes" />
             <el-option :label="$t('lesson.monitorableNo')" value="no" />
           </el-select>
-          <el-button size="small" @click="resetFilters">{{ $t('lesson.clearFilters') }}</el-button>
+          <el-button size="small" @click="resetFilters(); searchList(false)">{{ $t('lesson.clearFilters') }}</el-button>
           <span class="filter-count">{{ filteredList.length }}/{{ list.length }}</span>
         </div>
 
+        <p class="muted small">{{ $t('pagination.pageScope') }} · {{ $t('pagination.localFilters') }}</p>
         <el-alert v-if="historyFailed" :title="$t('lesson.historyLoadFail')" type="warning" :closable="false" show-icon data-testid="lesson-history-error" />
         <el-alert v-if="listFailed" :title="$t('lesson.loadFail')" type="error" :closable="false" show-icon />
         <el-table v-loading="loading" :data="filteredList" stripe style="width: 100%">
@@ -150,6 +153,7 @@
             <span class="muted">{{ $t('lesson.empty') }}</span>
           </template>
         </el-table>
+        <el-pagination data-testid="lesson-pagination" small layout="prev, pager, next, total" :current-page="page" :page-size="50" :total="pagination.total" @current-change="setListPage" />
       </el-card>
     </div>
 
@@ -253,6 +257,7 @@
             :value="learner.childId"
           />
         </el-select>
+        <el-pagination data-testid="assignment-learner-pagination" small layout="prev, pager, next, total" :current-page="assignmentDialog.learnerPage" :page-size="20" :total="assignmentDialog.learnerPagination.total" :disabled="assignmentDialog.submitting" @current-change="page => searchAssignmentLearners(assignmentDialog.learnerKeyword, page)" />
         <el-alert
           v-if="assignmentDialog.statusMessage"
           :type="assignmentDialog.statusType"
@@ -316,6 +321,7 @@
 import { validateCourseForm, mutationDetails, uncertainMutation } from '@/utils/courseForm.cjs';
 import HeaderBar from '@/components/HeaderBar.vue';
 import Api from '@/apis/api';
+import { pageFromQuery } from '@/utils/adminPagination.cjs';
 import { isUncertainNestError } from '@/apis/nestHttp';
 import {
   AGE_BANDS,
@@ -350,6 +356,9 @@ const blankAssignmentDialog = () => ({
   statusMessage: '',
   statusType: 'info',
   readinessBlocked: false,
+  learnerPage: 1,
+  learnerKeyword: '',
+  learnerPagination: { page: 1, pageSize: 20, total: 0, totalPages: 0 },
   dialogSessionId: 0,
   learnerRequestToken: 0,
   deviceRequestToken: 0,
@@ -364,6 +373,9 @@ export default {
     return {
       requestsDisposed: false,
       listSequence: 0,
+      page: 1,
+      pagination: { page: 1, pageSize: 50, total: 0, totalPages: 0 },
+      searchTimer: null,
       courseInfo: null,
       draftVersions: {},
       historyFailed: false,
@@ -434,13 +446,7 @@ export default {
       return seconds ? this.durationLabel(seconds) : '—';
     },
     filteredList() {
-      const keyword = this.filters.keyword.trim().toLowerCase();
       return this.list.filter((row) => {
-        if (keyword) {
-          const haystack = [row.lessonKey, row.title, ...(row.topicTags || [])].join(' ').toLowerCase();
-          if (!haystack.includes(keyword)) return false;
-        }
-        if (this.filters.status && row.status !== this.filters.status) return false;
         if (this.filters.lessonType && (row.lessonType || 'lesson') !== this.filters.lessonType) return false;
         if (this.filters.topic && !(row.topicTags || []).includes(this.filters.topic)) return false;
         if (this.filters.difficultyBand && row.difficultyBand !== this.filters.difficultyBand) return false;
@@ -451,9 +457,10 @@ export default {
     },
   },
   created() {
-    this.fetchList();
+    this.loadListRoute();
   },
   beforeDestroy() {
+    clearTimeout(this.searchTimer);
     this.requestsDisposed = true;
     this.listSequence++;
     this.resetAssignmentDialog();
@@ -464,11 +471,33 @@ export default {
       this.dialogVisible = false;
       this.saving = false;
       this.resetForm();
-      this.resetFilters();
-      this.fetchList();
     },
+    '$route.query'() { this.loadListRoute(); },
   },
   methods: {
+    loadListRoute() {
+      clearTimeout(this.searchTimer);
+      const q = this.$route.query;
+      this.page = pageFromQuery(q);
+      this.filters = { keyword: typeof q.keyword === 'string' ? q.keyword : '',
+        status: ['draft', 'published', 'archived'].includes(q.status) ? q.status : '',
+        lessonType: typeof q.lessonType === 'string' ? q.lessonType : '', topic: typeof q.topic === 'string' ? q.topic : '',
+        difficultyBand: typeof q.difficultyBand === 'string' ? q.difficultyBand : '', monitorable: ['yes', 'no'].includes(q.monitorable) ? q.monitorable : '' };
+      this.fetchList();
+    },
+    setListPage(page) {
+      clearTimeout(this.searchTimer);
+      const query = { ...this.$route.query, ...this.filters, keyword: this.filters.keyword.trim(), page: String(page) };
+      if (Object.keys(query).every(k => query[k] === this.$route.query[k])) { this.fetchList(); return; }
+      this.listSequence++; this.list = []; this.courseInfo = null;
+      this.$router.push({ path: this.$route.path, query });
+    },
+    searchList(debounce) {
+      clearTimeout(this.searchTimer);
+      this.listSequence++; this.list = []; this.loading = true;
+      if (debounce) this.searchTimer = setTimeout(() => { if (!this.requestsDisposed) this.setListPage(1); }, 300);
+      else this.setListPage(1);
+    },
     statusType(status) {
       if (status === 'published') return 'success';
       if (status === 'archived') return 'info';
@@ -523,8 +552,10 @@ export default {
         if (!current()) return;
         if (!course || course.courseId !== courseId || typeof course.title !== 'string') return fail();
         this.courseInfo = course;
-        Api.lesson.listAuthoritativeLessons(courseId, (rows) => {
+        Api.lesson.listAuthoritativeLessons(courseId, { page: this.page, pageSize: 50, keyword: this.filters.keyword.trim(), status: this.filters.status }, (rows, pagination) => {
           if (!current()) return;
+          this.pagination = pagination;
+          if (this.page > Math.max(1, pagination.totalPages)) { this.setListPage(Math.max(1, pagination.totalPages)); return; }
           this.loading = false;
           this.list = rows;
         }, fail);
@@ -626,17 +657,23 @@ export default {
       this.assignmentDialog.submitContext = null;
       return true;
     },
-    searchAssignmentLearners(keyword) {
+    searchAssignmentLearners(keyword, page = 1) {
+      if (this.assignmentDialog.submitting) return;
+      this.assignmentDialog.learnerPage = page;
+      this.assignmentDialog.learnerKeyword = keyword;
       const token = ++this.assignmentDialog.learnerRequestToken;
       const dialogSessionId = this.assignmentDialog.dialogSessionId;
       this.assignmentDialog.loadingLearners = true;
+      this.assignmentDialog.learners = [];
       Api.courseInsights.listLearners(
-        { keyword, limit: 20 },
-        (learners) => {
+        { keyword, page, pageSize: 20 },
+        (learners, pagination) => {
           if (!this.assignmentDialog.visible
             || dialogSessionId !== this.assignmentDialog.dialogSessionId
             || token !== this.assignmentDialog.learnerRequestToken) return;
           this.assignmentDialog.loadingLearners = false;
+          this.assignmentDialog.learnerPagination = pagination;
+          if (page > Math.max(1, pagination.totalPages)) { this.searchAssignmentLearners(keyword, Math.max(1, pagination.totalPages)); return; }
           this.assignmentDialog.learners = learners;
         },
         (msg) => {

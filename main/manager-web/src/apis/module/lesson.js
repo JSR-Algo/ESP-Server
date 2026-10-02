@@ -1,3 +1,4 @@
+import { decodeList, listQuery } from '@/utils/adminPagination.cjs';
 import { getNestUrl } from '../api';
 import {
   nestRequest,
@@ -395,23 +396,33 @@ export default {
     nestRequest({ url: `${getNestUrl()}/lesson-visual-assets/replacements`, method: 'POST', data, onSuccess, onError });
   },
   // GET /v1/admin/courses/:courseId/lessons -> Lesson[]
-  listLessons(courseId, onSuccess, onError) {
+  listLessons(courseId, params, onSuccess, onError) {
+    if (typeof params === 'function') { onError = onSuccess; onSuccess = params; params = {}; }
+    const query = listQuery(params, ['page', 'pageSize', 'keyword', 'status']);
     nestRequest({
-      url: `${getNestUrl()}/courses/${courseId}/lessons`,
+      url: `${getNestUrl()}/courses/${courseId}/lessons${query ? '?' + query : ''}`,
       method: 'GET',
-      onSuccess: (p) =>
-        onSuccess((Array.isArray(p) ? p : []).map(normalizeLesson)),
+      onSuccess: (payload) => {
+        let list;
+        try { list = decodeList(payload, null, params, ['id', 'lesson_id', 'lessonId']); } catch (_) { if (onError) onError('', { status: 0, transport: true }); return; }
+        onSuccess(list.rows.map(normalizeLesson), list.pagination);
+      },
       onError,
     });
   },
 
   // GET /v1/admin/courses/:courseId/lessons/authoritative -> one live row per lesson key
-  listAuthoritativeLessons(courseId, onSuccess, onError) {
+  listAuthoritativeLessons(courseId, params, onSuccess, onError) {
+    if (typeof params === 'function') { onError = onSuccess; onSuccess = params; params = {}; }
+    const query = listQuery(params, ['page', 'pageSize', 'keyword', 'status']);
     nestRequest({
-      url: `${getNestUrl()}/courses/${courseId}/lessons/authoritative`,
+      url: `${getNestUrl()}/courses/${courseId}/lessons/authoritative${query ? '?' + query : ''}`,
       method: 'GET',
-      onSuccess: (p) =>
-        onSuccess((Array.isArray(p) ? p : []).map(normalizeLesson)),
+      onSuccess: (payload) => {
+        let list;
+        try { list = decodeList(payload, null, params, ['id', 'lesson_id', 'lessonId']); } catch (_) { if (onError) onError('', { status: 0, transport: true }); return; }
+        onSuccess(list.rows.map(normalizeLesson), list.pagination);
+      },
       onError,
     });
   },

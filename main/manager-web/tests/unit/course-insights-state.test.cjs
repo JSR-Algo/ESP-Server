@@ -6,16 +6,21 @@ const path = require('node:path');
 function setup(view = 'CourseInsights') {
   const pending = {};
   const api = new Proxy({}, { get: (_, group) => new Proxy({}, { get: (_, method) => (...args) => {
-    (pending[method] ||= []).push({ args, ok: args.at(-2), fail: args.at(-1) });
+    (pending[method] ||= []).push({ args, ok: rows => args.at(-2)(rows, { page: 1, pageSize: 50, total: Array.isArray(rows) ? rows.length : 0, totalPages: Array.isArray(rows) && rows.length ? 1 : 0 }), fail: args.at(-1) });
   } }) });
   const source = fs.readFileSync(path.join(__dirname, '../../src/views', `${view}.vue`), 'utf8');
   const script = source.split('<script>')[1].split('</script>')[0]
     .replace(/import[\s\S]*?from\s+['"][^'"]+['"];?/g, '').replace('export default', 'return');
-  const component = new Function('Api', 'HeaderBar', 'AGE_BANDS', 'LOCALES', 'DEFAULT_AGE_BAND', 'DEFAULT_LOCALE', 'validateCourseForm', 'mutationDetails', 'uncertainMutation', script)(api, {}, [], [], '3-5', 'en', ...Object.values(require('../../src/utils/courseForm.cjs')));
+  const component = new Function('Api', 'HeaderBar', 'AGE_BANDS', 'LOCALES', 'DEFAULT_AGE_BAND', 'DEFAULT_LOCALE', 'validateCourseForm', 'mutationDetails', 'uncertainMutation', 'pageFromQuery', script)(api, {}, [], [], '3-5', 'en', ...Object.values(require('../../src/utils/courseForm.cjs')), require('../../src/utils/adminPagination.cjs').pageFromQuery);
   const messages = [];
-  const state = { ...component.data(), $route: { query: { courseId: 'A' } }, $router: { replace() {} },
+  const state = { ...component.data(), $route: { query: { courseId: '11111111-1111-4111-8111-111111111111' } }, $router: { replace() {} },
     $t: k => k, $message: Object.fromEntries(['error','warning','success'].map(k => [k, msg => messages.push([k, msg])])) };
   for (const [k, f] of Object.entries(component.methods)) state[k] = f.bind(state);
+  if (view === 'CourseManagement') state.list = [{ courseId: '11111111-1111-4111-8111-111111111111' }];
+  if (view === 'CourseLessons') {
+    const fetch = state.fetchList;
+    state.fetchList = () => { fetch(); const req = pending.getCourse.at(-1); req.ok({ courseId: req.args[0], title: 'Authoritative metadata' }); };
+  }
   for (const [k, f] of Object.entries(component.computed || {})) Object.defineProperty(state, k, { get: () => f.call(state) });
   return { state, component, pending, messages };
 }
@@ -84,9 +89,9 @@ test('Insights route reuse resets identity and invalidates pending save and prev
   assert.equal(s.previewLessons.length,0); assert.equal(s.qualityLoading,true); assert.equal(messages.length,0);
 });
 test('Lessons route reuse fetches the new course and rejects old list', () => {
-  const { state:s, component:c, pending:p }=setup('CourseLessons'); s.fetchList(); s.$route.query={courseId:'B'};
-  assert.equal(typeof c.watch?.courseId,'function'); c.watch.courseId.call(s);
-  assert.equal(p.listAuthoritativeLessons[1].args[0],'B'); p.listAuthoritativeLessons[0].ok([{lessonId:'A'}]);
+  const { state:s, component:c, pending:p }=setup('CourseLessons'); s.fetchList(); s.$route.query={courseId:'22222222-2222-4222-8222-222222222222'};
+  assert.equal(typeof c.watch?.courseId,'function'); c.watch.courseId.call(s); c.watch['$route.query'].call(s);
+  assert.equal(p.listAuthoritativeLessons[1].args[0],'22222222-2222-4222-8222-222222222222'); p.listAuthoritativeLessons[0].ok([{lessonId:'A'}]);
   assert.equal(s.list.length,0); assert.equal(s.loading,true); p.listAuthoritativeLessons[1].ok([{lessonId:'B'}]); assert.equal(s.list[0].lessonId,'B');
 });
 for (const outcome of ['ok', 'fail']) test(`destroyed Insights ignores preview and save ${outcome}`, () => {

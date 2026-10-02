@@ -8,6 +8,32 @@ const pageErrors = new WeakMap();
 test.beforeEach(async ({ page }) => { const errors=[]; pageErrors.set(page,errors); page.on('pageerror',e=>errors.push(e.message)); });
 test.afterEach(async ({ page }) => { expect(pageErrors.get(page), 'no browser runtime exceptions').toEqual([]); });
 
+test('server pages reach tied later courses, restore Back and recover after last-page deletion', async ({ page }) => {
+  await loginAsLessonAuthor(page);
+  const key = uniqueCourseKey('fe05'); const owned = [];
+  try {
+    for (let n = 0; n < 51; n++) owned.push(await adminApi(page, 'POST', '/courses', { courseKey: `${key}-${n}`, title: `${key} same label`, locale: 'en-US', ageBand: '4-6' }));
+    await gotoAppRoute(page, `#/course-management?keyword=${key}&page=1`);
+    const rows = page.locator('.content-area .el-table__body-wrapper .el-table__row');
+    await expect(rows).toHaveCount(50);
+    await page.getByTestId('course-pagination').locator('.btn-next').click();
+    await expect(page).toHaveURL(/page=2/); await expect(rows).toHaveCount(1);
+    const laterKey = (await rows.first().locator('td').first().innerText()).trim();
+    const search = page.locator('.course-filter-panel .el-input input').first();
+    await search.fill(laterKey); await expect(page).toHaveURL(/page=1/); await expect(courseRow(page, laterKey)).toBeVisible();
+    await page.goBack(); await expect(page).toHaveURL(/page=2/); await expect(rows).toHaveCount(1); await expect(search).toHaveValue(key);
+    const target = owned.find(course => course.course_key === laterKey); expect(target).toBeTruthy();
+    await courseRow(page, laterKey).getByRole('button', { name: 'Delete', exact: true }).click();
+    await page.locator('.el-message-box').getByRole('button', { name: 'OK', exact: true }).click();
+    await expect(page).toHaveURL(/page=1/); await expect(rows).toHaveCount(50);
+    owned.splice(owned.indexOf(target), 1);
+    const actual = await adminApi(page, 'GET', `/courses?page=1&pageSize=50&keyword=${key}`);
+    expect(actual.pagination.total).toBe(50); expect(actual.items).toHaveLength(50);
+  } finally {
+    for (const course of owned) await adminApi(page, 'DELETE', '/courses/' + course.id);
+  }
+});
+
 // Real manager + author login, nginx proxy, BE-01/04 and native PostgreSQL.
 test('real course CRUD survives readback and reload', async ({ page }) => {
   await loginAsLessonAuthor(page);
