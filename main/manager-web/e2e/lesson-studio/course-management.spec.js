@@ -138,3 +138,61 @@ test('lessons validate metadata and persist draft edits through real API', async
  await create.locator('.el-form-item').filter({hasText:'Title'}).getByRole('textbox').fill('FE02 invalid lesson');await create.getByRole('button',{name:'Save',exact:true}).click();await expect(create.locator('.el-form-item__error')).toContainText('lowercase');
  await create.getByRole('button',{name:'Cancel',exact:true}).click();await adminApi(page,'DELETE','/lessons/'+lesson.id);await adminApi(page,'DELETE','/courses/'+course.id);
 });
+
+// FE-03: real manager/proxy/API/DB lifecycle; public reads use real parent signup.
+async function lifecycleDialog(page, key, selector) {
+  await courseRow(page,key).getByTestId(selector).click();
+  const dialog=page.getByRole('dialog',{name:'Course availability',exact:true});
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByTestId('course-lifecycle-confirm')).toBeEnabled();
+  await expect(dialog).toContainText(key);return dialog;
+}
+async function parentCatalog(page) {
+  const origin=`http://127.0.0.1:${process.env.LESSON_STUDIO_E2E_BACKEND_HOST_PORT}`;
+  const response=await page.request.post(origin+'/v1/auth/signup',{data:{name:'FE03 synthetic parent',email:`fe03-${Date.now()}-${Math.random().toString(16).slice(2)}@example.invalid`,password:'Fe03Proof!2026'}});
+  expect(response.status()).toBe(201);const {access_token}=await response.json();expect(access_token).toBeTruthy();
+  return async()=>{const r=await page.request.get(origin+'/v1/courses',{headers:{Authorization:`Bearer ${access_token}`}});expect(r.status()).toBe(200);return (await r.json()).data;};
+}
+test('FE03 real empty and draft-only publication refuses with visible prerequisites and unchanged catalog',async({page},testInfo)=>{
+  await loginAsLessonAuthor(page);const catalog=await parentCatalog(page);const key=uniqueCourseKey('fe03-empty');const course=await createCourseInUI(page,key,'FE03 empty course');
+  const dialog=await lifecycleDialog(page,key,'course-publish');await expect(dialog).toContainText('every latest published lesson');await expect(dialog.locator('p').first()).toHaveCSS('word-break','normal');await expect(dialog.locator('p').first()).toHaveCSS('text-align','left');await testInfo.attach('course-publication-prerequisites',{body:await dialog.screenshot(),contentType:'image/png'});
+  const reject=page.waitForResponse(r=>r.url().endsWith('/courses/'+course.id)&&r.request().method()==='PATCH');await dialog.getByTestId('course-lifecycle-confirm').click();expect((await reject).status()).toBe(422);
+  await expect(dialog.getByTestId('course-lifecycle-notice')).toContainText('Publish at least one playable lesson');
+  expect((await adminApi(page,'GET','/courses/'+course.id)).status).toBe('draft');expect((await catalog()).some(c=>c.courseId===key)).toBe(false);
+  const lesson=await adminApi(page,'POST',`/courses/${course.id}/lessons`,{lessonKey:key,title:'FE03 draft-only',locale:'en-US',ageBand:'4-6'});
+  const rejectDraft=page.waitForResponse(r=>r.url().endsWith('/courses/'+course.id)&&r.request().method()==='PATCH');await dialog.getByTestId('course-lifecycle-confirm').click();expect((await rejectDraft).status()).toBe(422);
+  expect((await catalog()).some(c=>c.courseId===key)).toBe(false);
+  await testInfo.attach('lifecycle-refusal',{body:JSON.stringify({course:await adminApi(page,'GET','/courses/'+course.id),publicVisible:false}),contentType:'application/json'});
+  await dialog.getByRole('button',{name:'Cancel',exact:true}).click();await adminApi(page,'DELETE','/lessons/'+lesson.id);await adminApi(page,'DELETE','/courses/'+course.id);
+});
+test('FE03 lesson publication keeps course draft then explicit publish reload catalog and archive agree',async({page},testInfo)=>{
+  await loginAsLessonAuthor(page);const catalog=await parentCatalog(page);const key=uniqueCourseKey('fe03-live');
+  const {createLegacyFixtureCourse}=require('./helpers/legacy-fixtures');const fixture=await createLegacyFixtureCourse(page,key);
+  const published=await adminApi(page,'POST',`/lessons/${fixture.lesson.id}/publish`,{});
+  expect((await adminApi(page,'GET','/lessons/'+fixture.lesson.id)).status).toBe('published');expect((await adminApi(page,'GET','/courses/'+fixture.course.id)).status).toBe('draft');expect((await catalog()).some(c=>c.courseId===key)).toBe(false);
+  await page.reload();const dialog=await lifecycleDialog(page,key,'course-publish');let count=0,release;const gate=new Promise(r=>release=r);
+  await page.route('**/courses/'+fixture.course.id,async route=>{if(route.request().method()!=='PATCH')return route.continue();count++;const response=await route.fetch();expect(response.status()).toBe(200);expect(route.request().postDataJSON().expectedRevision).toMatch(/^[a-f0-9]{32}$/);await gate;await route.fulfill({response});});
+  await dialog.getByTestId('course-lifecycle-confirm').click();await page.keyboard.press('Enter');await page.keyboard.press('Enter');await expect.poll(()=>count).toBe(1);await expect(dialog.getByTestId('course-lifecycle-confirm')).toBeDisabled();release();await expect(dialog).toBeHidden();await page.unroute('**/courses/'+fixture.course.id);
+  await page.reload();await expect(courseRow(page,key)).toContainText('published');const revalidate=await lifecycleDialog(page,key,'course-publish');await revalidate.getByTestId('course-lifecycle-confirm').click();await expect(revalidate).toBeHidden();expect((await catalog()).find(c=>c.courseId===key)).toMatchObject({lessonCount:1});
+  const archive=await lifecycleDialog(page,key,'course-archive');await expect(archive).toContainText('Existing enrollments, progress and pinned lesson versions remain');await expect(archive).toContainText('active lessons are not canceled');await archive.getByTestId('course-lifecycle-confirm').click();await expect(archive).toBeHidden();await page.reload();await expect(courseRow(page,key)).toContainText('archived');expect((await catalog()).some(c=>c.courseId===key)).toBe(false);
+  const lessonAfter=await adminApi(page,'GET','/lessons/'+fixture.lesson.id);expect(lessonAfter.status).toBe('published');expect(lessonAfter.manifest_checksum).toBe(published.checksum);const restore=await lifecycleDialog(page,key,'course-publish');await restore.getByTestId('course-lifecycle-confirm').click();await expect(restore).toBeHidden();expect((await catalog()).some(c=>c.courseId===key)).toBe(true);const rearchive=await lifecycleDialog(page,key,'course-archive');await rearchive.getByTestId('course-lifecycle-confirm').click();await expect(rearchive).toBeHidden();expect((await catalog()).some(c=>c.courseId===key)).toBe(false);
+  await testInfo.attach('lifecycle-live-readback',{body:JSON.stringify({course:await adminApi(page,'GET','/courses/'+fixture.course.id),lesson:lessonAfter,publicVisible:false,duplicateRequestCount:count}),contentType:'application/json'});
+  const draft=await lifecycleDialog(page,key,'course-return-draft');await draft.getByTestId('course-lifecycle-confirm').click();await expect(draft).toBeHidden();expect((await adminApi(page,'GET','/courses/'+fixture.course.id)).status).toBe('draft');
+  // Published versions are immutable; retain the task-owned fixture for QA-01 readback.
+});
+test('FE03 stale second author conflicts then explicit reviewed retry succeeds',async({page,context},testInfo)=>{
+  await loginAsLessonAuthor(page);const key=uniqueCourseKey('fe03-stale');const course=await createCourseInUI(page,key,'FE03 stale course');const dialog=await lifecycleDialog(page,key,'course-archive');
+  const second=await context.browser().newContext({baseURL:process.env.LESSON_STUDIO_E2E_WEB_ORIGIN||`http://127.0.0.1:${process.env.LESSON_STUDIO_E2E_WEB_HOST_PORT}`,serviceWorkers:'block'});const other=await second.newPage();
+  try{
+   await loginAsLessonAuthor(other);const newer=await adminApi(other,'GET','/courses/'+course.id);await adminApi(other,'PATCH','/courses/'+course.id,{status:'archived',expectedRevision:newer.revision});
+   const conflict=page.waitForResponse(r=>r.url().endsWith('/courses/'+course.id)&&r.request().method()==='PATCH');await dialog.getByTestId('course-lifecycle-confirm').click();const r=await conflict;expect(r.status()).toBe(409);expect((await r.json()).details.reason).toBe('stale');
+   await expect(dialog.getByTestId('course-lifecycle-notice')).toContainText('Another change was saved');await expect(dialog.getByTestId('course-lifecycle-readback')).toContainText('archived');await expect(dialog.getByTestId('course-lifecycle-confirm')).toBeDisabled();
+   await dialog.getByTestId('course-lifecycle-review').click();await dialog.getByTestId('course-lifecycle-confirm').click();await expect(dialog).toBeHidden();expect((await adminApi(page,'GET','/courses/'+course.id)).status).toBe('archived');
+   await testInfo.attach('stale-real-readback',{body:JSON.stringify(await adminApi(page,'GET','/courses/'+course.id)),contentType:'application/json'});
+  }finally{await second.close();await adminApi(page,'DELETE','/courses/'+course.id);}
+});
+test('FE03 response loss after real transition commit reviews stored state without automatic replay',async({page})=>{
+  await loginAsLessonAuthor(page);const key=uniqueCourseKey('fe03-loss');const course=await createCourseInUI(page,key,'FE03 lost archive response');const dialog=await lifecycleDialog(page,key,'course-archive');let count=0;
+  await page.route('**/courses/'+course.id,async route=>{if(route.request().method()!=='PATCH')return route.continue();count++;const response=await route.fetch();expect(response.status()).toBe(200);await route.abort('failed');});
+  await dialog.getByTestId('course-lifecycle-confirm').click();await expect(dialog.getByTestId('course-lifecycle-notice')).toContainText('outcome is uncertain');await expect(dialog.getByTestId('course-lifecycle-readback')).toContainText('archived');await expect(dialog.getByTestId('course-lifecycle-confirm')).toBeDisabled();expect(count).toBe(1);expect((await adminApi(page,'GET','/courses/'+course.id)).status).toBe('archived');await adminApi(page,'DELETE','/courses/'+course.id);
+});

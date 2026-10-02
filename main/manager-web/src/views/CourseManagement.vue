@@ -126,7 +126,7 @@
               <span v-else class="muted small">{{ $t('course.noQuality') }}</span>
             </template>
           </el-table-column>
-          <el-table-column :label="$t('course.colActions')" width="430">
+          <el-table-column :label="$t('course.colActions')" min-width="650">
             <template slot-scope="scope">
               <el-button type="text" size="small" @click="openLessons(scope.row)">
                 {{ $t('course.lessons') }}
@@ -143,6 +143,11 @@
               <el-button type="text" size="small" @click="openEdit(scope.row)">
                 {{ $t('course.edit') }}
               </el-button>
+              <el-button type="text" size="small" data-testid="course-publish" :disabled="!!actionPending['lifecycle:' + scope.row.courseId]" @click="openLifecycle(scope.row, 'published')">
+                {{ $t(scope.row.status === 'published' ? 'course.republish' : 'course.publish') }}
+              </el-button>
+              <el-button v-if="scope.row.status !== 'archived'" type="text" size="small" data-testid="course-archive" :disabled="!!actionPending['lifecycle:' + scope.row.courseId]" @click="openLifecycle(scope.row, 'archived')">{{ $t('course.archive') }}</el-button>
+              <el-button v-if="scope.row.status !== 'draft'" type="text" size="small" data-testid="course-return-draft" :disabled="!!actionPending['lifecycle:' + scope.row.courseId]" @click="openLifecycle(scope.row, 'draft')">{{ $t('course.returnDraft') }}</el-button>
               <el-button type="text" size="small" class="danger-text" :disabled="!!actionPending['delete:' + scope.row.courseId]" @click="confirmDelete(scope.row)">
                 {{ $t('course.delete') }}
               </el-button>
@@ -154,6 +159,25 @@
         </el-table>
       </el-card>
     </div>
+
+    <el-dialog :title="$t('course.lifecycleTitle')" :visible.sync="lifecycleVisible" width="560px" class="lifecycle-dialog">
+      <div v-if="lifecycle" v-loading="lifecycle.loading" data-testid="course-lifecycle">
+        <p><strong>{{ lifecycle.course.title }}</strong> · {{ lifecycle.course.courseKey }}</p>
+        <p data-testid="course-lifecycle-state">{{ $t('course.currentStatus') }}: {{ lifecycle.course.status }} → {{ lifecycle.status }}</p>
+        <p>{{ $t(lifecycle.status === 'published' ? 'course.publishPrerequisites' : 'course.archivePolicy') }}</p>
+        <p class="muted">{{ $t('course.readinessSeparate') }}</p>
+        <el-alert v-if="lifecycle.notice" data-testid="course-lifecycle-notice" :title="lifecycle.notice" type="warning" :closable="false" show-icon />
+        <p v-if="lifecycle.details.lessonKey" data-testid="course-lifecycle-lesson">{{ lifecycle.details.lessonKey }} · v{{ lifecycle.details.lessonVersion }} · {{ lifecycle.details.lessonId }}</p>
+        <el-button v-if="lifecycle.details.lessonKey" type="text" @click="openLessons(lifecycle.course)">{{ $t('course.lessons') }}</el-button>
+        <p v-if="lifecycle.review" data-testid="course-lifecycle-readback">{{ $t('course.storedState') }}: {{ lifecycle.review.title }} · {{ lifecycle.review.status }}</p>
+        <el-button v-if="lifecycle.needsReview && lifecycle.review" data-testid="course-lifecycle-review" :disabled="lifecycle.loading" @click="reviewLifecycle">{{ $t('course.reviewLifecycle') }}</el-button>
+        <el-button v-if="lifecycle.needsReview && !lifecycle.review" data-testid="course-lifecycle-refresh" :disabled="lifecycle.loading" @click="readLifecycle(lifecycle)">{{ $t('course.refresh') }}</el-button>
+      </div>
+      <span slot="footer">
+        <el-button @click="lifecycleVisible = false">{{ $t('course.cancel') }}</el-button>
+        <el-button type="primary" data-testid="course-lifecycle-confirm" :loading="!!lifecycle && lifecycle.pending" :disabled="!lifecycleCanConfirm" @click="confirmLifecycle">{{ $t('course.confirmLifecycle') }}</el-button>
+      </span>
+    </el-dialog>
 
     <el-dialog
       :title="editing ? $t('course.editTitle') : $t('course.createTitle')"
@@ -279,6 +303,9 @@ export default {
       cloneNotice: '',
       foundCourse: null,
       cloneFoundCourse: null,
+      lifecycleVisible: false,
+      lifecycle: null,
+      lifecycleUncertain: {},
       actionPending: {},
       uncertainActions: {},
       kindFilter: 'all',
@@ -302,6 +329,10 @@ export default {
     };
   },
   computed: {
+    lifecycleCanConfirm() {
+      const l = this.lifecycle;
+      return !!l && !l.loading && !l.pending && !l.needsReview && /^[a-f0-9]{32}$/.test(l.course.revision || '');
+    },
     ageBandSeverity() {
       return ageBandSeverity(this.form.ageBand);
     },
@@ -359,6 +390,79 @@ export default {
     this.qualitySequence++;
   },
   methods: {
+    openLifecycle(row, status) {
+      if (this.requestsDisposed || !['draft', 'published', 'archived'].includes(status) || this.actionPending['lifecycle:' + row.courseId]) return;
+      const l = { course: { ...row }, status, loading: false, pending: false, needsReview: !!this.lifecycleUncertain[row.courseId], review: null, notice: '', details: {} };
+      this.lifecycle = l;
+      this.lifecycleVisible = true;
+      this.readLifecycle(l);
+    },
+    readLifecycle(l, afterWrite = false) {
+      if (this.requestsDisposed || l.loading) return;
+      const id = l.course.courseId;
+      l.loading = true;
+      this.actionPending = { ...this.actionPending, ['lifecycle:' + id]: true };
+      Api.course.getCourse(id, (course) => {
+        if (this.requestsDisposed) return;
+        l.loading = false; l.pending = false;
+        this.actionPending = { ...this.actionPending, ['lifecycle:' + id]: false };
+        if (!course || course.courseId !== id || !/^[a-f0-9]{32}$/.test(course.revision || '')) {
+          if (afterWrite) this.lifecycleUncertain[id] = true;
+          l.needsReview = true; l.review = null; l.notice = this.$t('course.lifecycleReadFail');
+          return;
+        }
+        if (afterWrite && !l.needsReview && course.status === l.status) {
+          delete this.lifecycleUncertain[id];
+          this.fetchList();
+          if (this.lifecycle === l && this.lifecycleVisible) {
+            this.lifecycleVisible = false;
+            this.$message.success(this.$t('course.lifecycleSaved'));
+          }
+          return;
+        }
+        if (afterWrite || l.needsReview) {
+          l.needsReview = true; l.review = course;
+          this.lifecycleUncertain[id] = true;
+          if (!l.notice) l.notice = this.$t('course.lifecycleUncertain');
+        } else l.course = course;
+      }, () => {
+        if (this.requestsDisposed) return;
+        l.loading = false; l.pending = false; l.needsReview = true; l.review = null;
+        this.actionPending = { ...this.actionPending, ['lifecycle:' + id]: false };
+        if (afterWrite) this.lifecycleUncertain[id] = true;
+        l.notice = this.$t('course.lifecycleReadFail');
+      });
+    },
+    reviewLifecycle() {
+      const l = this.lifecycle;
+      if (!l || l.loading || l.pending || !l.review) return;
+      l.course = l.review; l.review = null; l.needsReview = false; l.notice = ''; l.details = {};
+      delete this.lifecycleUncertain[l.course.courseId];
+      this.fetchList();
+    },
+    confirmLifecycle() {
+      if (this.requestsDisposed || !this.lifecycleCanConfirm) return;
+      const l = this.lifecycle; const id = l.course.courseId; const action = 'lifecycle:' + id;
+      if (this.actionPending[action]) return;
+      this.actionPending = { ...this.actionPending, [action]: true };
+      l.pending = true; l.notice = ''; l.details = {};
+      Api.course.transitionCourse(id, l.status, l.course.revision, () => {
+        if (this.requestsDisposed) return;
+        this.readLifecycle(l, true);
+      }, (msg, response) => {
+        if (this.requestsDisposed) return;
+        l.pending = false;
+        this.actionPending = { ...this.actionPending, [action]: false };
+        l.details = mutationDetails(response);
+        if (l.details.reason === 'stale' || uncertainMutation(response)) {
+          l.needsReview = true; this.lifecycleUncertain[id] = true;
+          l.notice = this.$t(l.details.reason === 'stale' ? 'course.lifecycleStale' : 'course.lifecycleUncertain') + (msg ? ' ' + msg : '');
+          this.readLifecycle(l); return;
+        }
+        l.notice = (l.details.reason === 'no_published_lessons' ? this.$t('course.publishPrerequisites') + ' ' : '')
+          + (msg || this.$t('course.actionFailed'));
+      });
+    },
     qualityFor(row) {
       return this.qualityByCourse[row.courseId] || this.qualityByCourse[row.courseKey] || {};
     },
@@ -683,6 +787,15 @@ export default {
 }
 .quality-alert {
   margin-bottom: 12px;
+}
+.lifecycle-dialog ::v-deep .el-dialog {
+  max-width: calc(100vw - 24px);
+}
+.lifecycle-dialog p {
+  text-align: left;
+  word-break: normal;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 .danger-text {
   color: #f56c6c;

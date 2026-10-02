@@ -29,7 +29,7 @@ export default {
 
   getCourse(courseId, onSuccess, onError) {
     nestRequest({ url: `${getNestUrl()}/courses/${courseId}`, method: 'GET',
-      onSuccess: (payload) => onSuccess(normalizeCourse(payload)), onError });
+      onSuccess: (payload) => onSuccess({ ...normalizeCourse(payload), revision: payload && payload.revision }), onError });
   },
 
   // POST /v1/admin/courses { courseKey, title, locale, ageBand }
@@ -52,6 +52,11 @@ export default {
       onSuccess: (p) => onSuccess(normalizeCourse(p)),
       onError,
     });
+  },
+
+  // BE-05: read GET first; refresh GET after success for the next revision.
+  transitionCourse(courseId, status, expectedRevision, onSuccess, onError) {
+    this.updateCourse(courseId, { status, expectedRevision }, onSuccess, onError);
   },
 
   // DELETE /v1/admin/courses/:id
