@@ -3,7 +3,7 @@
     <HeaderBar />
     <div class="operation-bar">
       <div class="left-title">
-        <el-button type="text" icon="el-icon-arrow-left" @click="$router.back()">
+        <el-button type="text" icon="el-icon-arrow-left" @click="$router.push({ path: '/course-management' })">
           {{ $t('course.pageTitle') }}
         </el-button>
         <h2 class="page-title">{{ $t('lesson.pageTitle') }} · {{ courseTitle }}</h2>
