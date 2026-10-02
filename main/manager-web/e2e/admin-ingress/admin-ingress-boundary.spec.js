@@ -97,6 +97,11 @@ test('real ingress denies anonymous, ordinary, expired and revoked roles across 
   const f = await fixture(request, superToken);
   const routes = [
     ['GET', '/courses'], ['GET', `/courses/${f.course.id}`], ['PATCH', `/courses/${f.course.id}`, { title: 'denied' }],
+    ['GET', '/courses?page=1&pageSize=1'],
+    ['GET', `/courses/${f.course.id}/lessons?page=1&pageSize=1`],
+    ['GET', `/courses/${f.course.id}/lessons/authoritative?page=1&pageSize=1`],
+    ['GET', '/course-insights/learners?page=1&pageSize=1'],
+    ['GET', '/course-insights/course-quality?page=1&pageSize=1'],
     ['GET', '/course-insights/learners'], ['PATCH', `/course-insights/learners/${childId}/personality`, { learningStyle: 'audio' }],
     ['GET', `/lessons/${f.lesson.id}/assets`], ['POST', '/assets/upload', {}], ['GET', '/lesson-visual-assets'],
     ['POST', `/lessons/${f.lesson.id}/publish`, {}],
@@ -142,12 +147,22 @@ test('nginx overwrites forged browser credentials and attributes admitted writes
   expect(plain.status()).toBe(200); expect(forged.status()).toBe(200);
   expect(forged.headers()['x-tbot-manager-auth-status']).toBe('204');
   expect(await forged.json()).toEqual(await plain.json());
+  const pagedReadReceipts = [];
+  for (const route of ['/courses?page=1&pageSize=1', `/courses/${f.course.id}/lessons?page=1&pageSize=1`,
+    `/courses/${f.course.id}/lessons/authoritative?page=1&pageSize=1`,
+    '/course-insights/learners?page=1&pageSize=1', '/course-insights/course-quality?page=1&pageSize=1']) {
+    const response = await call(request, token, 'GET', route);
+    expect(response.status()).toBe(200);
+    const data = (await response.json()).data;
+    expect(data.pagination).toMatchObject({ page: 1, pageSize: 1 });
+    pagedReadReceipts.push({ method: 'GET', route, status: 200, pagination: data.pagination });
+  }
   const patch = await call(request, token, 'PATCH', `/course-insights/learners/${childId}/personality`, { learningStyle: 'visual' }, { 'X-Admin-User-Id': '11111111-1111-4111-8111-111111111112' });
   expect(patch.status()).toBe(200);
   const audit = JSON.parse(sql('postgres', "SELECT to_jsonb(t) FROM (SELECT admin_user_id,metadata FROM admin_audit_log WHERE action='learner.personality.update' ORDER BY occurred_at DESC LIMIT 1) t;"));
   expect(audit.metadata.actorType).toBe('admin_proxy');
   expect(audit.admin_user_id).not.toBe('11111111-1111-4111-8111-111111111112');
-  await attach(testInfo, 'trusted-proxy-readback', { plainStatus: 200, forgedStatus: 200, mutationStatus: 200, actorType: audit.metadata.actorType, actorAnchor: audit.admin_user_id });
+  await attach(testInfo, 'trusted-proxy-readback', { plainStatus: 200, forgedStatus: 200, mutationStatus: 200, pagedReadReceipts, actorType: audit.metadata.actorType, actorAnchor: audit.admin_user_id });
 });
 
 for (const transition of ['expiry', 'revocation']) test(`denies a real course form submission after ${transition} while the authenticated UI stays open`, async ({ page, request }, testInfo) => {
