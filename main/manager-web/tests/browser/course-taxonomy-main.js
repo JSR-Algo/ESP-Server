@@ -22,9 +22,12 @@ Vue.config.productionTip = false;
 localStorage.setItem('token', 'course-taxonomy-test-session');
 
 const calls = { created: [], updated: [], errors: [], warnings: [] };
+const courseId = 'c0060000-0000-4000-8000-000000000001';
+
+Api.course.getCourse = (id, ok) => ok({ courseId: id, courseKey: 'w01-place-words', title: 'Place Words', status: 'draft' });
 
 Object.assign(Api.lesson, {
-  listAuthoritativeLessons(courseId, ok) {
+  listAuthoritativeLessons(courseId, params, ok) {
     ok([
       {
         lessonId: 'lesson-1', lessonKey: 'w01-d01-barn', title: 'Barn',
@@ -32,8 +35,9 @@ Object.assign(Api.lesson, {
         ageBand: '4-6', topicTags: [], difficultyBand: 'beginner',
         estimatedDurationSec: 240, monitorable: true,
       },
-    ]);
+    ], { mode: 'paged', page: params.page, pageSize: params.pageSize, total: 1, totalPages: 1 });
   },
+  listLessons(id, ok) { ok([]); },
   createLesson(courseId, payload, ok) {
     calls.created.push(JSON.parse(JSON.stringify(payload)));
     ok({ ...payload, lessonId: 'lesson-new' });
@@ -48,7 +52,7 @@ Object.assign(Api.lesson, {
 CourseLessons.components.HeaderBar = { name: 'HeaderBar', render: (h) => h('header') };
 
 const router = new VueRouter({ routes: [{ path: '/', component: { render: (h) => h('div') } }] });
-await router.replace({ path: '/', query: { courseId: 'course-1', courseKey: 'w01-place-words', title: 'Place Words' } });
+await router.replace({ path: '/', query: { courseId, courseKey: 'w01-place-words', title: 'Place Words' } });
 Vue.prototype.$message = {
   success() {},
   error(message) { calls.errors.push(message); },
