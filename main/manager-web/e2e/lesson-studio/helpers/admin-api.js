@@ -120,8 +120,13 @@ async function createCurriculumDraft(page, curriculum, runId) {
   return { course, lesson, contract, runId: runId || `curriculum-${Date.now().toString(36)}` };
 }
 
-async function createCourseModeDraft(page, { weekNumber = 1, runId, visualPage = page, curriculum } = {}) {
+async function createCourseModeDraft(page, { weekNumber, runId, visualPage = page, curriculum } = {}) {
   if (curriculum) return createCurriculumDraft(page, curriculum, runId);
+  const selectedWeek = weekNumber ?? process.env.LESSON_STUDIO_E2E_COURSE_MODE_WEEK ?? 1;
+  if (!/^[1-9][0-9]*$/.test(String(selectedWeek)) || Number(selectedWeek) > 26) {
+    throw new Error('Course Mode fixture curriculum week must be an integer from 1 to 26');
+  }
+  weekNumber = Number(selectedWeek);
   const suffix = runId || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
   const course = await adminApi(page, 'POST', '/courses', {
     courseKey: `e2e-course-mode-${suffix}`,

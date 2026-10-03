@@ -221,9 +221,11 @@ def _canonical_payload(candidate: dict) -> bytes:
     return (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
 
 
-def _create(candidate_path: Path, output: Path) -> None:
+def _create(candidate_path: Path, output: Path, *, qualification_profile: str = "production") -> None:
     candidate, candidate_raw, candidate_identity = _read_candidate_snapshot(candidate_path)
-    if validate_candidate(candidate):
+    reasons = (validate_candidate(candidate) if qualification_profile == "production" else
+               validate_candidate(candidate, qualification_profile=qualification_profile))
+    if reasons:
         raise ValueError("candidate validation failed")
 
     parent_fd: int | None = None
@@ -297,6 +299,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--candidate", required=True, type=Path, metavar="PATH")
     parser.add_argument("--output", required=True, type=Path, metavar="PATH")
+    parser.add_argument("--profile", choices=("production", "m1-staging"), default="production")
     parser.add_argument("--confirm-trusted-operator-account", action="store_true")
     parser.add_argument("--confirm-untrusted-automation-stopped", action="store_true")
     return parser
@@ -310,7 +313,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     ):
         return 2
     try:
-        _create(args.candidate, args.output)
+        _create(args.candidate, args.output, qualification_profile=args.profile)
         return 0
     except (
         KeyError, OSError, TypeError, UnicodeDecodeError, ValueError,

@@ -110,7 +110,7 @@ try {
   const switched = await evaluate('window.__SWITCH_COURSE__()');
   assert.equal(switched.requested, true, 'reused route must load the newly selected course');
   assert.equal(switched.closed, true, 'old course dialogs must close');
-  assert.equal(switched.courseId, 'course-2');
+  assert.equal(switched.courseId, 'c0060000-0000-4000-8000-000000000002');
   assert.deepEqual(switched.titles, ['Current course lesson']);
   assert.ok(switched.text.includes('Current course lesson'));
   assert.ok(!switched.text.includes('Stale course lesson'));

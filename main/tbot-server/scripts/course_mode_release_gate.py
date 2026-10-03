@@ -48,6 +48,7 @@ sys.path.insert(0, _scripts_directory)
 try:
     _software_snapshot = importlib.import_module("course_mode_software_evidence_snapshot")
     _admission = importlib.import_module("course_mode_physical_flash_admission")
+    _backend_native = importlib.import_module("course_mode_backend_native_runtime")
 finally:
     sys.path.remove(_scripts_directory)
 
@@ -422,6 +423,10 @@ PLAYWRIGHT_COMPOSE_ENV = (
     "LESSON_ASSET_ORIGIN_BASE", "ROBOT_ESP_BASE_URL",
     "LESSON_STUDIO_E2E_BACKEND_HOST_PORT", "LESSON_STUDIO_E2E_WEB_HOST_PORT",
 )
+PLAYWRIGHT_OPTIONAL_FIXTURE_ENV = (
+    "LESSON_STUDIO_E2E_VISUAL_SOURCE_LESSON_ID",
+    "LESSON_STUDIO_E2E_ASSIGNMENT_FIXTURE",
+)
 TASK4_STANDARD_HOST_PORTS = frozenset({3100, 8102, 18443})
 TASK4_BACKEND_MOUNT_ROOTS = (
     "src/lessons/fixtures/tvideo-raw-code/assets/asset-manifest.json",
@@ -647,6 +652,12 @@ class ExecutionStage:
                     return value
 
                 rebased_candidate = rebase(self.candidate)
+
+            if "backendTestInputs" in rebased_candidate["tools"]:
+                portal = Path(rebased_candidate["tools"]["backendTestInputs"]["portalOpenapi"]["path"])
+                portal.chmod(0o444)
+                if not _manifest.backend_test_inputs_valid(rebased_candidate):
+                    raise ValueError("lane backend test inputs mismatch")
 
             runtime = lane_root / "runtime"
             environment = {}
@@ -1821,6 +1832,138 @@ def _cjson_entry(source: Path, commit: str, base: list[str]) -> tuple[str, str, 
     return fields[0], fields[1], fields[2]
 
 
+def _run_backend_native_tests(command, candidate, environment, cwd, timeout_sec, max_output_bytes):
+    scratch = None
+    scratch_identity = None
+    parent_fd = None
+    interrupted = None
+    result = _manifest.BoundedCommandResult(None, "", "authority")
+    try:
+        parent = Path(environment["COURSE_MODE_NATIVE_TEST_SCRATCH_ROOT"])
+        if not parent.is_absolute() or parent != parent.resolve(strict=True):
+            raise _backend_native.NativePrerequisiteError("native prerequisite invalid")
+        parent_fd, parent_metadata, ancestry = _manifest._open_trusted_source_directory(parent)
+        usage = shutil.disk_usage(parent)
+        if usage.free < 128 * 1024 * 1024 or usage.free / usage.total < 0.05:
+            raise _backend_native.NativePrerequisiteError("native prerequisite invalid")
+        scratch = Path(tempfile.mkdtemp(prefix="course-mode-native-", dir=parent))
+        scratch_identity = _owned_tree_identity(scratch)
+        verification_fd, verification, verified_ancestry = _manifest._open_trusted_source_directory(parent)
+        try:
+            authority = _manifest._source_directory_authority_identity
+            if (authority(os.fstat(parent_fd)) != authority(parent_metadata)
+                    or authority(verification) != authority(parent_metadata)
+                    or verified_ancestry != ancestry):
+                raise _backend_native.NativePrerequisiteError("native scratch parent changed")
+        finally:
+            os.close(verification_fd)
+        tmp = scratch / "tmp"
+        tmp.mkdir()
+        (scratch / "runtime").mkdir()
+        python = candidate["tools"]["pythonTestRuntime"]
+        if not _manifest.python_test_runtime_authorized(python):
+            raise _backend_native.NativePrerequisiteError("native prerequisite invalid")
+        python_tree, error = _manifest.secure_python_test_runtime_tree_descriptor(Path(python["root"]))
+        if error or python_tree != python["treeDigest"]:
+            raise _backend_native.NativePrerequisiteError("native prerequisite invalid")
+        firmware = Path(candidate["repositories"]["firmware"]["path"])
+        esp = Path(candidate["repositories"]["adminEsp"]["path"])
+        journey = esp / "main/tbot-server/scripts/retained_media_journey.py"
+        if not journey.is_file() or journey.is_symlink():
+            raise _backend_native.NativePrerequisiteError("native prerequisite invalid")
+        clang = Path("/Library/Developer/CommandLineTools/usr/bin/clang")
+        compiler, error = _manifest.secure_executable_descriptor(clang)
+        if error or compiler is None or clang.stat().st_uid != 0 or clang.stat().st_mode & 0o022:
+            raise _backend_native.NativePrerequisiteError("native compiler unavailable")
+        sdk = Path("/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk").resolve(strict=True)
+        sdk_metadata = sdk.stat()
+        if not sdk.is_dir() or sdk_metadata.st_uid != 0 or sdk_metadata.st_mode & 0o022:
+            raise _backend_native.NativePrerequisiteError("native SDK unavailable")
+        cxx = scratch / "clang-cxx"
+        cxx.write_text('#!/bin/sh\nexec /Library/Developer/CommandLineTools/usr/bin/clang --driver-mode=g++ "$@"\n')
+        cxx.chmod(0o500)
+        native_environment = {
+            **environment,
+            "PATH": str(Path(python["root"]) / "bin") + ":" + environment["PATH"],
+            "TMPDIR": str(tmp), "CJSON_DIR": str(Path(candidate["tools"]["espIdf"]["root"]) / "components/json/cJSON"),
+            "CC": str(clang), "CXX": str(cxx),
+            "SDKROOT": str(sdk),
+            "RETAINED_CONTRACT_VECTORS": str(firmware / "tests/fixtures/retained-assignment-device.v1.vectors.json"),
+            "RETAINED_TEST_PYTHON": str(Path(python["root"]) / python["executable"]),
+            "RETAINED_TEST_JOURNEY": str(journey),
+            "RETAINED_TEST_RUNTIME_ROOT": str(scratch), "RETAINED_TEST_SCRATCH_ROOT": str(tmp),
+        }
+        build = run_bounded_command(
+            ["/bin/bash", str(firmware / "scripts/run_host_native_retained_mcp_test.sh")],
+            cwd=firmware, env=native_environment, timeout_sec=180,
+            max_output_bytes=max_output_bytes, contain_process_group=True,
+        )
+        if build.error or build.returncode != 0:
+            raise _backend_native.NativeBuildError("native build failed")
+        binaries = list(tmp.glob("retained-mcp.*/retained-mcp-test"))
+        if len(binaries) != 1:
+            raise _backend_native.NativePrerequisiteError("native prerequisite invalid")
+        binary = binaries[0]
+        observed, error = _manifest.secure_executable_descriptor(binary)
+        if error or observed is None:
+            raise _backend_native.NativePrerequisiteError("native prerequisite invalid")
+        (scratch / "runtime/retained-mcp-binary.json").write_text(json.dumps({
+            "path": str(binary), "sha256": observed["sha256"], "compiler": compiler, "sdk": str(sdk),
+        }))
+        with _backend_native.OwnedPostgres(
+            candidate["tools"]["docker"]["path"], candidate["database"]["engineImageId"], environment,
+        ) as database:
+            result = run_bounded_command(
+                list(command), cwd=cwd, timeout_sec=timeout_sec,
+                max_output_bytes=max_output_bytes,
+                env={
+                    **native_environment,
+                    "RETAINED_TEST_DATABASE_URL": database.url,
+                    "LESSON_RETAINED_TEST_DATABASE_URL": database.url,
+                    "LESSON_STORAGE_TEST_DATABASE_URL": database.url,
+                    "LESSON_LIFECYCLE_HARDENING_TEST_DATABASE_URL": database.url,
+                },
+                contain_process_group=True,
+            )
+        repeated, error = _manifest.secure_python_test_runtime_tree_descriptor(Path(python["root"]))
+        if error or repeated != python_tree or not _manifest.backend_test_inputs_valid(candidate):
+            result = _manifest.BoundedCommandResult(None, "", "authority")
+        observed, error = _manifest.secure_executable_descriptor(clang)
+        if error or observed != compiler:
+            result = _manifest.BoundedCommandResult(None, "", "authority")
+    except _backend_native.NativeCleanupError as error:
+        result = _manifest.BoundedCommandResult(None, str(error), "native-cleanup")
+    except _backend_native.NativeBuildError:
+        result = _manifest.BoundedCommandResult(None, "", "native-build")
+    except (_backend_native.NativePrerequisiteError, OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired):
+        result = _manifest.BoundedCommandResult(None, "", "native-prerequisite")
+    except BaseException as error:
+        interrupted = error
+    finally:
+        if parent_fd is not None:
+            os.close(parent_fd)
+        if scratch is not None and not _remove_owned_tree(scratch, scratch_identity):
+            retained = (result.stdout + "\n" if result.error == "native-cleanup" else "") + str(scratch)
+            result = _manifest.BoundedCommandResult(None, retained, "native-cleanup")
+    if interrupted is not None:
+        if result.error == "native-cleanup":
+            raise RetainedStagingError(scratch) from interrupted
+        raise interrupted
+    return result
+
+
+def _stage_backend_test_inputs(candidate: dict, staged: dict, root: Path, state: dict) -> None:
+    if not _manifest.backend_test_inputs_valid(candidate):
+        raise ValueError("backend test inputs invalid")
+    value = candidate["tools"]["backendTestInputs"]["portalOpenapi"]
+    destination = root / "inputs/portal/openapi.json"
+    _copy_snapshot_file(Path(value["path"]), destination, state, expected_sha256=value["sha256"])
+    destination.chmod(0o444)
+    staged["tools"]["backendTestInputs"]["portalOpenapi"]["path"] = str(destination)
+    if not _manifest.backend_test_inputs_valid(candidate) or not _manifest.backend_test_inputs_valid(staged):
+        raise ValueError("backend test inputs changed during staging")
+
+
 def stage_execution_candidate(candidate: dict, lanes: Sequence[Lane]) -> ExecutionStage:
     temporary_parent = Path("/private/tmp") if sys.platform == "darwin" else Path(tempfile.gettempdir())
     root = Path(tempfile.mkdtemp(prefix="course-mode-stage-", dir=temporary_parent))
@@ -1831,6 +1974,8 @@ def stage_execution_candidate(candidate: dict, lanes: Sequence[Lane]) -> Executi
         root_descriptor = _open_snapshot_directory(root)
         staged = json.loads(json.dumps(candidate))
         state = {"entries": 0, "bytes": 0}
+        if "backendTestInputs" in candidate["tools"] or any(lane.name == "backend-tests" for lane in lanes):
+            _stage_backend_test_inputs(candidate, staged, root, state)
         repositories_root = root / "repositories"
         repositories_root.mkdir()
         for name, repository in candidate["repositories"].items():
@@ -1844,7 +1989,7 @@ def stage_execution_candidate(candidate: dict, lanes: Sequence[Lane]) -> Executi
                 )
             staged["repositories"][name]["path"] = str(destination)
         tools_root = root / "tools"
-        if any(lane.name == "firmware-handler" for lane in lanes):
+        if any(lane.name in {"firmware-handler", "backend-tests"} for lane in lanes):
             descriptor = candidate["tools"]["espIdf"]
             source_value = descriptor["root"]
             commit = descriptor["commit"]
@@ -2163,7 +2308,8 @@ QUICK_LANES = (
 FULL_LANES = (
     _lane("backend-lint", "backend", ".", ("npm", "run", "lint")),
     _lane("backend-typecheck", "backend", ".", ("npm", "run", "typecheck")),
-    _lane("backend-tests", "backend", ".", ("npm", "test", "--", "--no-cache"), 1800.0),
+    _lane("backend-tests", "backend", ".", ("npm", "test", "--", "--no-cache"), 1800.0,
+          ("COURSE_MODE_NATIVE_TEST_SCRATCH_ROOT",)),
     _lane("backend-build", "backend", ".", ("npm", "run", "build")),
     _lane(
         "backend-curriculum-verifier", "backend", ".",
@@ -2860,25 +3006,30 @@ def _python_test_runtime_required(lane: Lane) -> bool:
 
 
 def _python_runtime_stage_required(lane: Lane) -> bool:
-    return lane.name == "physical-flash-admission" or _python_test_runtime_required(lane)
+    return lane.name in {"physical-flash-admission", "backend-tests"} or _python_test_runtime_required(lane)
 
 
 def _container_tools_required(lane: Lane) -> bool:
     return (
-        lane.name.startswith("admin-course-mode-playwright-")
+        lane.name == "backend-tests"
+        or lane.name.startswith("admin-course-mode-playwright-")
         or lane.name.startswith("admin-course-mode-assignment-")
     )
 
 
 def _playwright_browsers_required(lane: Lane) -> bool:
     return (
-        lane.name.startswith("admin-course-mode-playwright-")
+        lane.name == "admin-browser"
+        or lane.name.startswith("admin-course-mode-playwright-")
         or lane.name in STATEFUL_ASSIGNMENT_LANES
     )
 
 
 def _backend_compiler_required(lane: Lane) -> bool:
-    return _playwright_browsers_required(lane)
+    return (
+        lane.name.startswith("admin-course-mode-playwright-")
+        or lane.name in STATEFUL_ASSIGNMENT_LANES
+    )
 
 
 def _container_tools_authorized(candidate: dict) -> bool:
@@ -3040,10 +3191,11 @@ def release_state_matches(
     require_runtime: bool, node_lanes: Sequence[Lane] | None = None,
 ) -> bool:
     current = _load_candidate(candidate_path)
+    profile = candidate.get("qualificationProfile", "production")
     if (
         current != candidate or current is None
-        or validate_candidate(current, verify_external_tools=False)
-        or validate_candidate(current, verify_external_tools=True)
+        or _validate_profile_candidate(current, profile, verify_external_tools=False)
+        or _validate_profile_candidate(current, profile, verify_external_tools=True)
     ):
         return False
     if not _candidate_matches(candidate):
@@ -3272,12 +3424,17 @@ def physical_preflight_command(candidate: dict) -> tuple[str, ...] | None:
             return None
     except (KeyError, OSError, ValueError):
         return None
+    profile = candidate.get("qualificationProfile", "production")
+    if profile not in ("production", "m1-staging"):
+        return None
+    profile_args = ("--profile", profile) if profile == "m1-staging" else ()
     return (
         str(runtime.executable), "-I", "-s", "-c", PHYSICAL_ADMISSION_BOOTSTRAP,
         "scripts/course_mode_physical_flash_admission.py",
         "--input", str(resolved["input"]), "--output", str(resolved["output"]),
         "--expected-identity", str(resolved["expectedIdentity"]),
         "--expected-identity-signature", str(resolved["expectedIdentitySignature"]),
+        *profile_args,
     )
 
 
@@ -3378,6 +3535,8 @@ def _physical_admission_binding(
         )
         if verified_audit is None or audit_reasons:
             return None
+        profile = candidate.get("qualificationProfile", "production")
+        policy = _admission.admission_policy(profile)
         expected_result = {
             "schemaVersion": 1,
             "validator": _admission.VALIDATOR,
@@ -3396,11 +3555,13 @@ def _physical_admission_binding(
             "softwareAuditSha256": verified_audit.audit_sha256,
             "softwareSnapshotId": verified_audit.snapshot_id,
             "robotMac": _admission.ROBOT_MAC,
-            "serialPath": _admission.SERIAL_PATH,
-            "firmwareSha": _admission.FIRMWARE_SHA,
-            "appSha256": _admission.APP_SHA256,
-            "manifestSha256": _admission.MANIFEST_SHA256,
+            "serialPath": policy["serialPath"],
+            "firmwareSha": policy["firmwareSha"],
+            "appSha256": policy["appSha256"],
+            "manifestSha256": policy["manifestSha256"],
         }
+        if profile == "m1-staging":
+            expected_result["qualificationProfile"] = profile
         return PhysicalAdmissionBinding(
             descriptor=descriptor,
             evidence_root_identity=_directory_identity(evidence_root_metadata),
@@ -3868,6 +4029,7 @@ def _child_environment(
             "JWT_PUBLIC_KEY", "TBOT_DEVICE_MINT_SECRET", "LESSON_ASSET_ORIGIN_BASE",
             "ROBOT_ESP_BASE_URL", "LESSON_STUDIO_E2E_BACKEND_HOST_PORT",
             "LESSON_STUDIO_E2E_WEB_HOST_PORT",
+            *PLAYWRIGHT_OPTIONAL_FIXTURE_ENV,
         ):
             value = source.get(name)
             if value:
@@ -3885,7 +4047,14 @@ def _child_environment(
         if len(roots) == 1:
             environment["PLAYWRIGHT_BROWSERS_PATH"] = str(roots.pop())
     environment.update(dict(lane.fixed_environment))
+    if lane.name == "backend-tests":
+        try:
+            environment["TBOT_PORTAL_OPENAPI_PATH"] = candidate["tools"]["backendTestInputs"]["portalOpenapi"]["path"]
+        except (KeyError, TypeError):
+            return None
     if lane.name == "admin-browser":
+        if candidate.get("qualificationProfile") == "m1-staging":
+            environment["TBOT_MJPEG_REPLAY_CANDIDATE_BROWSER"] = "1"
         browser = candidate["tools"]["robotPreviewBrowser"]
         values = {
             "root": browser["root"], "executable": browser["executable"],
@@ -4598,6 +4767,12 @@ def _quarantine_invalidate_remove(
                 os.close(write_descriptor)
 
 
+def _validate_profile_candidate(candidate, profile, **kwargs):
+    if profile == "production":
+        return validate_candidate(candidate, **kwargs)
+    return validate_candidate(candidate, qualification_profile=profile, **kwargs)
+
+
 def _run_gate_impl(
     candidate_path: Path,
     mode: str,
@@ -4608,7 +4783,14 @@ def _run_gate_impl(
     max_output_bytes: int = MAX_LANE_OUTPUT_BYTES,
     report_path: Path | None = None,
     runtime_root: Path | None = None,
+    qualification_profile: str = "production",
 ) -> dict:
+    def blocked(candidate_id: str | None, failed_lane: str) -> dict:
+        report = _blocked(candidate_id, failed_lane)
+        if qualification_profile == "m1-staging":
+            report["qualificationProfile"] = qualification_profile
+        return report
+
     candidate = _load_candidate(candidate_path)
     candidate_id = candidate.get("candidateId") if isinstance(candidate, dict) else None
     selected: tuple[Lane, ...] = ()
@@ -4622,23 +4804,23 @@ def _run_gate_impl(
         if candidate is not None:
             report_destination = _prepare_report_destination(candidate_path, candidate, report_path)
         if report_destination is None:
-            return _blocked(candidate_id if isinstance(candidate_id, str) else None, "report")
-    if candidate is None or validate_candidate(candidate):
-        report = _blocked(candidate_id if isinstance(candidate_id, str) else None, "candidate")
+            return blocked(candidate_id if isinstance(candidate_id, str) else None, "report")
+    if candidate is None or _validate_profile_candidate(candidate, qualification_profile):
+        report = blocked(candidate_id if isinstance(candidate_id, str) else None, "candidate")
     elif mode not in MODES or type(max_output_bytes) is not int or max_output_bytes <= 0:
-        report = _blocked(candidate_id, "configuration")
+        report = blocked(candidate_id, "configuration")
     elif lanes is None and (
         operator_binding := _operator_attestation_binding(candidate, source)
     ) is None:
-        report = _blocked(candidate_id, "operator-precondition")
+        report = blocked(candidate_id, "operator-precondition")
     elif lanes is None and report_path is not None and _paths_alias(
         report_path, operator_binding.path,
     ):
         assert report_destination is not None
         _close_report_destination(report_destination)
-        return _blocked(candidate_id, "report")
+        return blocked(candidate_id, "report")
     elif lanes is None and not _runtime_matches_candidate(candidate, runtime_root):
-        report = _blocked(candidate_id, "candidate-runtime")
+        report = blocked(candidate_id, "candidate-runtime")
     else:
         selected = tuple(lanes) if lanes is not None else lanes_for_mode(mode)
         require_runtime = lanes is None
@@ -4648,7 +4830,7 @@ def _run_gate_impl(
             len(lane_names) != len(set(lane_names))
             or not all(_valid_lane(lane, repositories) for lane in selected)
         ):
-            report = _blocked(candidate_id, "configuration")
+            report = blocked(candidate_id, "configuration")
         else:
             report = {
                 "candidateId": candidate_id, "verdict": "PASS", "lanes": [], "failedLane": None,
@@ -4669,7 +4851,7 @@ def _run_gate_impl(
             if not release_state_matches(
                 candidate_path, candidate, selected, runtime_root, require_runtime,
             ):
-                report = _blocked(candidate_id, selected[0].name if selected else "candidate-runtime")
+                report = blocked(candidate_id, selected[0].name if selected else "candidate-runtime")
                 if selected:
                     report["lanes"].append({
                         "name": selected[0].name, "exitCode": None, "durationMs": 0,
@@ -4812,9 +4994,16 @@ def _run_gate_impl(
                         report["verdict"] = "BLOCKED"
                         report["failedLane"] = "snapshot"
                     break
+                child_source = dict(required_source)
+                if lane.name.startswith("admin-course-mode-playwright-"):
+                    # Optional fixture bindings must survive the outer required-input filter.
+                    child_source.update({
+                        name: lane_source[name] for name in PLAYWRIGHT_OPTIONAL_FIXTURE_ENV
+                        if lane_source.get(name)
+                    })
                 lane_environment = _child_environment(
                     execution_candidate,
-                    required_source,
+                    child_source,
                     lane,
                     source_candidate=candidate,
                     assignment_runtime_capsule_root=(
@@ -4928,6 +5117,12 @@ def _run_gate_impl(
                     )
                     if not container_authority or not browser_authority or not operator_authority:
                         result = _manifest.BoundedCommandResult(None, "", "authority")
+                    elif lane.name == "backend-tests":
+                        result = _run_backend_native_tests(
+                            command, execution_candidate, child_environment, resolved_cwd,
+                            lane.timeout_sec, max_output_bytes,
+                        )
+                        bounded_result = result
                     elif _python_test_runtime_required(lane) or _backend_compiler_required(lane):
                         backend_binding = _backend_snapshot_environment(execution_stage)
                         if backend_binding is None:
@@ -5000,7 +5195,8 @@ def _run_gate_impl(
                         if bounded_result is not None else None
                     )
                     skip_state = pytest_report_has_skips(junit_path) if junit_path else False
-                except BaseException:
+                except BaseException as interrupted_error:
+                    retained_paths = set(interrupted_error.paths) if isinstance(interrupted_error, RetainedStagingError) else set()
                     try:
                         _cleanup_gate_owned_or_raise(
                             lane_execution, execution_stage, assignment_runtime,
@@ -5008,10 +5204,14 @@ def _run_gate_impl(
                         assignment_runtime = None
                         assignment_guard.release()
                     except RetainedStagingError as error:
+                        retained_paths.update(error.paths)
+                    if retained_paths:
                         report["verdict"] = "BLOCKED"
                         report["failedLane"] = "cleanup"
+                        report["cleanupFailed"] = True
                         report["retainedOwner"] = "current-process"
-                        report["retainedPaths"] = list(error.paths)
+                        report["retainedPaths"] = sorted(retained_paths)
+                        report["interrupted"] = isinstance(interrupted_error, (KeyboardInterrupt, SystemExit)) or isinstance(interrupted_error.__cause__, (KeyboardInterrupt, SystemExit))
                         assignment_runtime = None
                         assignment_guard.release()
                         break
@@ -5075,15 +5275,18 @@ def _run_gate_impl(
                 if lane_failed:
                     cleanup_failed = (
                         rollback_restore_failed or parent_restore_succeeded is False
+                        or result.error == "native-cleanup"
                     )
                     report["verdict"] = (
                         "BLOCKED"
-                        if cleanup_failed or result.error in {"authority", "containment"}
+                        if cleanup_failed or result.error in {"authority", "containment", "native-prerequisite"}
                         else "FAIL"
                     )
                     report["failedLane"] = lane.name
                     if cleanup_failed:
                         report["cleanupFailed"] = True
+                        if result.error == "native-cleanup":
+                            report["retainedResource"] = result.stdout
                 elif skip_state is not False:
                     report["verdict"] = "BLOCKED"
                     report["failedLane"] = lane.name
@@ -5118,9 +5321,9 @@ def _run_gate_impl(
                 if operator_binding is not None and _operator_attestation_binding(
                     candidate, source,
                 ) != operator_binding:
-                    report = _blocked(candidate_id, "operator-precondition")
+                    report = blocked(candidate_id, "operator-precondition")
                 elif not _candidate_metadata_matches(candidate_path, candidate):
-                    report = _blocked(candidate_id, selected[-1].name if selected else "candidate-runtime")
+                    report = blocked(candidate_id, selected[-1].name if selected else "candidate-runtime")
                 elif operator_binding is not None:
                     report["operatorAttestationSha256"] = operator_binding.sha256
     if operator_binding is not None and _operator_attestation_binding(
@@ -5135,19 +5338,21 @@ def _run_gate_impl(
         report["verdict"] == "PASS" and published_physical_result is not None
         and not _admission._still_bound(published_physical_result)
     ):
-        report = _blocked(candidate_id, "physical-flash-admission")
+        report = blocked(candidate_id, "physical-flash-admission")
     if report["verdict"] == "PASS" and physical_admission_binding is not None and (
         _physical_admission_binding(
             candidate, require_output_absent=False,
             expected_candidate_path=candidate_path,
         ) != physical_admission_binding
     ):
-        report = _blocked(candidate_id, "physical-flash-admission")
+        report = blocked(candidate_id, "physical-flash-admission")
     if report["verdict"] != "PASS" and published_physical_result is not None:
         if _remove_bound_physical_admission_result(published_physical_result):
             published_physical_result = None
         else:
             report["cleanupFailed"] = True
+    if qualification_profile == "m1-staging":
+        report["qualificationProfile"] = qualification_profile
     if report_path is not None:
         assert report_destination is not None
         report_parent_identity = None
@@ -5171,7 +5376,7 @@ def _run_gate_impl(
                     expected_candidate_path=candidate_path,
                 ) != physical_admission_binding
             ):
-                report = _blocked(candidate_id, "physical-flash-admission")
+                report = blocked(candidate_id, "physical-flash-admission")
             if not _write_report_atomic(report_path, report, report_destination):
                 report_finalization_failed = True
             else:
@@ -5179,22 +5384,22 @@ def _run_gate_impl(
                 if report["verdict"] == "PASS" and operator_binding is not None and (
                     _operator_attestation_binding(candidate, source) != operator_binding
                 ):
-                    post_publish_report = _blocked(candidate_id, "operator-precondition")
+                    post_publish_report = blocked(candidate_id, "operator-precondition")
                 elif report["verdict"] == "PASS" and physical_admission_binding is not None and (
                     _physical_admission_binding(
                         candidate, require_output_absent=False,
                         expected_candidate_path=candidate_path,
                     ) != physical_admission_binding
                 ):
-                    post_publish_report = _blocked(candidate_id, "physical-flash-admission")
+                    post_publish_report = blocked(candidate_id, "physical-flash-admission")
                 elif report["verdict"] == "PASS" and published_physical_result is not None and (
                     not _admission._still_bound(published_physical_result)
                 ):
-                    post_publish_report = _blocked(candidate_id, "physical-flash-admission")
+                    post_publish_report = blocked(candidate_id, "physical-flash-admission")
                 elif report["verdict"] == "PASS" and not _candidate_metadata_matches(
                     candidate_path, candidate,
                 ):
-                    post_publish_report = _blocked(
+                    post_publish_report = blocked(
                         candidate_id, selected[-1].name if selected else "candidate-runtime",
                     )
                 if post_publish_report is not None:
@@ -5229,10 +5434,10 @@ def _run_gate_impl(
                     )
                 )
                 if not report_removed:
-                    report = _blocked(candidate_id, "report")
+                    report = blocked(candidate_id, "report")
                     report["cleanupFailed"] = True
                 else:
-                    report = _blocked(candidate_id, "report")
+                    report = blocked(candidate_id, "report")
             if report_finalization_failed and published_physical_result is not None:
                 if _remove_bound_physical_admission_result(published_physical_result):
                     published_physical_result = None
@@ -5257,6 +5462,7 @@ def run_gate(
     max_output_bytes: int = MAX_LANE_OUTPUT_BYTES,
     report_path: Path | None = None,
     runtime_root: Path | None = None,
+    qualification_profile: str = "production",
 ) -> dict:
     assignment_guard = AssignmentRuntimeGuard()
     try:
@@ -5269,6 +5475,7 @@ def run_gate(
             max_output_bytes=max_output_bytes,
             report_path=report_path,
             runtime_root=runtime_root,
+            qualification_profile=qualification_profile,
         )
     finally:
         assignment_guard.cleanup()
@@ -5289,6 +5496,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--candidate", type=Path)
     parser.add_argument("--mode", choices=MODES, default="quick")
     parser.add_argument("--report", type=Path)
+    parser.add_argument("--profile", choices=("production", "m1-staging"), default="production")
     parser.add_argument("--list-lanes", action="store_true")
     args = parser.parse_args(argv)
     if args.list_lanes:
@@ -5298,7 +5506,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.candidate is None:
         parser.error("--candidate is required")
-    report = run_gate(args.candidate, args.mode, report_path=args.report)
+    report = run_gate(args.candidate, args.mode, report_path=args.report, qualification_profile=args.profile)
     _emit(report)
     return 0 if report["verdict"] == "PASS" else 1
 

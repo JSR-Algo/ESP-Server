@@ -1,5 +1,6 @@
 import { getNestUrl } from '../api';
 import { nestRequest, normalizeCourse } from '../nestHttp';
+import { decodeList, listQuery } from '@/utils/adminPagination.cjs';
 
 /**
  * Course customization CRUD — backed by the NestJS tbot-backend authoring API
@@ -11,14 +12,27 @@ import { nestRequest, normalizeCourse } from '../nestHttp';
 
 export default {
   // GET /v1/admin/courses -> Course[]
-  getCourseList(onSuccess, onError) {
+  getCourseList(params, onSuccess, onError) {
+    if (typeof params === 'function') { onError = onSuccess; onSuccess = params; params = {}; }
+    const p = { kind: 'all', ...params };
     nestRequest({
-      url: `${getNestUrl()}/courses`,
+      url: `${getNestUrl()}/courses?${listQuery(p, ['kind', 'page', 'pageSize', 'keyword', 'status', 'courseKey'])}`,
       method: 'GET',
-      onSuccess: (payload) =>
-        onSuccess((Array.isArray(payload) ? payload : []).map(normalizeCourse)),
+      onSuccess: (payload) => {
+        let list;
+        try { list = decodeList(payload, null, p, ['id', 'course_id', 'courseId']); } catch (_) {
+          if (onError) onError('', { status: 0, transport: true });
+          return;
+        }
+        onSuccess(list.rows.map(normalizeCourse), list.pagination);
+      },
       onError,
     });
+  },
+
+  getCourse(courseId, onSuccess, onError) {
+    nestRequest({ url: `${getNestUrl()}/courses/${courseId}`, method: 'GET',
+      onSuccess: (payload) => onSuccess({ ...normalizeCourse(payload), revision: payload && payload.revision }), onError });
   },
 
   // POST /v1/admin/courses { courseKey, title, locale, ageBand }
@@ -41,6 +55,11 @@ export default {
       onSuccess: (p) => onSuccess(normalizeCourse(p)),
       onError,
     });
+  },
+
+  // BE-05: read GET first; refresh GET after success for the next revision.
+  transitionCourse(courseId, status, expectedRevision, onSuccess, onError) {
+    this.updateCourse(courseId, { status, expectedRevision }, onSuccess, onError);
   },
 
   // DELETE /v1/admin/courses/:id

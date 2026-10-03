@@ -243,3 +243,36 @@ test('fails closed for missing auth, role-equivalent manager-only auth, IDOR, an
   });
   expect(assignment.status()).toBe(403);
 });
+
+// FE-04: existing published-first semantics, actual API history and version UUID.
+// Requires the canonical owned media fixture; do not replace it with route mocks.
+test('published browsing exposes the existing draft without another version mutation', async ({ page }) => {
+  await loginAsLessonAuthor(page);
+  const fixture = await createCourseModeDraft(page);
+  await createPublishableCourseModeVisuals(page, fixture.lesson.id);
+  await adminApi(page, 'POST', `/lessons/${fixture.lesson.id}/publish`);
+  const draft = await adminApi(page, 'POST', `/lessons/${fixture.lesson.id}/new-version`);
+  let nextVersionWrites = 0;
+  page.on('request', request => {
+    if (request.method() === 'POST' && request.url().endsWith('/new-version')) nextVersionWrites++;
+  });
+  await page.goto(`/#/course-lessons?courseId=${fixture.course.id}&title=Forged`);
+  await expect(page.getByRole('heading', { name: new RegExp(fixture.course.title) })).toBeVisible();
+  const row = page.locator('.el-table__body-wrapper .el-table__row').filter({ hasText: fixture.lesson.lesson_key || fixture.lesson.lessonKey });
+  await expect(row).toHaveCount(1);
+  await expect(row).toContainText('published');
+  await page.locator('.el-table__fixed-right tbody tr')
+    .filter({ hasText: fixture.lesson.lesson_key || fixture.lesson.lessonKey }).getByTestId('edit-existing-draft').click();
+  await expect(page).toHaveURL(new RegExp(`lessonId=${draft.id}`));
+  await page.reload();
+  await expect(page.getByRole('heading', { name: draft.title, exact: true })).toBeVisible();
+  await page.getByTestId('lesson-return-course').click();
+  await expect(page).toHaveURL(new RegExp(`course-lessons\\?courseId=${fixture.course.id}`));
+  await expect(page.getByRole('heading', { name: new RegExp(fixture.course.title) })).toBeVisible();
+  await page.goBack();
+  await expect(page).toHaveURL(new RegExp(`lessonId=${draft.id}`));
+  await expect(page.getByRole('heading', { name: draft.title, exact: true })).toBeVisible();
+  expect(nextVersionWrites).toBe(0);
+  expect((await adminApi(page, 'GET', `/lessons/${fixture.lesson.id}`)).status).toBe('published');
+  expect((await adminApi(page, 'GET', `/lessons/${draft.id}`)).status).toBe('draft');
+});

@@ -291,7 +291,7 @@ def _write_exact_admission_documents(
     image_binding = {
         "backend": {
             **candidate["images"]["lessonStudioBackend"],
-            "platform": "linux/arm64",
+            "platform": "linux/amd64",
             "provenanceLabels": {
                 "org.opencontainers.image.revision": repository_binding["backend"]["sha"],
                 "org.opencontainers.image.source": repository_binding["backend"]["remoteUrl"],
@@ -299,7 +299,7 @@ def _write_exact_admission_documents(
         },
         "web": {
             **candidate["images"]["lessonStudioWeb"],
-            "platform": "linux/arm64",
+            "platform": "linux/amd64",
             "provenanceLabels": {
                 "org.opencontainers.image.revision": repository_binding["admin"]["sha"],
                 "org.opencontainers.image.source": repository_binding["admin"]["remoteUrl"],

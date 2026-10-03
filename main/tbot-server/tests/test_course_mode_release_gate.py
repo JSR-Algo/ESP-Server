@@ -920,6 +920,14 @@ def candidate_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         },
         "evidenceRoot": str(evidence_root),
     }
+    portal = tmp_path / "docs/site/api/openapi.json"
+    portal.parent.mkdir(parents=True)
+    portal.write_bytes(b'{"openapi":"3.1.0","paths":{}}\n')
+    portal.chmod(0o444)
+    candidate["tools"]["backendTestInputs"] = {"portalOpenapi": {
+        "path": str(portal), "sha256": hashlib.sha256(portal.read_bytes()).hexdigest(),
+        "bytes": portal.stat().st_size,
+    }}
     path = tmp_path / "candidate.json"
     path.write_text(json.dumps(candidate), encoding="utf-8")
     return path
@@ -5315,10 +5323,15 @@ def test_snapshot_rejects_dirty_exception_hash_drift(candidate_file: Path) -> No
         gate.stage_execution_candidate(candidate, ())
 
 
-def test_admin_browser_environment_is_only_candidate_bound_descriptor(candidate_file: Path) -> None:
+@pytest.mark.parametrize("staging", [False, True])
+def test_admin_browser_environment_is_only_candidate_bound_descriptor(candidate_file: Path, staging: bool) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    if staging:
+        candidate["qualificationProfile"] = "m1-staging"
     environment = gate._child_environment(candidate, {
         "CHROME_BIN": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "PLAYWRIGHT_BROWSERS_PATH": "/untrusted/browser-cache",
+        "TBOT_MJPEG_REPLAY_CANDIDATE_BROWSER": "untrusted",
     }, next(lane for lane in gate.FULL_LANES if lane.name == "admin-browser"))
     browser = candidate["tools"]["robotPreviewBrowser"]
 
@@ -5330,7 +5343,10 @@ def test_admin_browser_environment_is_only_candidate_bound_descriptor(candidate_
     assert environment["TBOT_ROBOT_PREVIEW_BROWSER_TREE_ENTRY_COUNT"] == str(browser["treeDigest"]["entryCount"])
     assert environment["TBOT_ROBOT_PREVIEW_BROWSER_TREE_TOTAL_BYTES"] == str(browser["treeDigest"]["totalBytes"])
     assert "CHROME_BIN" not in environment
-    assert "PLAYWRIGHT_BROWSERS_PATH" not in environment
+    assert environment["PLAYWRIGHT_BROWSERS_PATH"] == str(
+        Path(candidate["tools"]["playwrightBrowsers"]["webkit"]["root"]).parent
+    )
+    assert environment.get("TBOT_MJPEG_REPLAY_CANDIDATE_BROWSER") == ("1" if staging else None)
 
 
 def test_playwright_environment_binds_compose_candidate_inputs(candidate_file: Path) -> None:
@@ -5375,6 +5391,26 @@ def test_playwright_environment_forwards_exact_stack_coordinates(candidate_file:
     assert {key: environment[key] for key in source} == source
 
 
+@pytest.mark.parametrize("lane_name", [
+    "admin-course-mode-playwright-chromium-desktop",
+    "admin-course-mode-playwright-webkit-desktop",
+    "admin-course-mode-playwright-chromium-mobile",
+    "admin-course-mode-playwright-webkit-mobile",
+])
+@pytest.mark.parametrize("binding,value", [
+    ("LESSON_STUDIO_E2E_VISUAL_SOURCE_LESSON_ID", "ac33d760-539a-41bb-994f-ff53cb317219"),
+    ("LESSON_STUDIO_E2E_ASSIGNMENT_FIXTURE", "/reviewed/local-assignment.json"),
+])
+def test_playwright_environment_preserves_explicit_visual_source(candidate_file: Path, lane_name: str, binding: str, value: str) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    lane = next(item for item in gate.FULL_LANES if item.name == lane_name)
+    environment = gate._child_environment(candidate, {
+        binding: value,
+    }, lane)
+    assert environment is not None
+    assert environment.get(binding) == value
+
+
 def test_admin_browser_snapshot_preserves_playwright_platform_layout(candidate_file: Path) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
     _add_node_install(candidate, "adminEsp", "main/manager-web", "adminManagerWeb")
@@ -5392,6 +5428,44 @@ def test_admin_browser_snapshot_preserves_playwright_platform_layout(candidate_f
         assert Path(browser["root"], browser["executable"]).is_file()
     finally:
         assert stage.cleanup() is True
+
+
+@pytest.mark.parametrize("project", ["chromium-desktop", "webkit-desktop", "chromium-mobile", "webkit-mobile"])
+@pytest.mark.parametrize("configured", [True, False])
+def test_playwright_runner_preserves_optional_fixture_bindings(
+    candidate_file: Path, monkeypatch: pytest.MonkeyPatch, project: str, configured: bool,
+) -> None:
+    candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
+    _add_node_install(candidate, "adminEsp", "main/manager-web", "adminManagerWeb")
+    _add_node_install(candidate, "backend", ".", "backend")
+    _configure_backend_build_fixture(candidate)
+    candidate_file.write_text(json.dumps(candidate), encoding="utf-8")
+    lane = gate.Lane(
+        f"admin-course-mode-playwright-{project}", "adminEsp", "main/manager-web",
+        ("node", "probe.js"), 5.0, gate.PLAYWRIGHT_COMPOSE_ENV,
+    )
+    bindings = {
+        "LESSON_STUDIO_E2E_VISUAL_SOURCE_LESSON_ID": "ac33d760-539a-41bb-994f-ff53cb317219",
+        "LESSON_STUDIO_E2E_ASSIGNMENT_FIXTURE": "/reviewed/local-assignment.json",
+    }
+    source = {**_assignment_source(candidate_file), "COURSE_MODE_ADMIN_E2E_READY": "1",
+              "TOP_SECRET": "must-not-reach-child", "NODE_OPTIONS": "--inspect",
+              "LESSON_STUDIO_E2E_STATE_MODE": "preserve"}
+    if configured:
+        source.update(bindings)
+    observed = {}
+
+    def capture_lane(_command, **kwargs):
+        observed.update(kwargs["env"])
+        return gate._manifest.BoundedCommandResult(0, "", None)
+
+    monkeypatch.setattr(gate, "playwright_browsers_authorized", lambda _candidate: True)
+    monkeypatch.setattr(gate, "run_bounded_command", capture_lane)
+    result = gate.run_gate(candidate_file, "full", lanes=(lane,), source_environment=source)
+
+    assert result["verdict"] == "PASS", result
+    assert {key: observed[key] for key in bindings if key in observed} == (bindings if configured else {})
+    assert not {"TOP_SECRET", "NODE_OPTIONS", "LESSON_STUDIO_E2E_STATE_MODE"}.intersection(observed)
 
 
 def test_playwright_lane_stages_candidate_bound_container_tools(candidate_file: Path) -> None:
@@ -5739,8 +5813,9 @@ def test_playwright_lane_blocks_post_run_stable_backend_mutation(
     assert result["lanes"][0]["exitCode"] is None
 
 
+@pytest.mark.parametrize("lane_name", ["admin-browser", "admin-course-mode-playwright-webkit-desktop"])
 def test_playwright_lane_stages_bound_browser_cache_and_sets_only_its_environment(
-    candidate_file: Path,
+    candidate_file: Path, lane_name: str,
 ) -> None:
     candidate = json.loads(candidate_file.read_text(encoding="utf-8"))
     _add_node_install(candidate, "adminEsp", "main/manager-web", "adminManagerWeb")
@@ -5748,7 +5823,7 @@ def test_playwright_lane_stages_bound_browser_cache_and_sets_only_its_environmen
     _configure_backend_build_fixture(candidate)
     lane = next(
         lane for lane in gate.FULL_LANES
-        if lane.name == "admin-course-mode-playwright-webkit-desktop"
+        if lane.name == lane_name
     )
 
     stage = gate.stage_execution_candidate(candidate, (lane,))
@@ -5757,6 +5832,7 @@ def test_playwright_lane_stages_bound_browser_cache_and_sets_only_its_environmen
         execution = stage.create_lane_execution()
         environment = gate._child_environment(execution.candidate, {}, lane)
         browser_root = Path(environment["PLAYWRIGHT_BROWSERS_PATH"])
+        assert gate._backend_compiler_required(lane) is (lane_name != "admin-browser")
         assert browser_root.is_relative_to(stage.root)
         assert not browser_root.is_relative_to(execution.root)
         for descriptor in execution.candidate["tools"]["playwrightBrowsers"].values():
@@ -8820,9 +8896,15 @@ def test_physical_flash_admission_rejects_stale_evidence_before_command(
     assert result["failedLane"] == "physical-flash-admission"
 
 
+@pytest.mark.parametrize('profile', ['production', 'm1-staging'])
 def test_physical_flash_admission_binds_software_audit_identity_and_result_fields(
-    candidate_file: Path,
+    candidate_file: Path, profile: str,
 ) -> None:
+    if profile == 'm1-staging':
+        candidate = json.loads(candidate_file.read_text())
+        candidate['qualificationProfile'] = profile
+        candidate_file.chmod(0o644)
+        candidate_file.write_text(json.dumps(candidate))
     candidate, _paths = _install_physical_admission_fixture(candidate_file)
     binding = gate._physical_admission_binding(
         candidate, require_output_absent=True, expected_candidate_path=candidate_file,
@@ -8838,6 +8920,8 @@ def test_physical_flash_admission_binds_software_audit_identity_and_result_field
     assert binding.software_audit_sha256 == hashlib.sha256(audit.read_bytes()).hexdigest()
     assert binding.software_snapshot_id == verified.snapshot_id
     expected = json.loads(binding.expected_result)
+    assert expected['serialPath'] == gate._admission.admission_policy(profile)['serialPath']
+    assert expected.get('qualificationProfile', 'production') == profile
     assert expected["softwareAuditSha256"] == binding.software_audit_sha256
     assert expected["softwareSnapshotId"] == binding.software_snapshot_id
 

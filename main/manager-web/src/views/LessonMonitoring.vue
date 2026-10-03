@@ -176,6 +176,7 @@ export default {
   components: { HeaderBar },
   data() {
     return {
+      requestsDisposed: false,
       list: [],
       loading: false,
       limit: 200, // backend caps at 200; raised from the silent default of 50
@@ -201,15 +202,26 @@ export default {
     };
   },
   created() {
-    if (this.$route.query.keyword) {
-      this.filters.keyword = String(this.$route.query.keyword);
-    }
-    if (this.$route.query.lessonId) {
-      this.filters.lessonId = String(this.$route.query.lessonId);
-    }
-    this.fetchList();
+    this.applyRouteQuery();
+  },
+  watch: {
+    '$route.query'() { this.applyRouteQuery(); },
+  },
+  beforeDestroy() {
+    this.requestsDisposed = true;
+    this.listRequestId++;
+    this.eventsVisible = false;
+    this.resetEvents();
   },
   methods: {
+    applyRouteQuery() {
+      if (this.requestsDisposed) return;
+      this.eventsVisible = false;
+      this.resetEvents();
+      const query = this.$route.query;
+      this.filters = Object.fromEntries(['keyword', 'deviceId', 'childId', 'lessonId', 'state'].map((key) => [key, typeof query[key] === 'string' ? query[key] : '']));
+      this.fetchList();
+    },
     stateType(state) {
       if (state === 'COMPLETED') return 'success';
       if (state === 'RUNNING' || state === 'READY') return 'primary';
@@ -230,12 +242,14 @@ export default {
       return d.toLocaleString();
     },
     isListRequestCurrent(requestId) {
-      return requestId === this.listRequestId;
+      return !this.requestsDisposed && requestId === this.listRequestId;
     },
     isEventsRequestCurrent(requestId) {
-      return requestId === this.eventsRequestId && this.eventsVisible;
+      return !this.requestsDisposed && requestId === this.eventsRequestId && this.eventsVisible;
     },
     fetchList() {
+      if (this.requestsDisposed) return;
+      this.list = [];
       const requestId = ++this.listRequestId;
       this.loading = true;
       Api.monitoring.listAssignments(
@@ -263,6 +277,7 @@ export default {
       );
     },
     openEvents(row) {
+      if (this.requestsDisposed) return;
       const requestId = ++this.eventsRequestId;
       this.eventsSource = row;
       this.eventsVisible = true;

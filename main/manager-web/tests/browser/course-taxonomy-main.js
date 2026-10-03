@@ -22,11 +22,13 @@ Vue.config.productionTip = false;
 localStorage.setItem('token', 'course-taxonomy-test-session');
 
 const calls = { created: [], updated: [], errors: [], warnings: [], pendingLessons: [], deferLessons: false };
+const courseId = 'c0060000-0000-4000-8000-000000000001';
+
+Api.course.getCourse = (id, ok) => ok({ courseId: id, courseKey: 'w01-place-words', title: 'Place Words', status: 'draft' });
 
 Object.assign(Api.lesson, {
-  listLessons(courseId, ok) { ok([]); },
-  listAuthoritativeLessons(courseId, ok) {
-    if (calls.deferLessons) { calls.pendingLessons.push({ courseId, ok }); return; }
+  listAuthoritativeLessons(courseId, params, ok) {
+    if (calls.deferLessons) { calls.pendingLessons.push({ courseId, params, ok }); return; }
     ok([
       {
         lessonId: 'lesson-1', lessonKey: 'w01-d01-barn', title: 'Barn',
@@ -34,8 +36,9 @@ Object.assign(Api.lesson, {
         ageBand: '4-6', topicTags: [], difficultyBand: 'beginner',
         estimatedDurationSec: 240, monitorable: true,
       },
-    ]);
+    ], { mode: 'paged', page: params.page, pageSize: params.pageSize, total: 1, totalPages: 1 });
   },
+  listLessons(id, ok) { ok([]); },
   createLesson(courseId, payload, ok) {
     calls.created.push(JSON.parse(JSON.stringify(payload)));
     ok({ ...payload, lessonId: 'lesson-new' });
@@ -50,7 +53,7 @@ Object.assign(Api.lesson, {
 CourseLessons.components.HeaderBar = { name: 'HeaderBar', render: (h) => h('header') };
 
 const router = new VueRouter({ routes: [{ path: '/', component: { render: (h) => h('div') } }] });
-await router.replace({ path: '/', query: { courseId: 'course-1', courseKey: 'w01-place-words', title: 'Place Words' } });
+await router.replace({ path: '/', query: { courseId, courseKey: 'w01-place-words', title: 'Place Words' } });
 Vue.prototype.$message = {
   success() {},
   error(message) { calls.errors.push(message); },
@@ -66,13 +69,13 @@ window.__SWITCH_COURSE__ = async () => {
   calls.deferLessons = true;
   view.fetchList();
   const oldRequest = calls.pendingLessons[0];
-  await router.replace({ path: '/', query: { courseId: 'course-2', courseKey: 'second-course', title: 'Second course' } });
+  await router.replace({ path: '/', query: { courseId: 'c0060000-0000-4000-8000-000000000002', courseKey: 'second-course', title: 'Second course' } });
   await Vue.nextTick();
-  const currentRequest = calls.pendingLessons.find(call => call.courseId === 'course-2');
+  const currentRequest = calls.pendingLessons.find(call => call.courseId === 'c0060000-0000-4000-8000-000000000002');
   if (!currentRequest) return { requested: false };
   const closed = !view.dialogVisible && !view.assignmentDialog.visible;
-  currentRequest.ok([{ lessonId: 'second', lessonKey: 'second', title: 'Current course lesson', status: 'draft', topicTags: [] }]);
-  oldRequest.ok([{ lessonId: 'stale', lessonKey: 'stale', title: 'Stale course lesson', status: 'draft', topicTags: [] }]);
+  currentRequest.ok([{ lessonId: 'second', lessonKey: 'second', title: 'Current course lesson', status: 'draft', topicTags: [] }], { mode: 'paged', page: 1, pageSize: 50, total: 1, totalPages: 1 });
+  oldRequest.ok([{ lessonId: 'stale', lessonKey: 'stale', title: 'Stale course lesson', status: 'draft', topicTags: [] }], { mode: 'paged', page: 1, pageSize: 50, total: 1, totalPages: 1 });
   await Vue.nextTick();
   return { requested: true, closed, courseId: view.courseId, titles: view.list.map(row => row.title), text: view.$el.textContent };
 };

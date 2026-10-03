@@ -14,7 +14,7 @@ function setup() {
   for (const [key, method] of Object.entries(component.methods)) vm[key] = method.bind(vm);
   return { vm, requests, messages, destroy: () => component.beforeDestroy?.call(vm) };
 }
-const succeed = (request, value) => request.at(-2)(value);
+const succeed = (request, value) => request.at(-2)(value, { page: 1, pageSize: 50, total: Array.isArray(value) ? value.length : 0, totalPages: Array.isArray(value) && value.length ? 1 : 0 });
 const fail = request => request.at(-1)('failed');
 
 for (const roundTrip of [false, true]) test(`save response respects selection identity${roundTrip ? ' through A/B/A' : ''}`, () => {
@@ -27,7 +27,7 @@ for (const roundTrip of [false, true]) test(`save response respects selection id
   assert.equal(vm.selectedLearner, selected);
   assert.deepEqual(vm.personalityForm, form);
   assert.equal(vm.savingPersonality, false);
-  assert.deepEqual(messages, []);
+  assert.deepEqual(messages, ['insights.personalitySaved: A']);
   vm.savePersonality();
   assert.equal(requests.updateLearnerPersonality[1][0], selected.childId);
   assert.deepEqual(requests.updateLearnerPersonality[1][1].interests, vm.parseInterests());
@@ -56,7 +56,7 @@ for (const outcome of ['success', 'error']) test(`selection change fences save $
   vm.selectLearner(learner('A')); vm.savePersonality(); vm.selectLearner(learner('B'));
   if (outcome === 'success') succeed(requests.updateLearnerPersonality[0], learner('A'));
   else fail(requests.updateLearnerPersonality[0]);
-  assert.equal(vm.selectedLearner.childId, 'B'); assert.deepEqual(messages, []);
+  assert.equal(vm.selectedLearner.childId, 'B'); assert.deepEqual(messages, outcome === 'success' ? ['insights.personalitySaved: A'] : []);
 });
 
 for (const [method, api, state, loading, value] of [
@@ -96,8 +96,8 @@ test('current save reports success, refreshes persisted reads, and allows anothe
   vm.selectLearner(learner('A')); vm.savePersonality();
   succeed(requests.updateLearnerPersonality[0], learner('A', ['saved']));
   assert.deepEqual(vm.selectedLearner.personality.interests, ['saved']);
-  assert.deepEqual(messages, ['insights.personalitySaved']);
-  assert.equal(requests.listLearners.length, 1);
+  assert.deepEqual(messages, ['insights.personalitySaved: A']);
+  assert.equal(requests.listLearners.length, 0);
   assert.equal(requests.previewLearnerLessons.length, 2);
   vm.savePersonality(); assert.equal(requests.updateLearnerPersonality.length, 2);
 });
@@ -124,4 +124,11 @@ test('new preview and quality requests clear old data immediately', () => {
   assert.deepEqual(vm.previewLessons, []);
   vm.qualityRows = ['90 days']; vm.qualityWindow = 7; vm.fetchQuality();
   assert.deepEqual(vm.qualityRows, []);
+});
+
+test('A/B/A selection suppresses an old save error and releases the write lock', () => {
+ const { vm, requests, messages } = setup();
+ vm.selectLearner(learner('A')); vm.savePersonality(); vm.selectLearner(learner('B')); vm.selectLearner(learner('A', ['new edit']));
+ fail(requests.updateLearnerPersonality[0]);
+ assert.deepEqual(messages, []); assert.equal(vm.savingPersonality, false); assert.equal(vm.personalityForm.interestsText, 'new edit');
 });

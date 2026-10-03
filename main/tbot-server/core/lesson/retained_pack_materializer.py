@@ -10,7 +10,7 @@ from core.lesson.sd_pack_materializer import (
 
 
 async def materialize_retained_operation(raw, *, config, client=None, logger=None, resolver=None,
-                                         bind_device=None):
+                                         bind_device=None, release_device=None):
     op = parse_operation(raw)
     pack = descriptor(op) if op["action"] == "acquire" else None
     if pack is not None:
@@ -22,7 +22,10 @@ async def materialize_retained_operation(raw, *, config, client=None, logger=Non
             await materialize_lesson_sd_pack(pack, config=config, client=client, logger=logger, resolver=resolver)
             return work.materialized()
         if op["action"] == "release":
-            return work.release()
+            receipt = work.release()
+            if receipt['state'] == 'release_pending' and release_device is not None:
+                return work.released(await release_device(op))
+            return receipt
         if op["action"] == "reconcile":
             return work.reconcile()
         if bind_device is not None:

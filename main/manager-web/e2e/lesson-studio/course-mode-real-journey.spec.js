@@ -274,3 +274,44 @@ test('real v5 next draft, edits, publication, new assignment, rollback and insig
     expect.soft(journal.evidence.cleanup.filter(item => item.status === 'BLOCKED'), 'task assignment cleanup').toEqual([]);
   }
 });
+
+// FE-04 controlled response delay after a real authenticated metadata read.
+// No fake successful API/media response; resources are only owned empty drafts.
+test('query navigation keeps server course identity when an older read settles late', async ({ page }) => {
+  await loginAsLessonAuthor(page);
+  const { gotoAppRoute } = require('./helpers/navigation');
+  const run = Date.now().toString(36) + '-' + Math.random().toString(16).slice(2, 8);
+  const a = await adminApi(page, 'POST', '/courses', { courseKey: 'fe04-a-' + run, title: 'FE04 Course A ' + run, locale: 'en-US', ageBand: '4-6' });
+  const b = await adminApi(page, 'POST', '/courses', { courseKey: 'fe04-b-' + run, title: 'FE04 Course B ' + run, locale: 'en-US', ageBand: '4-6' });
+  let release, fetched = false;
+  const delayed = new Promise(resolve => { release = resolve; });
+  const pattern = '**/courses/' + a.id;
+  await page.route(pattern, async route => {
+    const response = await route.fetch();
+    expect(response.status()).toBe(200); fetched = true;
+    await delayed; await route.fulfill({ response });
+  });
+  try {
+    await gotoAppRoute(page, '#/course-lessons?courseId=' + a.id + '&title=Forged');
+    await expect.poll(() => fetched).toBe(true);
+    await gotoAppRoute(page, '#/course-lessons?courseId=' + b.id + '&title=Forged');
+    await expect(page.getByRole('heading', { name: 'Lessons · ' + b.title, exact: true })).toBeVisible();
+    const oldRead = page.waitForResponse(response => response.url().endsWith('/courses/' + a.id));
+    release(); await oldRead; await page.unroute(pattern);
+    await expect(page.getByRole('heading', { name: 'Lessons · ' + b.title, exact: true })).toBeVisible();
+    await page.reload();
+    await expect(page.getByRole('heading', { name: 'Lessons · ' + b.title, exact: true })).toBeVisible();
+    await page.goBack();
+    await expect(page.getByRole('heading', { name: 'Lessons · ' + a.title, exact: true })).toBeVisible();
+    const invalidReads = [];
+    page.on('request', request => { if (request.url().includes('/courses/not-a-uuid')) invalidReads.push(request.url()); });
+    await gotoAppRoute(page, '#/course-lessons?courseId=not-a-uuid&title=Forged');
+    await expect(page).toHaveURL(/#\/course-management$/);
+    await expect(page.getByRole('heading', { name: 'Courses', exact: true })).toBeVisible();
+    expect(invalidReads).toEqual([]);
+  } finally {
+    release(); await page.unroute(pattern);
+    await adminApi(page, 'DELETE', '/courses/' + b.id);
+    await adminApi(page, 'DELETE', '/courses/' + a.id);
+  }
+});

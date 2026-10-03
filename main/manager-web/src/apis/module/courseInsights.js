@@ -1,5 +1,6 @@
 import { getNestUrl } from '../api';
 import { nestRequest } from '../nestHttp';
+import { decodeList, listQuery, isPaged } from '@/utils/adminPagination.cjs';
 
 function normalizeLearner(raw) {
   const r = raw || {};
@@ -84,14 +85,16 @@ function normalizeQuality(raw) {
 export default {
   listLearners(params, onSuccess, onError) {
     const p = params || {};
-    const qs = [];
-    if (p.keyword) qs.push(`keyword=${encodeURIComponent(p.keyword)}`);
-    if (p.limit) qs.push(`limit=${encodeURIComponent(p.limit)}`);
-    const q = qs.length ? `?${qs.join('&')}` : '';
+    const qs = listQuery(p, ['keyword', ...(isPaged(p) ? ['page', 'pageSize'] : ['limit'])]);
+    const q = qs ? `?${qs}` : '';
     nestRequest({
       url: `${getNestUrl()}/course-insights/learners${q}`,
       method: 'GET',
-      onSuccess: (payload) => onSuccess((payload && Array.isArray(payload.learners) ? payload.learners : []).map(normalizeLearner)),
+      onSuccess: (payload) => {
+        let list;
+        try { list = decodeList(payload, 'learners', p, ['childId']); } catch (_) { if (onError) onError('', { status: 0, transport: true }); return; }
+        onSuccess(list.rows.map(normalizeLearner), list.pagination);
+      },
       onError,
     });
   },
@@ -126,15 +129,16 @@ export default {
 
   getCourseQuality(params, onSuccess, onError) {
     const p = params || {};
-    const qs = [];
-    if (p.windowDays) qs.push(`windowDays=${encodeURIComponent(p.windowDays)}`);
-    if (p.courseId) qs.push(`courseId=${encodeURIComponent(p.courseId)}`);
-    if (p.keyword) qs.push(`keyword=${encodeURIComponent(p.keyword)}`);
-    const q = qs.length ? `?${qs.join('&')}` : '';
+    const qs = listQuery(p, ['windowDays', 'courseId', 'keyword', 'page', 'pageSize']);
+    const q = qs ? `?${qs}` : '';
     nestRequest({
       url: `${getNestUrl()}/course-insights/course-quality${q}`,
       method: 'GET',
-      onSuccess: (payload) => onSuccess((payload && Array.isArray(payload.courses) ? payload.courses : []).map(normalizeQuality)),
+      onSuccess: (payload) => {
+        let list;
+        try { list = decodeList(payload, 'courses', p, ['courseId']); } catch (_) { if (onError) onError('', { status: 0, transport: true }); return; }
+        onSuccess(list.rows.map(normalizeQuality), list.pagination);
+      },
       onError,
     });
   },

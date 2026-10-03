@@ -29,9 +29,11 @@
               :placeholder="$t('insights.searchLearner')"
               size="small"
               clearable
-              @keyup.enter.native="fetchLearners"
+              :maxlength="200"
+              @input="searchList(true)"
+              @keyup.enter.native="searchList(false)"
             />
-            <el-button size="small" type="primary" @click="fetchLearners">{{ $t('insights.search') }}</el-button>
+            <el-button size="small" type="primary" @click="searchList(false)">{{ $t('insights.search') }}</el-button>
           </div>
           <el-table v-loading="learnersLoading" :data="learners" stripe highlight-current-row @current-change="selectLearner">
             <el-table-column prop="childName" :label="$t('insights.child')" min-width="150">
@@ -51,9 +53,10 @@
               <template slot-scope="scope">{{ scope.row.stats.completionRate }}%</template>
             </el-table-column>
             <template slot="empty">
-              <span class="muted">{{ $t('insights.noLearners') }}</span>
+              <span class="muted">{{ $t(learnersFailed ? 'insights.loadLearnersFail' : 'insights.noLearners') }}</span>
             </template>
           </el-table>
+          <el-pagination data-testid="learner-pagination" small layout="prev, pager, next, total" :current-page="page" :page-size="50" :total="learnerPagination.total" @current-change="setListPage" />
         </el-card>
 
         <el-card class="content-area detail-panel" shadow="never">
@@ -107,6 +110,7 @@
               </el-form-item>
             </el-form>
 
+            <p class="muted small">{{ $t('pagination.previewScope') }}</p>
             <div class="preview-toolbar">
               <el-input
                 v-model="previewKeyword"
@@ -136,7 +140,7 @@
               </el-table-column>
               <el-table-column prop="reasonCode" :label="$t('insights.reason')" width="150" />
               <template slot="empty">
-                <span class="muted">{{ $t('insights.noPreview') }}</span>
+                <span class="muted">{{ $t(previewFailed ? 'insights.previewFail' : 'insights.noPreview') }}</span>
               </template>
             </el-table>
           </div>
@@ -148,7 +152,7 @@
     <div class="main-wrapper" v-else>
       <el-card class="content-area" shadow="never">
         <div class="quality-toolbar">
-          <el-select v-model="qualityWindow" size="small" class="window-select" @change="fetchQuality">
+          <el-select v-model="qualityWindow" size="small" class="window-select" @change="searchList(false)">
             <el-option :label="$t('insights.window7')" :value="7" />
             <el-option :label="$t('insights.window14')" :value="14" />
             <el-option :label="$t('insights.window30')" :value="30" />
@@ -160,16 +164,19 @@
             size="small"
             clearable
             class="quality-search"
-            @keyup.enter.native="fetchQuality"
+            :maxlength="200"
+            @input="searchList(true)"
+            @keyup.enter.native="searchList(false)"
           />
-          <el-select v-model="qualityRiskFilter" size="small" class="risk-select">
+          <el-select v-model="qualityRiskFilter" size="small" class="risk-select" @change="setListPage(page)">
             <el-option :label="$t('insights.riskAll')" value="all" />
             <el-option :label="$t('insights.riskAttention')" value="attention" />
             <el-option :label="$t('insights.riskWatch')" value="watch" />
             <el-option :label="$t('insights.riskHealthy')" value="healthy" />
           </el-select>
-          <el-button size="small" type="primary" @click="fetchQuality">{{ $t('insights.search') }}</el-button>
+          <el-button size="small" type="primary" @click="searchList(false)">{{ $t('insights.search') }}</el-button>
         </div>
+        <p class="muted small">{{ $t('pagination.pageScope') }} · {{ $t('pagination.localFilters') }} · {{ $t('pagination.childSum') }}</p>
         <div class="quality-stats">
           <div class="stat-item">
             <span class="stat-label">{{ $t('insights.avgQuality') }}</span>
@@ -247,9 +254,10 @@
             <template slot-scope="scope">{{ formatTime(scope.row.lastActivityAt) }}</template>
           </el-table-column>
           <template slot="empty">
-            <span class="muted">{{ $t('insights.noQuality') }}</span>
+            <span class="muted">{{ $t(qualityFailed ? 'insights.qualityFail' : 'insights.noQuality') }}</span>
           </template>
         </el-table>
+        <el-pagination data-testid="quality-pagination" small layout="prev, pager, next, total" :current-page="page" :page-size="50" :total="qualityPagination.total" @current-change="setListPage" />
       </el-card>
     </div>
   </div>
@@ -258,12 +266,27 @@
 <script>
 import HeaderBar from '@/components/HeaderBar.vue';
 import Api from '@/apis/api';
+import { pageFromQuery } from '@/utils/adminPagination.cjs';
 
 export default {
   name: 'CourseInsights',
   components: { HeaderBar },
   data() {
     return {
+      requestsDisposed: false,
+      page: 1,
+      learnerPagination: { page: 1, pageSize: 50, total: 0, totalPages: 0 },
+      qualityPagination: { page: 1, pageSize: 50, total: 0, totalPages: 0 },
+      searchTimer: null,
+      routeContext: null,
+      learnersSequence: 0,
+      previewSequence: 0,
+      saveSequence: 0,
+      selectionSequence: 0,
+      qualitySequence: 0,
+      learnersFailed: false,
+      previewFailed: false,
+      qualityFailed: false,
       activeTab: 'learners',
       learnerKeyword: '',
       learners: [],
@@ -280,12 +303,6 @@ export default {
       qualityKeyword: '',
       qualityCourseId: '',
       qualityRiskFilter: 'all',
-      requestsDestroyed: false,
-      learnerRequestId: 0,
-      previewRequestId: 0,
-      qualityRequestId: 0,
-      selectionId: 0,
-      saveRequestId: 0,
     };
   },
   computed: {
@@ -293,16 +310,20 @@ export default {
       return this.learnersLoading || this.qualityLoading;
     },
     avgQuality() {
+      if (this.qualityLoading || this.qualityFailed) return '-';
       if (!this.qualityRows.length) return 0;
       return Math.round(this.qualityRows.reduce((sum, row) => sum + row.qualityScore, 0) / this.qualityRows.length);
     },
     totalAssignments() {
+      if (this.qualityLoading || this.qualityFailed) return '-';
       return this.qualityRows.reduce((sum, row) => sum + row.assignments, 0);
     },
     totalActiveChildren() {
+      if (this.qualityLoading || this.qualityFailed) return '-';
       return this.qualityRows.reduce((sum, row) => sum + row.activeChildren, 0);
     },
     attentionCourses() {
+      if (this.qualityLoading || this.qualityFailed) return '-';
       return this.qualityRows.filter((row) => row.riskLevel === 'attention').length;
     },
     filteredQualityRows() {
@@ -311,50 +332,105 @@ export default {
     },
   },
   created() {
-    if (this.$route.query.tab === 'quality') this.activeTab = 'quality';
-    if (this.$route.query.keyword) {
-      const keyword = String(this.$route.query.keyword);
+    this.loadRoute();
+  },
+  watch: {
+    '$route.query'() {
+      this.loadRoute();
+    },
+  },
+  beforeDestroy() {
+    this.requestsDisposed = true;
+    this.invalidateRequests();
+    clearTimeout(this.searchTimer);
+  },
+  methods: {
+    setListPage(page) {
+      clearTimeout(this.searchTimer);
+      const query = { ...this.$route.query, page: String(page), tab: this.activeTab,
+        keyword: (this.activeTab === 'quality' ? this.qualityKeyword : this.learnerKeyword).trim(),
+        courseId: this.qualityCourseId, windowDays: String(this.qualityWindow), risk: this.qualityRiskFilter };
+      if (Object.keys(query).every(k => query[k] === this.$route.query[k])) { this.refreshCurrent(); return; }
+      this.learnersSequence++; this.qualitySequence++; this.learners = []; this.qualityRows = [];
+      this.$router.push({ path: this.$route.path, query });
+    },
+    searchList(debounce) {
+      clearTimeout(this.searchTimer);
+      this.learnersSequence++; this.qualitySequence++;
+      this.learners = []; this.qualityRows = [];
+      if (debounce) this.searchTimer = setTimeout(() => { if (!this.requestsDisposed) this.setListPage(1); }, 300);
+      else this.setListPage(1);
+    },
+    invalidateRequests() {
+      this.learnersSequence++;
+      this.previewSequence++;
+      this.saveSequence++;
+      this.qualitySequence++;
+      this.learnersLoading = false;
+      this.previewLoading = false;
+      this.savingPersonality = false;
+      this.qualityLoading = false;
+    },
+    loadRoute() {
+      clearTimeout(this.searchTimer);
+      const tab = this.$route.query.tab === 'quality' ? 'quality' : 'learners';
+      const keyword = typeof this.$route.query.keyword === 'string' ? this.$route.query.keyword : '';
+      const courseId = typeof this.$route.query.courseId === 'string' ? this.$route.query.courseId : '';
+      const context = JSON.stringify([tab, keyword, courseId]);
+      if (this.routeContext !== context) {
+        this.invalidateRequests();
+        this.selectedLearner = {};
+        this.previewLessons = [];
+        this.previewFailed = false;
+      }
+      this.routeContext = context;
+      this.activeTab = tab;
+      this.page = pageFromQuery(this.$route.query);
+      this.qualityWindow = [7, 14, 30, 90].includes(Number(this.$route.query.windowDays)) ? Number(this.$route.query.windowDays) : 30;
+      this.qualityRiskFilter = ['attention', 'watch', 'healthy'].includes(this.$route.query.risk) ? this.$route.query.risk : 'all';
       this.learnerKeyword = keyword;
       this.previewKeyword = keyword;
       this.qualityKeyword = keyword;
-    }
-    if (this.$route.query.courseId) this.qualityCourseId = String(this.$route.query.courseId);
-    this.fetchLearners();
-    this.fetchQuality();
-  },
-  beforeDestroy() {
-    this.requestsDestroyed = true;
-  },
-  methods: {
+      this.qualityCourseId = courseId;
+      this.fetchLearners();
+      this.fetchQuality();
+    },
     handleTabChange() {
-      this.refreshCurrent();
+      this.setListPage(1);
     },
     refreshCurrent() {
       if (this.activeTab === 'quality') this.fetchQuality();
       else this.fetchLearners();
     },
     fetchLearners() {
-      if (this.requestsDestroyed) return;
-      const requestId = ++this.learnerRequestId;
+      if (this.requestsDisposed) return;
+      const sequence = ++this.learnersSequence;
+      this.learners = [];
+      this.learnersFailed = false;
       this.learnersLoading = true;
       Api.courseInsights.listLearners(
-        { keyword: this.learnerKeyword.trim(), limit: 200 },
-        (rows) => {
-          if (this.requestsDestroyed || requestId !== this.learnerRequestId) return;
+        { keyword: this.learnerKeyword.trim(), page: this.page, pageSize: 50 },
+        (rows, pagination) => {
+          if (this.requestsDisposed || sequence !== this.learnersSequence) return;
+          this.learnerPagination = pagination;
+          if (this.activeTab === 'learners' && this.page > Math.max(1, pagination.totalPages)) { this.setListPage(Math.max(1, pagination.totalPages)); return; }
           this.learnersLoading = false;
           this.learners = rows;
           if (!this.selectedLearner.childId && rows.length) this.selectLearner(rows[0]);
         },
         (msg) => {
-          if (this.requestsDestroyed || requestId !== this.learnerRequestId) return;
+          if (this.requestsDisposed || sequence !== this.learnersSequence) return;
           this.learnersLoading = false;
+          this.learnersFailed = true;
           this.$message.error(msg || this.$t('insights.loadLearnersFail'));
         },
       );
     },
     selectLearner(row) {
-      if (this.requestsDestroyed || !row || row.childId === this.selectedLearner.childId) return;
-      this.selectionId += 1;
+      if (!row || row.childId === this.selectedLearner.childId) return;
+      this.selectionSequence++;
+      this.previewSequence++;
+      this.previewLessons = [];
       this.selectedLearner = row;
       this.personalityForm = {
         interestsText: row.personality.interests.join(', '),
@@ -372,10 +448,11 @@ export default {
         .filter(Boolean);
     },
     savePersonality() {
-      if (this.requestsDestroyed || !this.selectedLearner.childId || this.savingPersonality) return;
-      const requestId = ++this.saveRequestId;
-      const selectionId = this.selectionId;
+      if (!this.selectedLearner.childId || this.savingPersonality || this.requestsDisposed) return;
+      const sequence = ++this.saveSequence;
+      const selectionSequence = this.selectionSequence;
       const childId = this.selectedLearner.childId;
+      const childName = this.selectedLearner.childName || childId;
       this.savingPersonality = true;
       Api.courseInsights.updateLearnerPersonality(
         childId,
@@ -387,62 +464,67 @@ export default {
           attentionSpanSec: this.personalityForm.attentionSpanSec,
         },
         (learner) => {
-          if (this.requestsDestroyed || requestId !== this.saveRequestId) return;
+          if (this.requestsDisposed || sequence !== this.saveSequence) return;
           this.savingPersonality = false;
-          if (selectionId !== this.selectionId || childId !== this.selectedLearner.childId) return;
-          // Keep the editable form: it may contain changes made during this save.
-          this.selectedLearner = learner;
-          this.$message.success(this.$t('insights.personalitySaved'));
-          this.fetchLearners();
-          this.fetchPreview();
+          // A completed write belongs to its submitted child, not the current selection.
+          this.learners = this.learners.map((row) => row.childId === childId ? learner : row);
+          this.$message.success(`${this.$t('insights.personalitySaved')}: ${childName}`);
+          if (selectionSequence === this.selectionSequence && this.selectedLearner.childId === childId) {
+            this.selectedLearner = learner;
+            this.fetchPreview();
+          }
         },
         (msg) => {
-          if (this.requestsDestroyed || requestId !== this.saveRequestId) return;
+          if (this.requestsDisposed || sequence !== this.saveSequence) return;
           this.savingPersonality = false;
-          if (selectionId !== this.selectionId || childId !== this.selectedLearner.childId) return;
+          if (selectionSequence !== this.selectionSequence || this.selectedLearner.childId !== childId) return;
           this.$message.error(msg || this.$t('insights.saveFail'));
         },
       );
     },
     fetchPreview() {
-      if (this.requestsDestroyed || !this.selectedLearner.childId) return;
-      const requestId = ++this.previewRequestId;
-      const selectionId = this.selectionId;
+      if (!this.selectedLearner.childId) return;
+      if (this.requestsDisposed) return;
+      const sequence = ++this.previewSequence;
       const childId = this.selectedLearner.childId;
       this.previewLessons = [];
+      this.previewFailed = false;
       this.previewLoading = true;
       Api.courseInsights.previewLearnerLessons(
-        this.selectedLearner.childId,
+        childId,
         { keyword: this.previewKeyword.trim(), limit: 50 },
         (payload) => {
-          if (this.requestsDestroyed || requestId !== this.previewRequestId
-            || selectionId !== this.selectionId || childId !== this.selectedLearner.childId) return;
+          if (this.requestsDisposed || sequence !== this.previewSequence || childId !== this.selectedLearner.childId) return;
           this.previewLoading = false;
           this.previewLessons = payload.lessons;
         },
         (msg) => {
-          if (this.requestsDestroyed || requestId !== this.previewRequestId
-            || selectionId !== this.selectionId || childId !== this.selectedLearner.childId) return;
+          if (this.requestsDisposed || sequence !== this.previewSequence || childId !== this.selectedLearner.childId) return;
           this.previewLoading = false;
+          this.previewFailed = true;
           this.$message.error(msg || this.$t('insights.previewFail'));
         },
       );
     },
     fetchQuality() {
-      if (this.requestsDestroyed) return;
-      const requestId = ++this.qualityRequestId;
+      if (this.requestsDisposed) return;
+      const sequence = ++this.qualitySequence;
       this.qualityRows = [];
+      this.qualityFailed = false;
       this.qualityLoading = true;
       Api.courseInsights.getCourseQuality(
-        { windowDays: this.qualityWindow, courseId: this.qualityCourseId, keyword: this.qualityKeyword.trim() },
-        (rows) => {
-          if (this.requestsDestroyed || requestId !== this.qualityRequestId) return;
+        { windowDays: this.qualityWindow, courseId: this.qualityCourseId, keyword: this.qualityKeyword.trim(), page: this.page, pageSize: 50 },
+        (rows, pagination) => {
+          if (this.requestsDisposed || sequence !== this.qualitySequence) return;
+          this.qualityPagination = pagination;
+          if (this.activeTab === 'quality' && this.page > Math.max(1, pagination.totalPages)) { this.setListPage(Math.max(1, pagination.totalPages)); return; }
           this.qualityLoading = false;
           this.qualityRows = rows;
         },
         (msg) => {
-          if (this.requestsDestroyed || requestId !== this.qualityRequestId) return;
+          if (this.requestsDisposed || sequence !== this.qualitySequence) return;
           this.qualityLoading = false;
+          this.qualityFailed = true;
           this.$message.error(msg || this.$t('insights.qualityFail'));
         },
       );

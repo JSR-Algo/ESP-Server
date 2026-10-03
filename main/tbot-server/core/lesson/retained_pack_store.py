@@ -186,12 +186,18 @@ class _RetainedOperation:
     def release(self):
         if self.op["action"] != "release":
             raise ValueError("release operation required")
-        # No device release proof exists for a bound selection in the selected
-        # terminal contract. Only preparation, which never touches a device,
-        # can release after this lock has drained its actual materializer.
+        # Persist protection before device dispatch; only preparation can release
+        # without the exact durable device receipt after this lock drains work.
         if self.state is not None and self.state["phase"] in {"BIND_PENDING", "BOUND", "RELEASE_PENDING"}:
             return self._persist("RELEASE_PENDING", receipt_for(self.op, "release_pending"))
         return self._persist("RELEASED", receipt_for(self.op, "released"))
+
+    def released(self, device_receipt):
+        if (self.op['action'] != 'release' or self.state is None
+                or self.state['phase'] != 'RELEASE_PENDING'):
+            raise ValueError('durable pending release required before device receipt')
+        parse_device_receipt(device_receipt, self.op)
+        return self._persist('RELEASED', receipt_for(self.op, 'released'))
 
     def begin_bind(self):
         if (self.op['action'] != 'bind' or self.state is None

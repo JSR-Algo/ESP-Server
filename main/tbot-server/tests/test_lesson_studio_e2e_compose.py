@@ -36,7 +36,9 @@ def test_lesson_studio_compose_is_test_owned_and_complete():
     assert "/src/lessons/fixtures/tvideo-raw-code/assets/asset-manifest.json:/usr/share/nginx/html/tvideo-demo/asset-manifest.json:ro" in compose
     assert "/src/lessons/fixtures/tvideo-raw-code/assets/admin:/usr/share/nginx/html/tvideo-demo/admin:ro" in compose
     assert "/src/lessons/fixtures/tvideo-raw-code/assets/esp-tft:/usr/share/nginx/html/tvideo-demo/esp-tft:ro" in compose
-    assert "/lesson/assets:/usr/share/nginx/html/tvideo-demo/assets:ro" in compose
+    assert "/lesson/assets:/usr/share/nginx/html/tvideo-demo/assets:ro" not in compose
+    for directory in ("background", "objects", "reference", "robot"):
+        assert f"/lesson/assets/{directory}:/usr/share/nginx/html/tvideo-demo/assets/{directory}:ro" in compose
     # The hint MUST demand the /tvideo-demo prefix: a bare origin answers 200 with the
     # SPA index.html, which the canonical spec then sha256-hashes as if it were media
     # (F-T41E-05, fixed under T5.3). This assertion pinned the pre-fix wording and had
@@ -47,11 +49,13 @@ def test_lesson_studio_compose_is_test_owned_and_complete():
     assert "TBOT_ESP_SERVER_URL: ${TBOT_ESP_SERVER_URL:-}" in compose
     assert "LESSON_SHARED_VISUAL_AUTHORING_ENABLED: \"true\"" in compose
     assert "LESSON_EXACT_ESPTFT_PREVIEW_ENABLED: \"true\"" in compose
+    assert 'LESSON_ASSET_GENERATION_WORKER_ENABLED: "true"' in compose
     assert 'TBOT_E2E_CAPTCHA_ENABLED: "true"' in compose
     assert "TBOT_E2E_CAPTCHA_CODE: E2E42" in compose
     assert "condition: service_healthy" in compose
     assert "/tbot/user/captcha" not in compose
     assert "http://127.0.0.1:8002/login" in compose
+    assert "http://127.0.0.1:8002/tbot/user/pub-config" in compose
 
 
 def test_documented_launch_uses_one_unambiguous_compose_project_namespace():

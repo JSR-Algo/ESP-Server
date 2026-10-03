@@ -348,9 +348,9 @@ function makeContext(api) {
   const freshLearners = calls.filter((call) => call.type === 'learners')[1];
   const freshDevices = calls.filter((call) => call.type === 'devices')[1];
 
-  freshLearners.onSuccess([{ childId: 'child-b', childName: 'Bee' }]);
+  freshLearners.onSuccess([{ childId: 'child-b', childName: 'Bee' }], { page: 1, pageSize: 20, total: 1, totalPages: 1 });
   freshDevices.onSuccess([{ deviceId: 'device-b', availability: 'available', currentAssignment: null }]);
-  staleLearners.onSuccess([{ childId: 'child-a', childName: 'Aye' }]);
+  staleLearners.onSuccess([{ childId: 'child-a', childName: 'Aye' }], { page: 1, pageSize: 20, total: 1, totalPages: 1 });
   staleDevices.onSuccess([{ deviceId: 'device-a', availability: 'available', currentAssignment: null }]);
 
   if (context.assignmentDialog.learners[0]?.childId !== 'child-b') {

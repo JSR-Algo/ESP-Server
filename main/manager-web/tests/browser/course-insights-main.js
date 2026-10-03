@@ -18,10 +18,10 @@ const learner = id => ({
 const rows = [learner('A'), learner('B')];
 const calls = { previews: [], saves: [], quality: [], errors: [] };
 Object.assign(Api.courseInsights, {
-  listLearners(params, ok) { ok(rows); },
+  listLearners(params, ok) { ok(rows, { page: params.page, pageSize: params.pageSize, total: rows.length, totalPages: 1 }); },
   previewLearnerLessons(childId, params, ok, fail) { calls.previews.push({ childId, params, ok, fail }); },
   updateLearnerPersonality(childId, payload, ok, fail) { calls.saves.push({ childId, payload, ok, fail }); },
-  getCourseQuality(params, ok, fail) { calls.quality.push({ params, ok, fail }); },
+  getCourseQuality(params, ok, fail) { calls.quality.push({ params, ok: rows => ok(rows, { page: params.page, pageSize: params.pageSize, total: rows.length, totalPages: rows.length ? 1 : 0 }), fail }); },
 });
 CourseInsights.components.HeaderBar = { render: h => h('header') };
 Vue.prototype.$message = { success() {}, error(message) { calls.errors.push(message); } };

@@ -12,7 +12,7 @@
     <!-- Lesson header -->
     <div class="operation-bar">
       <div class="left-title">
-        <el-button type="text" icon="el-icon-arrow-left" @click="$router.push(courseLessonsRoute)">
+        <el-button type="text" icon="el-icon-arrow-left" data-testid="lesson-return-course" @click="returnToCourse">
           {{ $t('lesson.pageTitle') }}
         </el-button>
         <h2 class="page-title" v-if="lesson">
@@ -940,16 +940,6 @@ export default {
     lessonId() {
       return this.$route.query.lessonId;
     },
-    courseLessonsRoute() {
-      const courseId = (this.lesson && this.lesson.lessonId === this.lessonId && this.lesson.courseId)
-        || this.$route.query.courseId;
-      if (!courseId) return { path: '/course-management' };
-      const query = { courseId };
-      if (courseId === this.$route.query.courseId && this.$route.query.courseTitle) {
-        query.title = this.$route.query.courseTitle;
-      }
-      return { path: '/course-lessons', query };
-    },
     flattenedDerivativeManifestVersion() {
       const manifest = this.previewManifest && this.previewManifest.manifest;
       if (manifest && typeof manifest.manifestVersion === 'string') return manifest.manifestVersion;
@@ -1049,7 +1039,7 @@ export default {
       return requiredFlattenedDerivativePhaseIds(manifest, this.steps);
     },
     isDraft() {
-      return this.lesson && this.lesson.status === 'draft';
+      return this.lesson && this.lesson.lessonId === this.lessonId && this.lesson.status === 'draft';
     },
     passiveStepTypes() {
       return this.stepTypes.filter((t) => t.completionClass !== 'interactive');
@@ -1273,6 +1263,12 @@ export default {
         this.$router.replace('/course-management');
         return;
       }
+      // The router has already accepted the leave/discard decision. Step keys
+      // repeat across versions, so no old draft may be applied to the new lesson.
+      this.stepEditor = createLessonStepEditorState();
+      this.promptDraft = '';
+      this.promptStepKey = '';
+      this.promptDirty = false;
       this.savingLessonVisuals = false;
       this.creatingNextVersion = false;
       this.pendingLessonVisualPair = null;
@@ -1367,6 +1363,12 @@ export default {
     this.lessonUpdateSafety.release();
   },
   methods: {
+    returnToCourse() {
+      const courseId = this.lesson && this.lesson.lessonId === this.lessonId && this.lesson.courseId;
+      this.$router.push(courseId
+        ? { path: '/course-lessons', query: { courseId } }
+        : { path: '/course-management' });
+    },
     requestEditorLeave(next) {
       if (this._pendingRouteNext) this._pendingRouteNext(false);
       this._pendingRouteNext = next;
@@ -1577,7 +1579,8 @@ export default {
       return this.submitNextVersion({ rendererVersion: 'teebot-lesson-renderer.v5' });
     },
     submitNextVersion(data) {
-      if (this.creatingNextVersion || !this.lesson || this.lesson.status !== 'published') return false;
+      if (this.editorDestroying || this.creatingNextVersion || !this.lesson
+        || this.lesson.lessonId !== this.lessonId || this.lesson.status !== 'published') return false;
       const publishedLessonId = this.lesson.lessonId;
       const publishedLessonVersion = Number(this.lesson.lessonVersion);
       const loadRequestId = this.lessonLoadRequestId;
@@ -2136,6 +2139,10 @@ export default {
       const requestId = this.lessonLoadRequestId + 1;
       const lessonId = this.lessonId;
       this.lessonLoadRequestId = requestId;
+      if (this.lesson && this.lesson.lessonId !== lessonId) {
+        this.lesson = null;
+        this.steps = [];
+      }
       this.renameVisible = false;
       this.renaming = false;
       this.resetLessonAssetGenerationStatus();

@@ -14,9 +14,9 @@ from course_mode_physical_tft_preflight import PINNED_APPROVAL_KEY_FINGERPRINT, 
 VALIDATOR = "course-mode-physical-flash-admission.v1"
 COURSE_ID, COURSE_KEY = "a17792f6-8d86-4ad1-a6f3-77663b4d4674", "english-6month-4-6"
 ROBOT_MAC, BOARD, TARGET, SERIAL_PATH = "14:c1:9f:d1:ac:20", "LCDWiki ES3C35P", "esp32s3", "/dev/cu.usbmodem1101"
-FIRMWARE_SHA = "b54c6ca33e9beb3747b44feceb7c64fea33fe1d6"
-APP_SHA256, APP_BYTES, APP_OFFSET, PARTITION_BYTES = "782020e2f8ac44bd197f57e9e126c196286a8223005de1e425f8290f12b28dff", 3637200, "0x20000", 4128768
-MANIFEST_SHA256 = "23b70849b6b65901b01b38e91279455a2e5e8d13989438e2e0bbfa707602aa65"
+FIRMWARE_SHA = "91c86074df5a17d5b684a6c28ea57b727abe3a01"
+APP_SHA256, APP_BYTES, APP_OFFSET, PARTITION_BYTES = "8531432b18eef2d656c5afb2574a2b73c2458679d355d6ebcb47828086b0dc95", 3863248, "0x20000", 4128768
+MANIFEST_SHA256 = "39d1538b602829d472d017d78950baf46e8035bab1539e4a99871925732e2809"
 MAX_JSON_BYTES, MAX_LSOF_OUTPUT_BYTES, LSOF_TIMEOUT_SECONDS, CHECK_FRESHNESS_SECONDS = 1024 * 1024, 64 * 1024, 3.0, 300
 OPERATOR_UID = 501
 TRUSTED_LSOF_EXECUTABLE = next((p for p in (Path("/usr/sbin/lsof"), Path("/usr/bin/lsof")) if p.is_file()), Path("/usr/sbin/lsof"))
@@ -40,6 +40,43 @@ EXPECTED_PARTITIONS = [
  {"name":"application","offset":"0x20000","size":"0x7e0000","end":"0x800000","protected":False},
  {"name":"generated-assets","offset":"0x800000","size":"0x800000","end":"0x1000000","protected":True},
 ]
+
+# Separate reviewed software artifact; these pins do not attest physical readiness.
+# Source/build evidence: M1/runs/20260923T031203Z/firmware-build-b/manifest.json.
+M1_STAGING_POLICY = {
+    "serialPath": "/dev/cu.usbmodem1101",
+    "firmwareSha": "283f88e55e918e9a7f7337f66bb04c82a246db35",
+    "appSha256": "7f348063189a9bf884215ffa2c450da3acb5fb32fb2697d30c4b9dd4e938ee41",
+    "appBytes": 3846880,
+    "manifestSha256": "87d503c0ca4f2d1c821c9e27e62dacb3b6a8dd6176946ae001ea9e5566cac7b0",
+    "appOffset": "0x20000",
+    "partitionBytes": 4128768,
+    "partitions": [
+        *copy.deepcopy(EXPECTED_PARTITIONS[:6]),
+        {"name":"application","offset":"0x20000","size":"0x3f0000","end":"0x410000","protected":False},
+        {"name":"inactive-application","offset":"0x410000","size":"0x3f0000","end":"0x800000","protected":True},
+        copy.deepcopy(EXPECTED_PARTITIONS[7]),
+    ],
+}
+
+
+def admission_policy(qualification_profile="production"):
+    if qualification_profile == "production":
+        return {"serialPath": SERIAL_PATH, "firmwareSha": FIRMWARE_SHA, "appSha256": APP_SHA256,
+                "appBytes": APP_BYTES, "manifestSha256": MANIFEST_SHA256,
+                "appOffset": APP_OFFSET, "partitionBytes": PARTITION_BYTES,
+                "partitions": copy.deepcopy(EXPECTED_PARTITIONS)}
+    if qualification_profile == "m1-staging" and M1_STAGING_POLICY is not None:
+        return copy.deepcopy(M1_STAGING_POLICY)
+    raise ValueError("unqualified admission profile")
+
+
+def _validate_profile_candidate(candidate, qualification_profile, **kwargs):
+    if qualification_profile == "production":
+        return candidate_manifest.validate_candidate(candidate, **kwargs)
+    return candidate_manifest.validate_candidate(
+        candidate, qualification_profile=qualification_profile, **kwargs)
+
 
 class DuplicateKeyError(ValueError): pass
 def utc_now(): return datetime.now(timezone.utc)
@@ -158,13 +195,15 @@ def _candidate_external_binding(candidate,*,observe_images):
         docker=Path(candidate["tools"]["docker"]["path"])
         images={}
         if observe_images:
-            for reference in (candidate["images"]["lessonStudioBackend"]["reference"],candidate["images"]["lessonStudioWeb"]["reference"],candidate["database"]["engineImage"]):
+            application_images = (candidate["images"]["lessonStudioBackend"]["reference"],candidate["images"]["lessonStudioWeb"]["reference"])
+            for reference in (*application_images,candidate["database"]["engineImage"]):
                 observed=candidate_manifest._docker_image_descriptor(reference,docker)
                 if observed is None: return None
+                if reference in application_images and (observed.get("Os") != "linux" or observed.get("Architecture") != "amd64"): return None
                 images[reference]=observed
         return (tuple(files),tuple(directories),docker,images)
     except (KeyError,TypeError,ValueError): return None
-def _candidate_external_still_bound(candidate,binding,validation_now):
+def _candidate_external_still_bound(candidate,binding,validation_now,*,qualification_profile="production"):
     if binding is None: return False
     files,directories,docker,images=binding
     if not all(_external_regular_still_bound(record) for record in files): return False
@@ -174,7 +213,7 @@ def _candidate_external_still_bound(candidate,binding,validation_now):
         if any(not _exact_equal(candidate_manifest._docker_image_descriptor(reference,docker),observed) for reference,observed in images.items()): return False
         validation_candidate=copy.deepcopy(candidate)
         validation_candidate.get("tools",{}).pop("physicalAdmission",None)
-        return not candidate_manifest.validate_candidate(validation_candidate,now=validation_now)
+        return not _validate_profile_candidate(validation_candidate,qualification_profile,now=validation_now)
     except (KeyError,OSError,RuntimeError,TypeError,ValueError): return False
 def _output_absent(path):
     parent_fd=None
@@ -249,10 +288,10 @@ def _run_lsof(command):
         selector.close(); process.stdout.close(); process.stderr.close()
     return returncode,bytes(buffers[process.stdout]),bytes(buffers[process.stderr]),error
 
-def collect_serial_inventory():
+def collect_serial_inventory(serial_path=SERIAL_PATH):
     before=_enumerate_devices(); devices=sorted(before)
     if not _trusted_lsof(): return devices,[],"untrusted"
-    returncode,stdout,stderr,error=_run_lsof([str(TRUSTED_LSOF_EXECUTABLE),"-nP","-t","--",SERIAL_PATH])
+    returncode,stdout,stderr,error=_run_lsof([str(TRUSTED_LSOF_EXECUTABLE),"-nP","-t","--",serial_path])
     after=_enumerate_devices()
     if after!=before: return sorted(after),[],"inventory_changed"
     if error: return devices,[],error
@@ -267,12 +306,18 @@ def collect_serial_inventory():
         elif token: return devices,[],"output"
     return devices,sorted(set(holders)),None
 
-def _serial_inventory_safe():
-    devices,holders,error=collect_serial_inventory()
-    return error is None and devices==[SERIAL_PATH] and not holders
+def _profile_serial_inventory(qualification_profile):
+    if qualification_profile == "production":
+        return collect_serial_inventory()
+    return collect_serial_inventory(admission_policy(qualification_profile)["serialPath"])
 
-def _candidate_matches(binding, actual):
+def _serial_inventory_safe(qualification_profile="production"):
+    devices,holders,error=_profile_serial_inventory(qualification_profile)
+    return error is None and devices==[admission_policy(qualification_profile)["serialPath"]] and not holders
+
+def _candidate_matches(binding, actual, *, qualification_profile="production"):
     if not isinstance(actual,dict): return False
+    if binding.get("qualificationProfile", "production") != qualification_profile or actual.get("qualificationProfile", "production") != qualification_profile: return False
     if any(not _exact_equal(actual.get(k),binding.get(k)) for k in ("candidateId","createdAt","expiresAt")): return False
     if not _exact_equal(actual.get("course"),{"courseId":binding.get("courseId"),"courseKey":binding.get("courseKey")}): return False
     repos=binding.get("repositories",{})
@@ -283,29 +328,36 @@ def _candidate_matches(binding, actual):
     firmware=binding.get("firmware",{}); app=firmware.get("app",{}); manifest=firmware.get("manifest",{}); actual_firmware=actual.get("firmware",{})
     expected_fields={"appPath":app.get("path"),"appOffset":app.get("offset"),"appBytes":app.get("bytes"),"appSha256":app.get("sha256"),"partitionBytes":app.get("partitionBytes"),"evidenceManifestPath":manifest.get("path"),"evidenceManifestSha256":manifest.get("sha256")}
     return isinstance(actual_firmware,dict) and all(_exact_equal(actual_firmware.get(k),v) for k,v in expected_fields.items())
-def _validate_candidate_shape(value,reasons):
-    if not isinstance(value,dict) or set(value)!=CANDIDATE_KEYS: reasons.add("candidate.schema"); return
+def _validate_candidate_shape(value,reasons,*,qualification_profile="production"):
+    try: policy = admission_policy(qualification_profile)
+    except ValueError: reasons.add("qualificationProfile"); return
+    keys = CANDIDATE_KEYS | ({"qualificationProfile"} if qualification_profile == "m1-staging" else set())
+    if not isinstance(value,dict) or set(value)!=keys: reasons.add("candidate.schema"); return
+    if value.get("qualificationProfile", "production") != qualification_profile: reasons.add("qualificationProfile")
     if not _exact_equal(value.get("courseId"),COURSE_ID) or not _exact_equal(value.get("courseKey"),COURSE_KEY): reasons.add("candidate.course")
     repos=value.get("repositories")
     if not isinstance(repos,dict) or set(repos)!={"admin","backend","firmware"}: reasons.add("candidate.repositories"); repos={}
     for name,repo in repos.items():
         if not isinstance(repo,dict) or set(repo)!=REPOSITORY_KEYS or not _exact_equal(repo.get("dirtyExceptions"),[]): reasons.add(f"candidate.repositories.{name}")
-    if isinstance(repos.get("firmware"),dict) and not _exact_equal(repos["firmware"].get("sha"),FIRMWARE_SHA): reasons.add("candidate.repositories.firmware")
+    if isinstance(repos.get("firmware"),dict) and not _exact_equal(repos["firmware"].get("sha"),policy["firmwareSha"]): reasons.add("candidate.repositories.firmware")
     images=value.get("images")
     if not isinstance(images,dict) or set(images)!={"backend","web"}: reasons.add("candidate.images"); images={}
     for name,image in images.items():
         repo=repos.get("backend" if name=="backend" else "admin",{})
         labels={"org.opencontainers.image.revision":repo.get("sha"),"org.opencontainers.image.source":repo.get("remoteUrl")}
-        if not isinstance(image,dict) or set(image)!=IMAGE_KEYS or not _exact_equal(image.get("platform"),"linux/arm64") or not _exact_equal(image.get("provenanceLabels"),labels): reasons.add(f"candidate.images.{name}")
-    fw=value.get("firmware"); expected_app={"sha256":APP_SHA256,"bytes":APP_BYTES,"offset":APP_OFFSET,"partitionBytes":PARTITION_BYTES}
+        if not isinstance(image,dict) or set(image)!=IMAGE_KEYS or not _exact_equal(image.get("platform"),"linux/amd64") or not _exact_equal(image.get("provenanceLabels"),labels): reasons.add(f"candidate.images.{name}")
+    fw=value.get("firmware"); expected_app={"sha256":policy["appSha256"],"bytes":policy["appBytes"],"offset":policy["appOffset"],"partitionBytes":policy["partitionBytes"]}
     if not isinstance(fw,dict) or set(fw)!={"board","target","gitSha","app","manifest"}: reasons.add("candidate.firmware"); return
-    if not _exact_equal((fw.get("board"),fw.get("target"),fw.get("gitSha")),(BOARD,TARGET,FIRMWARE_SHA)): reasons.add("candidate.firmware")
+    if not _exact_equal((fw.get("board"),fw.get("target"),fw.get("gitSha")),(BOARD,TARGET,policy["firmwareSha"])): reasons.add("candidate.firmware")
     app=fw.get("app"); manifest=fw.get("manifest")
     if not isinstance(app,dict) or set(app)!={"path",*expected_app} or not Path(str(app.get("path",""))).is_absolute() or any(not _exact_equal(app.get(k),v) for k,v in expected_app.items()): reasons.add("candidate.firmware.app")
-    if not isinstance(manifest,dict) or set(manifest)!={"path","sha256"} or not Path(str(manifest.get("path",""))).is_absolute() or not _exact_equal(manifest.get("sha256"),MANIFEST_SHA256): reasons.add("candidate.firmware.manifest")
+    if not isinstance(manifest,dict) or set(manifest)!={"path","sha256"} or not Path(str(manifest.get("path",""))).is_absolute() or not _exact_equal(manifest.get("sha256"),policy["manifestSha256"]): reasons.add("candidate.firmware.manifest")
 
-def validate_documents(doc,identity,actual,now,devices,holders,inventory_error):
+def validate_documents(doc,identity,actual,now,devices,holders,inventory_error,*,qualification_profile="production"):
     reasons=set()
+    try: policy = admission_policy(qualification_profile)
+    except ValueError: return ["qualificationProfile"]
+    safety_keys = SAFETY_KEYS | ({"preserveInactiveApplication"} if qualification_profile == "m1-staging" else set())
     if not isinstance(doc,dict) or set(doc)!=TOP_KEYS or type(doc.get("schemaVersion")) is not int or doc.get("schemaVersion")!=1: return ["input.schema"]
     if not isinstance(identity,dict) or set(identity)!=IDENTITY_KEYS or type(identity.get("schemaVersion")) is not int or identity.get("schemaVersion")!=1: return ["expectedIdentity.schema"]
     try: valid_uuid=str(uuid.UUID(doc.get("sessionId","")))==doc.get("sessionId")
@@ -315,32 +367,32 @@ def validate_documents(doc,identity,actual,now,devices,holders,inventory_error):
     if checked is None: reasons.add("checkedAt")
     elif checked>now: reasons.add("checkedAt.future")
     elif (now-checked).total_seconds()>CHECK_FRESHNESS_SECONDS: reasons.add("checkedAt.stale")
-    binding=doc.get("candidate"); _validate_candidate_shape(binding,reasons)
+    binding=doc.get("candidate"); _validate_candidate_shape(binding,reasons,qualification_profile=qualification_profile)
     if not _exact_equal(binding,identity.get("candidate")): reasons.add("candidate.identity")
     created=_parse_utc(binding.get("createdAt")) if isinstance(binding,dict) else None; expires=_parse_utc(binding.get("expiresAt")) if isinstance(binding,dict) else None
     if created is None or expires is None or not(created<=now<expires): reasons.add("candidate.time")
     if checked is not None and (created is None or expires is None or not(created<=checked<expires)): reasons.add("checkedAt.candidateInterval")
-    if isinstance(binding,dict) and not _candidate_matches(binding,actual): reasons.add("candidate.reference")
-    if not _exact_equal(identity.get("partitionTable"),EXPECTED_PARTITIONS): reasons.add("expectedIdentity.partitionTable")
+    if isinstance(binding,dict) and not _candidate_matches(binding,actual,qualification_profile=qualification_profile): reasons.add("candidate.reference")
+    if not _exact_equal(identity.get("partitionTable"),policy["partitions"]): reasons.add("expectedIdentity.partitionTable")
     if not _exact_equal(identity.get("signer"),{"algorithm":"ed25519","fingerprint":PINNED_APPROVAL_KEY_FINGERPRINT}): reasons.add("expectedIdentity.signer")
-    expected_robot={"mac":ROBOT_MAC,"board":BOARD,"target":TARGET,"serialPath":SERIAL_PATH,"exactlyOneRobot":True}
+    expected_robot={"mac":ROBOT_MAC,"board":BOARD,"target":TARGET,"serialPath":policy["serialPath"],"exactlyOneRobot":True}
     if not _exact_equal(doc.get("robot"),identity.get("robot")) or not _exact_equal(doc.get("robot"),expected_robot): reasons.add("robot.identity")
-    expected_lease={"soleLeaseConfirmed":True,"competingProcessesStopped":True,"devicePath":SERIAL_PATH,"discoveredDevices":[SERIAL_PATH],"holderPids":[],"inventoryMethod":"lstat-glob-lsof-v1"}
+    expected_lease={"soleLeaseConfirmed":True,"competingProcessesStopped":True,"devicePath":policy["serialPath"],"discoveredDevices":[policy["serialPath"]],"holderPids":[],"inventoryMethod":"lstat-glob-lsof-v1"}
     lease=doc.get("serialLease")
     if not isinstance(lease,dict) or set(lease)!=SERIAL_KEYS or not _exact_equal(lease,expected_lease): reasons.add("serialLease")
     if inventory_error: reasons.add(f"serial.lsof.{inventory_error}")
-    if devices!=[SERIAL_PATH]: reasons.add("serial.inventory")
+    if devices!=[policy["serialPath"]]: reasons.add("serial.inventory")
     if holders: reasons.add("serial.occupied")
-    plan=doc.get("flashPlan"); operation={"operation":"write_flash","offset":APP_OFFSET,"imageSha256":APP_SHA256,"imageBytes":APP_BYTES,"after":"no-reset","eraseChip":False,"mergedImage":False}; protected=[p for p in EXPECTED_PARTITIONS if p["protected"]]
+    plan=doc.get("flashPlan"); operation={"operation":"write_flash","offset":policy["appOffset"],"imageSha256":policy["appSha256"],"imageBytes":policy["appBytes"],"after":"no-reset","eraseChip":False,"mergedImage":False}; protected=[p for p in policy["partitions"] if p["protected"]]
     if not isinstance(plan,dict) or set(plan)!=FLASH_KEYS: reasons.add("flashPlan.keys")
     else:
         if not isinstance(plan.get("operation"),dict) or set(plan["operation"])!=OPERATION_KEYS or not _exact_equal(plan["operation"],operation): reasons.add("flashPlan.operation")
         if not _exact_equal(plan.get("protectedPartitions"),protected): reasons.add("flashPlan.protectedPartitions")
         if plan.get("preserveProtectedPartitions") is not True: reasons.add("flashPlan.preserveProtectedPartitions")
     safety=doc.get("safety")
-    if not isinstance(safety,dict) or set(safety)!=SAFETY_KEYS: reasons.add("safety.keys")
+    if not isinstance(safety,dict) or set(safety)!=safety_keys: reasons.add("safety.keys")
     else:
-        for key in sorted(SAFETY_KEYS):
+        for key in sorted(safety_keys):
             if safety.get(key) is not True: reasons.add(f"safety.{key}")
     return sorted(reasons)
 
@@ -407,59 +459,74 @@ def _publish(path,payload,output_binding,sources,commit_safe):
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
     for flag in ("input","output","expected-identity","expected-identity-signature"): parser.add_argument("--"+flag,required=True,type=Path)
+    parser.add_argument("--profile", choices=("production", "m1-staging"), default="production")
     args=parser.parse_args(argv)
+    def failure(reasons):
+        if args.profile == "production":
+            return _failure(reasons)
+        print(json.dumps({"schemaVersion":1,"validator":VALIDATOR,"status":"fail",
+                          "reasons":sorted(set(reasons)),"physicalActionsPerformed":False,
+                          "serialOpened":False,"qualificationProfile":args.profile},
+                         sort_keys=True,separators=(",",":")))
+    try: policy = admission_policy(args.profile)
+    except ValueError: failure(["qualificationProfile"]); return 1
+    def external_still_bound(actual, binding, now):
+        if args.profile == "production":
+            return _candidate_external_still_bound(actual, binding, now)
+        return _candidate_external_still_bound(actual, binding, now, qualification_profile=args.profile)
     output_binding=_output_absent(args.output) if args.output.is_absolute() else None
-    if output_binding is None: _failure(["output.path"]); return 1
+    if output_binding is None: failure(["output.path"]); return 1
     input_record,error=_secure_read(args.input,MAX_JSON_BYTES)
-    if error or input_record is None: _failure(["input.unreadable"]); return 1
+    if error or input_record is None: failure(["input.unreadable"]); return 1
     raw=input_record[0]
     doc,error=_load_json(raw)
-    if error: _failure([f"input.{error}"]); return 1
+    if error: failure([f"input.{error}"]); return 1
     if not isinstance(doc,dict) or set(doc)!=TOP_KEYS or type(doc.get("schemaVersion")) is not int or doc.get("schemaVersion")!=1:
-        _failure(["input.schema"]); return 1
+        failure(["input.schema"]); return 1
     identity_record,error=_secure_read(args.expected_identity,MAX_JSON_BYTES)
-    if error or identity_record is None: _failure(["expectedIdentity.unreadable"]); return 1
+    if error or identity_record is None: failure(["expectedIdentity.unreadable"]); return 1
     identity_raw=identity_record[0]
     identity,error=_load_json(identity_raw)
-    if error: _failure([f"expectedIdentity.{error}"]); return 1
+    if error: failure([f"expectedIdentity.{error}"]); return 1
     signature_record,error=_secure_read(args.expected_identity_signature,256)
-    if error or signature_record is None or len(signature_record[0])!=64: _failure(["expectedIdentity.signature"]); return 1
+    if error or signature_record is None or len(signature_record[0])!=64: failure(["expectedIdentity.signature"]); return 1
     signature=signature_record[0]
     valid,fingerprint=_verify_signature(_canonical_bytes(identity),signature)
-    if not valid: _failure(["expectedIdentity.signature"]); return 1
+    if not valid: failure(["expectedIdentity.signature"]); return 1
     binding=doc.get("candidate") if isinstance(doc,dict) else None
     candidate_record,error=_secure_read(Path(binding.get("path","")),MAX_JSON_BYTES) if isinstance(binding,dict) else (None,"path")
-    if error or candidate_record is None or hashlib.sha256(candidate_record[0]).hexdigest()!=binding.get("sha256"): _failure(["candidate.input"]); return 1
+    if error or candidate_record is None or hashlib.sha256(candidate_record[0]).hexdigest()!=binding.get("sha256"): failure(["candidate.input"]); return 1
     candidate_raw=candidate_record[0]
     actual,error=_load_json(candidate_raw)
-    if error: _failure(["candidate.input"]); return 1
+    if error: failure(["candidate.input"]); return 1
     descriptor=actual.get("tools",{}).get("physicalAdmission") if isinstance(actual,dict) else None
     expected_paths={"input":args.input,"output":args.output,"expectedIdentity":args.expected_identity,"expectedIdentitySignature":args.expected_identity_signature}
     evidence_root=Path(actual.get("evidenceRoot","")) if isinstance(actual,dict) else Path("")
-    if not isinstance(descriptor,dict) or set(descriptor)!=set(expected_paths) or any(Path(descriptor.get(k,""))!=v for k,v in expected_paths.items()) or not evidence_root.is_absolute() or any(not path.is_relative_to(evidence_root) for path in expected_paths.values()): _failure(["candidate.physicalAdmission"]); return 1
+    if not isinstance(descriptor,dict) or set(descriptor)!=set(expected_paths) or any(Path(descriptor.get(k,""))!=v for k,v in expected_paths.items()) or not evidence_root.is_absolute() or any(not path.is_relative_to(evidence_root) for path in expected_paths.values()): failure(["candidate.physicalAdmission"]); return 1
     verified_audit,audit_reasons=software_snapshot.verify_current_software_audit(Path(binding["path"]),evidence_root,preserved_roots=())
-    if verified_audit is None: _failure(audit_reasons); return 1
+    if verified_audit is None: failure(audit_reasons); return 1
     external_binding=_candidate_external_binding(actual,observe_images=False)
-    if external_binding is None: _failure(["candidate.external"]); return 1
-    now=utc_now(); reasons=[f"candidate.{r}" for r in candidate_manifest.validate_candidate(actual,now=now)]
-    devices,holders,inventory_error=collect_serial_inventory(); reasons.extend(validate_documents(doc,identity,actual,now,devices,holders,inventory_error))
-    if reasons: _failure(reasons); return 1
-    if not _candidate_external_still_bound(actual,external_binding,now): _failure(["candidate.external.changed"]); return 1
+    if external_binding is None: failure(["candidate.external"]); return 1
+    now=utc_now(); reasons=[f"candidate.{r}" for r in _validate_profile_candidate(actual,args.profile,now=now)]
+    devices,holders,inventory_error=_profile_serial_inventory(args.profile); reasons.extend(validate_documents(doc,identity,actual,now,devices,holders,inventory_error,qualification_profile=args.profile))
+    if reasons: failure(reasons); return 1
+    if not external_still_bound(actual,external_binding,now): failure(["candidate.external.changed"]); return 1
     observed_binding=_candidate_external_binding(actual,observe_images=True)
-    if observed_binding is None: _failure(["candidate.external.changed"]); return 1
+    if observed_binding is None: failure(["candidate.external.changed"]); return 1
     external_binding=(external_binding[0],external_binding[1],observed_binding[2],observed_binding[3])
     if not all(_still_bound(record) for record in (input_record,identity_record,signature_record,candidate_record)):
-        _failure(["input.changed"]); return 1
+        failure(["input.changed"]); return 1
     commit_reasons=_commit_time_reasons(doc,utc_now())
-    if commit_reasons: _failure(commit_reasons); return 1
-    final_devices,final_holders,final_inventory_error=collect_serial_inventory()
+    if commit_reasons: failure(commit_reasons); return 1
+    final_devices,final_holders,final_inventory_error=_profile_serial_inventory(args.profile)
     final_inventory_reasons=[]
     if final_inventory_error: final_inventory_reasons.append(f"serial.lsof.{final_inventory_error}")
-    if final_devices!=[SERIAL_PATH]: final_inventory_reasons.append("serial.inventory")
+    if final_devices!=[policy["serialPath"]]: final_inventory_reasons.append("serial.inventory")
     if final_holders: final_inventory_reasons.append("serial.occupied")
-    if final_inventory_reasons: _failure(final_inventory_reasons); return 1
-    if not _candidate_external_still_bound(actual,external_binding,now): _failure(["candidate.external.changed"]); return 1
-    payload={"schemaVersion":1,"validator":VALIDATOR,"status":"pass","reasons":[],"candidateId":binding["candidateId"],"sessionId":doc["sessionId"],"signerFingerprint":fingerprint,"physicalActionsPerformed":False,"serialOpened":False,"inputSha256":hashlib.sha256(raw).hexdigest(),"expectedIdentitySha256":hashlib.sha256(identity_raw).hexdigest(),"candidateSha256":hashlib.sha256(candidate_raw).hexdigest(),"softwareAuditSha256":verified_audit.audit_sha256,"softwareSnapshotId":verified_audit.snapshot_id,"robotMac":ROBOT_MAC,"serialPath":SERIAL_PATH,"firmwareSha":FIRMWARE_SHA,"appSha256":APP_SHA256,"manifestSha256":MANIFEST_SHA256}
+    if final_inventory_reasons: failure(final_inventory_reasons); return 1
+    if not external_still_bound(actual,external_binding,now): failure(["candidate.external.changed"]); return 1
+    payload={"schemaVersion":1,"validator":VALIDATOR,"status":"pass","reasons":[],"candidateId":binding["candidateId"],"sessionId":doc["sessionId"],"signerFingerprint":fingerprint,"physicalActionsPerformed":False,"serialOpened":False,"inputSha256":hashlib.sha256(raw).hexdigest(),"expectedIdentitySha256":hashlib.sha256(identity_raw).hexdigest(),"candidateSha256":hashlib.sha256(candidate_raw).hexdigest(),"softwareAuditSha256":verified_audit.audit_sha256,"softwareSnapshotId":verified_audit.snapshot_id,"robotMac":ROBOT_MAC,"serialPath":policy["serialPath"],"firmwareSha":policy["firmwareSha"],"appSha256":policy["appSha256"],"manifestSha256":policy["manifestSha256"]}
+    if args.profile == "m1-staging": payload["qualificationProfile"] = args.profile
     commit_failure_reasons=[]
     def commit_safe():
         current_audit,current_audit_reasons=software_snapshot.verify_current_software_audit(Path(binding["path"]),evidence_root,preserved_roots=())
@@ -475,10 +542,10 @@ def main(argv=None):
             return False
         return (
             not _commit_time_reasons(doc,utc_now())
-            and _candidate_external_still_bound(actual,external_binding,now)
-            and _serial_inventory_safe()
+            and external_still_bound(actual,external_binding,now)
+            and (_serial_inventory_safe() if args.profile == "production" else _serial_inventory_safe(args.profile))
         )
-    if not _publish(args.output,payload,output_binding,(input_record,identity_record,signature_record,candidate_record),commit_safe): _failure(commit_failure_reasons or ["output.path"]); return 1
+    if not _publish(args.output,payload,output_binding,(input_record,identity_record,signature_record,candidate_record),commit_safe): failure(commit_failure_reasons or ["output.path"]); return 1
     return 0
 def _entrypoint():
     try: return main()

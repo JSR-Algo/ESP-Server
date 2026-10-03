@@ -23,9 +23,9 @@ NOW = datetime(2026, 9, 8, 8, 0, 0, tzinfo=timezone.utc)
 SESSION_ID = "cab43f0d-62dc-49c4-9d30-e9630d195a44"
 COURSE_ID = "a17792f6-8d86-4ad1-a6f3-77663b4d4674"
 COURSE_KEY = "english-6month-4-6"
-APP_SHA = "782020e2f8ac44bd197f57e9e126c196286a8223005de1e425f8290f12b28dff"
-MANIFEST_SHA = "23b70849b6b65901b01b38e91279455a2e5e8d13989438e2e0bbfa707602aa65"
-FIRMWARE_SHA = "b54c6ca33e9beb3747b44feceb7c64fea33fe1d6"
+APP_SHA = "8531432b18eef2d656c5afb2574a2b73c2458679d355d6ebcb47828086b0dc95"
+MANIFEST_SHA = "39d1538b602829d472d017d78950baf46e8035bab1539e4a99871925732e2809"
+FIRMWARE_SHA = "91c86074df5a17d5b684a6c28ea57b727abe3a01"
 SAFETY_KEYS = (
     "adultObserverPresent", "motionAreaClearAndSecured", "immediatePowerIsolationReachable",
     "stablePower", "stableLan", "evidenceCaptureReady", "soleUsbSerialLease",
@@ -131,16 +131,16 @@ def documents(tmp_path, key):
         "firmware": {"path": "/src/firmware", "sha": FIRMWARE_SHA, "branch": "main", "remoteUrl": "git@example/firmware.git", "dirtyExceptions": []},
     }
     images = {
-        "backend": {"reference": "local/tbot-backend:41", "id": "sha256:" + "3" * 64, "platform": "linux/arm64", "provenanceLabels": {"org.opencontainers.image.revision": "2" * 40, "org.opencontainers.image.source": "git@example/backend.git"}},
-        "web": {"reference": "local/tbot-server-web:41", "id": "sha256:" + "4" * 64, "platform": "linux/arm64", "provenanceLabels": {"org.opencontainers.image.revision": "1" * 40, "org.opencontainers.image.source": "git@example/admin.git"}},
+        "backend": {"reference": "local/tbot-backend:41", "id": "sha256:" + "3" * 64, "platform": "linux/amd64", "provenanceLabels": {"org.opencontainers.image.revision": "2" * 40, "org.opencontainers.image.source": "git@example/backend.git"}},
+        "web": {"reference": "local/tbot-server-web:41", "id": "sha256:" + "4" * 64, "platform": "linux/amd64", "provenanceLabels": {"org.opencontainers.image.revision": "1" * 40, "org.opencontainers.image.source": "git@example/admin.git"}},
     }
-    firmware = {"board": "LCDWiki ES3C35P", "target": "esp32s3", "gitSha": FIRMWARE_SHA, "app": {"path": "/opt/tbot/course-mode/app.bin", "sha256": APP_SHA, "bytes": 3637200, "offset": "0x20000", "partitionBytes": 4128768}, "manifest": {"path": "/opt/tbot/course-mode/manifest.json", "sha256": MANIFEST_SHA}}
-    actual = {"candidateId": "course-mode-2026-09-08.41", "createdAt": "2026-09-08T07:00:00Z", "expiresAt": "2026-09-08T09:00:00Z", "course": {"courseId": COURSE_ID, "courseKey": COURSE_KEY}, "repositories": {"adminEsp": repos["admin"], "backend": repos["backend"], "firmware": repos["firmware"]}, "images": {"lessonStudioBackend": {"reference": images["backend"]["reference"], "id": images["backend"]["id"]}, "lessonStudioWeb": {"reference": images["web"]["reference"], "id": images["web"]["id"]}}, "firmware": {"appPath": firmware["app"]["path"], "appOffset": "0x20000", "appBytes": 3637200, "appSha256": APP_SHA, "partitionBytes": 4128768, "evidenceManifestPath": firmware["manifest"]["path"], "evidenceManifestSha256": MANIFEST_SHA}, "tools": {"physicalAdmission": {name: str(path) for name, path in admission_paths.items()}}, "evidenceRoot": str(tmp_path)}
+    firmware = {"board": "LCDWiki ES3C35P", "target": "esp32s3", "gitSha": FIRMWARE_SHA, "app": {"path": "/opt/tbot/course-mode/app.bin", "sha256": APP_SHA, "bytes": 3863248, "offset": "0x20000", "partitionBytes": 4128768}, "manifest": {"path": "/opt/tbot/course-mode/manifest.json", "sha256": MANIFEST_SHA}}
+    actual = {"candidateId": "course-mode-2026-09-08.41", "createdAt": "2026-09-08T07:00:00Z", "expiresAt": "2026-09-08T09:00:00Z", "course": {"courseId": COURSE_ID, "courseKey": COURSE_KEY}, "repositories": {"adminEsp": repos["admin"], "backend": repos["backend"], "firmware": repos["firmware"]}, "images": {"lessonStudioBackend": {"reference": images["backend"]["reference"], "id": images["backend"]["id"]}, "lessonStudioWeb": {"reference": images["web"]["reference"], "id": images["web"]["id"]}}, "firmware": {"appPath": firmware["app"]["path"], "appOffset": "0x20000", "appBytes": 3863248, "appSha256": APP_SHA, "partitionBytes": 4128768, "evidenceManifestPath": firmware["manifest"]["path"], "evidenceManifestSha256": MANIFEST_SHA}, "tools": {"physicalAdmission": {name: str(path) for name, path in admission_paths.items()}}, "evidenceRoot": str(tmp_path)}
     candidate_path.write_bytes(canonical(actual))
     candidate = {"candidateId": actual["candidateId"], "courseId": COURSE_ID, "courseKey": COURSE_KEY, "createdAt": actual["createdAt"], "expiresAt": actual["expiresAt"], "path": str(candidate_path), "sha256": hashlib.sha256(candidate_path.read_bytes()).hexdigest(), "repositories": repos, "images": images, "firmware": firmware}
     robot = {"mac": "14:c1:9f:d1:ac:20", "board": "LCDWiki ES3C35P", "target": "esp32s3", "serialPath": "/dev/cu.usbmodem1101", "exactlyOneRobot": True}
     identity = {"schemaVersion": 1, "sessionId": SESSION_ID, "candidate": candidate, "partitionTable": partitions(), "robot": robot, "signer": {"algorithm": "ed25519", "fingerprint": admission.PINNED_APPROVAL_KEY_FINGERPRINT}}
-    input_doc = {"schemaVersion": 1, "sessionId": SESSION_ID, "checkedAt": "2026-09-08T08:00:00Z", "candidate": deepcopy(candidate), "robot": deepcopy(robot), "serialLease": {"soleLeaseConfirmed": True, "competingProcessesStopped": True, "devicePath": "/dev/cu.usbmodem1101", "discoveredDevices": ["/dev/cu.usbmodem1101"], "holderPids": [], "inventoryMethod": "lstat-glob-lsof-v1"}, "flashPlan": {"operation": {"operation": "write_flash", "offset": "0x20000", "imageSha256": APP_SHA, "imageBytes": 3637200, "after": "no-reset", "eraseChip": False, "mergedImage": False}, "protectedPartitions": [p for p in partitions() if p["protected"]], "preserveProtectedPartitions": True}, "safety": {name: True for name in SAFETY_KEYS}}
+    input_doc = {"schemaVersion": 1, "sessionId": SESSION_ID, "checkedAt": "2026-09-08T08:00:00Z", "candidate": deepcopy(candidate), "robot": deepcopy(robot), "serialLease": {"soleLeaseConfirmed": True, "competingProcessesStopped": True, "devicePath": "/dev/cu.usbmodem1101", "discoveredDevices": ["/dev/cu.usbmodem1101"], "holderPids": [], "inventoryMethod": "lstat-glob-lsof-v1"}, "flashPlan": {"operation": {"operation": "write_flash", "offset": "0x20000", "imageSha256": APP_SHA, "imageBytes": 3863248, "after": "no-reset", "eraseChip": False, "mergedImage": False}, "protectedPartitions": [p for p in partitions() if p["protected"]], "preserveProtectedPartitions": True}, "safety": {name: True for name in SAFETY_KEYS}}
     return input_doc, identity, key.sign(canonical(identity)), actual
 
 
@@ -169,17 +169,17 @@ def valid_files(tmp_path, monkeypatch):
     actual["tools"]["physicalAdmission"] = {"input": str(paths["input"]), "output": str(paths["output"]), "expectedIdentity": str(paths["identity"]), "expectedIdentitySignature": str(paths["signature"])}
     actual["evidenceRoot"] = str(evidence_root)
     firmware = actual["firmware"]
-    firmware.update(appBytes=3637200, appSha256=APP_SHA, partitionBytes=4128768, freeBytes=4128768-3637200, evidenceManifestSha256=MANIFEST_SHA)
+    firmware.update(appBytes=3863248, appSha256=APP_SHA, partitionBytes=4128768, freeBytes=4128768-3863248, evidenceManifestSha256=MANIFEST_SHA)
     repository_binding = {"admin": actual["repositories"]["adminEsp"], "backend": actual["repositories"]["backend"], "firmware": actual["repositories"]["firmware"]}
     image_binding = {
-        "backend": {**actual["images"]["lessonStudioBackend"], "platform": "linux/arm64", "provenanceLabels": {"org.opencontainers.image.revision": repository_binding["backend"]["sha"], "org.opencontainers.image.source": repository_binding["backend"]["remoteUrl"]}},
-        "web": {**actual["images"]["lessonStudioWeb"], "platform": "linux/arm64", "provenanceLabels": {"org.opencontainers.image.revision": repository_binding["admin"]["sha"], "org.opencontainers.image.source": repository_binding["admin"]["remoteUrl"]}},
+        "backend": {**actual["images"]["lessonStudioBackend"], "platform": "linux/amd64", "provenanceLabels": {"org.opencontainers.image.revision": repository_binding["backend"]["sha"], "org.opencontainers.image.source": repository_binding["backend"]["remoteUrl"]}},
+        "web": {**actual["images"]["lessonStudioWeb"], "platform": "linux/amd64", "provenanceLabels": {"org.opencontainers.image.revision": repository_binding["admin"]["sha"], "org.opencontainers.image.source": repository_binding["admin"]["remoteUrl"]}},
     }
     candidate_path = tmp_path / "candidate.json"
     candidate_path.chmod(0o644)
     candidate_path.write_bytes(canonical(actual))
     candidate_path.chmod(0o444)
-    binding = {"candidateId": actual["candidateId"], "courseId": COURSE_ID, "courseKey": COURSE_KEY, "createdAt": actual["createdAt"], "expiresAt": actual["expiresAt"], "path": str(candidate_path), "sha256": hashlib.sha256(candidate_path.read_bytes()).hexdigest(), "repositories": repository_binding, "images": image_binding, "firmware": {"board": "LCDWiki ES3C35P", "target": "esp32s3", "gitSha": FIRMWARE_SHA, "app": {"path": firmware["appPath"], "sha256": APP_SHA, "bytes": 3637200, "offset": "0x20000", "partitionBytes": 4128768}, "manifest": {"path": firmware["evidenceManifestPath"], "sha256": MANIFEST_SHA}}}
+    binding = {"candidateId": actual["candidateId"], "courseId": COURSE_ID, "courseKey": COURSE_KEY, "createdAt": actual["createdAt"], "expiresAt": actual["expiresAt"], "path": str(candidate_path), "sha256": hashlib.sha256(candidate_path.read_bytes()).hexdigest(), "repositories": repository_binding, "images": image_binding, "firmware": {"board": "LCDWiki ES3C35P", "target": "esp32s3", "gitSha": FIRMWARE_SHA, "app": {"path": firmware["appPath"], "sha256": APP_SHA, "bytes": 3863248, "offset": "0x20000", "partitionBytes": 4128768}, "manifest": {"path": firmware["evidenceManifestPath"], "sha256": MANIFEST_SHA}}}
     input_doc["candidate"] = deepcopy(binding)
     identity["candidate"] = deepcopy(binding)
     real_git = admission.candidate_manifest._git
@@ -187,21 +187,21 @@ def valid_files(tmp_path, monkeypatch):
     monkeypatch.setattr(admission.candidate_manifest, "_git", lambda root, *args: FIRMWARE_SHA + "\n" if root == firmware_root and args[-2:] == ("rev-parse", "HEAD") or root == firmware_root and args[-3:] == ("rev-parse", "--verify", "HEAD^{commit}") else real_git(root, *args))
     manifest_content = json.loads(Path(firmware["evidenceManifestPath"]).read_text())
     manifest_content.update(createdAt="2026-09-08T06:00:00Z", sourceCommit=FIRMWARE_SHA)
-    manifest_content["app"].update(bytes=3637200, sha256=APP_SHA, offset="0x20000")
-    manifest_content["partition"].update(bytes=4128768, freeBytes=4128768-3637200, freePercent=round((4128768-3637200)/4128768*100, 6))
+    manifest_content["app"].update(bytes=3863248, sha256=APP_SHA, offset="0x20000")
+    manifest_content["partition"].update(bytes=4128768, freeBytes=4128768-3863248, freePercent=round((4128768-3863248)/4128768*100, 6))
     manifest_bytes = canonical(manifest_content)
     real_descriptor = admission.candidate_manifest.secure_regular_descriptor
     def descriptor(path, limit, **kwargs):
         if path == Path(firmware["evidenceManifestPath"]): return {"sha256": MANIFEST_SHA, "bytes": len(manifest_bytes), "content": manifest_bytes}, None
-        if path == Path(firmware["appPath"]): return {"sha256": APP_SHA, "bytes": 3637200}, None
+        if path == Path(firmware["appPath"]): return {"sha256": APP_SHA, "bytes": 3863248}, None
         return real_descriptor(path, limit, **kwargs)
     monkeypatch.setattr(admission.candidate_manifest, "secure_regular_descriptor", descriptor)
     monkeypatch.setattr(admission.candidate_manifest, "_validate_container_tool", lambda name, value, reasons, verify_identity: Path(value["path"]))
     monkeypatch.setattr(admission.candidate_manifest, "_validate_python_test_runtime", lambda *args, **kwargs: None)
     monkeypatch.setattr(admission.candidate_manifest, "_validate_esp_idf", lambda *args, **kwargs: None)
     docker_images = {
-        actual["images"]["lessonStudioBackend"]["reference"]: {"Id": actual["images"]["lessonStudioBackend"]["id"], "Config": {"Labels": image_binding["backend"]["provenanceLabels"]}},
-        actual["images"]["lessonStudioWeb"]["reference"]: {"Id": actual["images"]["lessonStudioWeb"]["id"], "Config": {"Labels": image_binding["web"]["provenanceLabels"]}},
+        actual["images"]["lessonStudioBackend"]["reference"]: {"Os": "linux", "Architecture": "amd64", "Id": actual["images"]["lessonStudioBackend"]["id"], "Config": {"Labels": image_binding["backend"]["provenanceLabels"]}},
+        actual["images"]["lessonStudioWeb"]["reference"]: {"Os": "linux", "Architecture": "amd64", "Id": actual["images"]["lessonStudioWeb"]["id"], "Config": {"Labels": image_binding["web"]["provenanceLabels"]}},
         actual["database"]["engineImage"]: {"Id": actual["database"]["engineImageId"], "Config": {"Labels": {}}},
     }
     monkeypatch.setattr(admission.candidate_manifest, "_docker_image_descriptor", lambda reference, _executable: docker_images.get(reference))
@@ -225,6 +225,50 @@ def valid_files(tmp_path, monkeypatch):
 
 def run_main(paths):
     return admission.main(["--input", str(paths["input"]), "--output", str(paths["output"]), "--expected-identity", str(paths["identity"]), "--expected-identity-signature", str(paths["signature"])])
+
+
+def test_accepts_reviewed_m0_firmware_and_staging_platform(tmp_path):
+    doc, _, _, _ = documents(tmp_path, Ed25519PrivateKey.generate())
+    binding = doc["candidate"]
+    source = "91c86074df5a17d5b684a6c28ea57b727abe3a01"
+    binding["repositories"]["firmware"]["sha"] = source
+    binding["firmware"]["gitSha"] = source
+    binding["firmware"]["app"].update(
+        sha256="8531432b18eef2d656c5afb2574a2b73c2458679d355d6ebcb47828086b0dc95",
+        bytes=3863248,
+    )
+    binding["firmware"]["manifest"]["sha256"] = "39d1538b602829d472d017d78950baf46e8035bab1539e4a99871925732e2809"
+    for image in binding["images"].values():
+        image["platform"] = "linux/amd64"
+    reasons = set()
+    admission._validate_candidate_shape(binding, reasons)
+    assert reasons == set()
+
+
+@pytest.mark.parametrize("image_name", ["lessonStudioBackend", "lessonStudioWeb"])
+@pytest.mark.parametrize("platform", [
+    {}, {"Os": "linux", "Architecture": "arm64"},
+    {"Os": "windows", "Architecture": "amd64"},
+    {"Os": "linux", "Architecture": None},
+])
+def test_observed_image_platform_must_match_staging(valid_files, monkeypatch, capsys, image_name, platform):
+    _, _, paths, actual = valid_files
+    target = actual["images"][image_name]["reference"]
+    original = admission.candidate_manifest._docker_image_descriptor
+
+    def descriptor(reference, executable):
+        observed = deepcopy(original(reference, executable))
+        if reference == target:
+            observed.pop("Os", None)
+            observed.pop("Architecture", None)
+            observed.update(platform)
+        return observed
+
+    monkeypatch.setattr(admission.candidate_manifest, "_docker_image_descriptor", descriptor)
+    assert admission._candidate_external_binding(actual, observe_images=True) is None
+    assert run_main(paths) == 1
+    assert not paths["output"].exists()
+    assert "candidate.external.changed" in json.loads(capsys.readouterr().out)["reasons"]
 
 
 def rewrite(path, value):
@@ -647,12 +691,17 @@ def test_untrusted_lsof_is_rejected_without_execution(monkeypatch):
 
 
 @pytest.mark.parametrize("mutation,reason", [
-    (lambda c: c["images"]["web"].__setitem__("platform", "linux/amd64"), "candidate.images.web"),
+    (lambda c: c["images"]["web"].__setitem__("platform", "linux/arm64"), "candidate.images.web"),
     (lambda c: c["images"]["backend"]["provenanceLabels"].__setitem__("org.opencontainers.image.source", "wrong"), "candidate.images.backend"),
     (lambda c: c["firmware"].__setitem__("board", "wrong"), "candidate.firmware"),
     (lambda c: c["firmware"].__setitem__("target", "esp32"), "candidate.firmware"),
     (lambda c: c["firmware"]["app"].__setitem__("sha256", "9" * 64), "candidate.firmware.app"),
     (lambda c: c["firmware"]["app"].__setitem__("offset", "0x0"), "candidate.firmware.app"),
+    (lambda c: c["repositories"]["firmware"].__setitem__("sha", "b54c6ca33e9beb3747b44feceb7c64fea33fe1d6"), "candidate.repositories.firmware"),
+    (lambda c: c["firmware"].__setitem__("gitSha", "b54c6ca33e9beb3747b44feceb7c64fea33fe1d6"), "candidate.firmware"),
+    (lambda c: c["firmware"]["app"].__setitem__("sha256", "782020e2f8ac44bd197f57e9e126c196286a8223005de1e425f8290f12b28dff"), "candidate.firmware.app"),
+    (lambda c: c["firmware"]["app"].__setitem__("bytes", 3637200), "candidate.firmware.app"),
+    (lambda c: c["firmware"]["manifest"].__setitem__("sha256", "23b70849b6b65901b01b38e91279455a2e5e8d13989438e2e0bbfa707602aa65"), "candidate.firmware.manifest"),
 ])
 def test_resigned_identity_still_rejects_intrinsically_wrong_facts(valid_files, mutation, reason, capsys):
     input_doc, identity, paths, _ = valid_files
@@ -829,23 +878,24 @@ def test_external_repository_root_replacement_before_publish_leaves_no_result(
     assert json.loads(capsys.readouterr().out)["reasons"] == ["candidate.external.changed"]
 
 
+@pytest.mark.parametrize("field,value", [("Id", "sha256:" + "9" * 64), ("Os", "windows"), ("Architecture", "arm64")])
 def test_external_image_observation_change_before_publish_leaves_no_result(
-    valid_files, monkeypatch, capsys,
+    valid_files, monkeypatch, capsys, field, value,
 ):
     _, _, paths, actual = valid_files
     target = actual["images"]["lessonStudioWeb"]["reference"]
     original = admission.candidate_manifest._docker_image_descriptor
-    changed = False
+    inventory_count = 0
 
     def descriptor(reference, executable):
         observed = original(reference, executable)
-        if changed and reference == target:
-            return {**observed, "Id": "sha256:" + "9" * 64}
+        if inventory_count >= 2 and reference == target:
+            return {**observed, field: value}
         return observed
 
     def inventory():
-        nonlocal changed
-        changed = True
+        nonlocal inventory_count
+        inventory_count += 1
         return [admission.SERIAL_PATH], [], None
 
     monkeypatch.setattr(admission.candidate_manifest, "_docker_image_descriptor", descriptor)
@@ -1071,7 +1121,7 @@ def test_lsof_runner_bounds_both_streams(monkeypatch, program, expected_error, s
         assert returncode == 0 and observed_stderr == stderr
 
 
-@pytest.mark.parametrize("field,value", [("bytes", 3637200.0), ("partitionBytes", 4128768.0)])
+@pytest.mark.parametrize("field,value", [("bytes", 3863248.0), ("partitionBytes", 4128768.0)])
 def test_signed_firmware_integer_fields_reject_equal_floats(valid_files, field, value, capsys):
     input_doc, identity, paths, actual = valid_files
     input_doc["candidate"]["firmware"]["app"][field] = value

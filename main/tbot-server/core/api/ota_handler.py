@@ -215,6 +215,24 @@ class OTAHandler(BaseHandler):
         backend device config or claim routes.
         """
         del local_ip, port
+        # Keep firmware discovery separate from the runtime's internal backend.
+        public_api = os.environ.get("TBOT_PUBLIC_BACKEND_API_URL", "").strip()
+        if public_api:
+            try:
+                parsed = urlsplit(public_api)
+                valid = (
+                    parsed.scheme == "https" and bool(parsed.hostname)
+                    and parsed.username is None and parsed.password is None
+                    and not parsed.query and not parsed.fragment
+                    and (parsed.port is None or parsed.port > 0)
+                    and not any(character.isspace() for character in public_api)
+                    and not is_placeholder_websocket_url(public_api)
+                )
+            except ValueError:
+                valid = False
+            if not valid:
+                raise ValueError("Invalid TBOT_PUBLIC_BACKEND_API_URL")
+            return public_api.rstrip("/")
         server_config = self.config["server"]
         api_config = server_config.get("api_url", "")
 

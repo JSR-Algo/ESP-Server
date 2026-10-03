@@ -3,6 +3,7 @@ import sys
 import asyncio
 import json
 import os
+from unittest.mock import patch
 
 for module_name, required_attr in (
     ("core.auth", "AuthManager"),
@@ -74,6 +75,20 @@ def _handler(websocket, api_url=None):
 
 
 class OTAWebsocketUrlTest(unittest.TestCase):
+    def test_public_backend_override_does_not_replace_internal_runtime_endpoint(self):
+        handler = _full_handler({"api_url": "http://backend:3000/v1"})
+        with patch.dict(os.environ, {"TBOT_PUBLIC_BACKEND_API_URL": "https://m0-api.tjbot.vn/v1/"}):
+            response = asyncio.run(handler.handle_post(_FakeOtaRequest()))
+        self.assertEqual(json.loads(response.text)["api_url"], "https://m0-api.tjbot.vn/v1")
+        self.assertEqual(handler.config["server"]["api_url"], "http://backend:3000/v1")
+
+    def test_invalid_public_backend_override_never_falls_back_to_internal_endpoint(self):
+        handler = _handler("wss://m0-esp.tjbot.vn/tbot/v1/", "http://backend:3000/v1")
+        for invalid in ("http://backend:3000/v1", "not-a-url", "https://user:secret@api.tjbot.vn/v1", "https://api.tjbot.vn/v1?token=x"):
+            with self.subTest(url=invalid), patch.dict(os.environ, {"TBOT_PUBLIC_BACKEND_API_URL": invalid}):
+                with self.assertRaisesRegex(ValueError, "TBOT_PUBLIC_BACKEND_API_URL"):
+                    handler._get_api_url("127.0.0.1", 8003)
+
     def test_chinese_placeholder_falls_back_to_local_websocket_url(self):
         handler = _handler("ws://你的ip或者域名:端口号/tbot/v1/")
 

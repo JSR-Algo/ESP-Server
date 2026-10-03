@@ -212,15 +212,18 @@ def _public_admission_scan_payloads(
         )
         if not signature_valid:
             return None
+        profile = candidate.get("qualificationProfile", "production")
+        policy = admission.admission_policy(profile)
         checked_at = admission._parse_utc(input_document.get("checkedAt"))
         if checked_at is None or admission.validate_documents(
             input_document,
             identity,
             candidate,
             checked_at,
-            [admission.SERIAL_PATH],
+            [policy["serialPath"]],
             [],
             None,
+            **({"qualification_profile": profile} if profile != "production" else {}),
         ):
             return None
         return PublicAdmissionScan(
@@ -324,10 +327,17 @@ def _output_path_secure(output: Path) -> bool:
     )
 
 
-def _lane_report(document: object, candidate_id: object, lanes: list[str], attestation_sha: str | None) -> bool:
+def _lane_report(document: object, candidate_id: object, lanes: list[str], attestation_sha: str | None,
+                 qualification_profile: str = "production") -> bool:
     if not isinstance(document, dict):
         return False
+    if qualification_profile not in ("production", "m1-staging"):
+        return False
     expected = {"candidateId", "failedLane", "lanes", "verdict"}
+    if qualification_profile == "m1-staging":
+        expected.add("qualificationProfile")
+        if document.get("qualificationProfile") != qualification_profile:
+            return False
     if attestation_sha is not None:
         expected.add("operatorAttestationSha256")
     if set(document) != expected:
@@ -547,12 +557,15 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
     )
     if not attestation_ok:
         findings.add("evidence.attestation")
+    profile = candidate.get("qualificationProfile", "production") if isinstance(candidate, dict) else "production"
+    runtime_attestation_sha = attestation_sha if profile == "m1-staging" else None
     runtime_ok = (
         _lane_report(
             documents["02-runtime-assignment-new-rollback.json"],
             candidate_id,
             ["admin-course-mode-assignment-new", "admin-course-mode-assignment-rollback"],
-            None,
+            runtime_attestation_sha,
+            profile,
         )
         and _lane_report(
             documents["02-runtime-browser-after-assignment.json"],
@@ -561,25 +574,28 @@ def audit(candidate_path: Path, evidence_root: Path, preserved_roots: list[Path]
                 "admin-course-mode-playwright-chromium-desktop",
                 "admin-course-mode-playwright-webkit-desktop",
             ],
-            None,
+            runtime_attestation_sha,
+            profile,
         )
     )
     continuity = documents["02-runtime-continuity-inspection.json"]
+    # M1 splits the firmware mount into four to retain bundled browser media.
+    expected_mount_count = 7 if profile == "m1-staging" else 4
     continuity_ok = (
         isinstance(continuity, dict)
         and continuity.get("status") == "pass"
         and continuity.get("assignmentFlags") == {"new": False, "rollback": False}
-        and continuity.get("mountCount") == 4
+        and continuity.get("mountCount") == expected_mount_count
         and continuity.get("allMountsCanonical") is True
         and continuity.get("allMountsExist") is True
         and continuity.get("allMountsReadOnly") is True
         and continuity.get("imagesMatchCandidate") is True
         and continuity.get("manualRecreateAfterRollback") is False
     )
-    quick_ok = _lane_report(documents["03-quick-gate.json"], candidate_id, QUICK_LANES, attestation_sha)
-    full_ok = _lane_report(documents["04-full-gate.json"], candidate_id, FULL_LANES, attestation_sha)
+    quick_ok = _lane_report(documents["03-quick-gate.json"], candidate_id, QUICK_LANES, attestation_sha, profile)
+    full_ok = _lane_report(documents["04-full-gate.json"], candidate_id, FULL_LANES, attestation_sha, profile)
     live_ok = _lane_report(
-        documents["05-live-db-gate.json"], candidate_id, FULL_LANES + ["live-postgres"], attestation_sha
+        documents["05-live-db-gate.json"], candidate_id, FULL_LANES + ["live-postgres"], attestation_sha, profile
     )
     for ok, code in (
         (runtime_ok, "evidence.runtime"),
