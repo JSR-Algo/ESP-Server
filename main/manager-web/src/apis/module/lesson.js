@@ -614,8 +614,8 @@ export default {
     const data = {
       prompt: input.prompt,
       subject: input.subject,
-      helperText: input.helperText || undefined,
-      l1TransferHint: input.l1TransferHint || undefined,
+      helperText: input.helperText,
+      l1TransferHint: input.l1TransferHint,
       choices: input.choices || undefined,
       stepBody: input.stepBody || {},
       visualRefs: Array.isArray(input.visualRefs) ? input.visualRefs : undefined,

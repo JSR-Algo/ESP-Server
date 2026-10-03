@@ -134,6 +134,7 @@ context.lesson = {
   courseModeContract: { version: 2 },
 };
 context.canCreateCourseModeV5Version = true;
+context.$route.query.lessonId = context.lesson.lessonId;
 createCourseModeV5Version.call(context);
 if (JSON.stringify(calls[4].data) !== JSON.stringify({ rendererVersion: 'teebot-lesson-renderer.v5' })) {
   throw new Error(`the distinct Course Mode v5 action must send the exact renderer request, got ${JSON.stringify(calls[4].data)}`);

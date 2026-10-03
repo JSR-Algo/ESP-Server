@@ -6,7 +6,7 @@
     </div>
 
     <div class="readiness__grid">
-      <div v-for="row in budgetRows" :key="row.key" :class="{ 'is-failing': !row.pass }">
+      <div v-for="row in budgetRows" :key="row.key" :class="{ 'is-failing': row.pass === false }">
         <span>{{ row.label }}</span><strong>{{ row.value }}</strong>
       </div>
     </div>
@@ -22,10 +22,10 @@
     <div class="validation-result" data-testid="validation-result">
       <div class="validation-result__head">
         <strong>{{ $t('lesson.serverValidation') }}</strong>
-        <el-tag v-if="validationResult" :type="validationReady ? 'success' : 'danger'" size="mini">
+        <el-tag v-if="validationResult && validationCurrent" :type="validationReady ? 'success' : 'danger'" size="mini">
           {{ validationReady ? $t('lesson.statusPass') : $t('lesson.statusFail') }}
         </el-tag>
-        <el-tag v-else type="info" size="mini">{{ $t('lesson.validationMissing') }}</el-tag>
+        <el-tag v-else-if="!validationResult" type="info" size="mini">{{ $t('lesson.validationMissing') }}</el-tag>
         <el-tag v-if="validationResult && !validationCurrent" type="warning" size="mini">{{ $t('lesson.proofStale') }}</el-tag>
       </div>
       <template v-if="validationResult">
@@ -96,12 +96,21 @@ export default {
       );
     },
     budgetRows() {
+      const proofKnown = Boolean(this.validationResult && this.validationCurrent && !this.metrics.estimateOnly);
+      const proofRow = (key, label, passed) => ({
+        key,
+        label: this.$t(label),
+        value: this.$t(proofKnown
+          ? (passed ? 'lesson.statusPass' : 'lesson.statusFail')
+          : (this.validationResult && !this.validationCurrent ? 'lesson.proofStale' : 'lesson.validationMissing')),
+        pass: proofKnown ? passed : null,
+      });
       return [
         { key: 'download', label: this.$t('lesson.budgetDownload'), value: this.formatBytes(this.metrics.downloadBytes), pass: Number.isFinite(Number(this.metrics.downloadBytes)) },
         { key: 'assets', label: this.$t('lesson.budgetAssets'), value: `${this.metrics.uniqueAssetCount} / ${this.metrics.sharedReferenceCount}`, pass: true },
         { key: 'psram', label: this.$t('lesson.budgetPsram'), value: `${this.formatBytes(this.metrics.estimatedPeakPsram)}${this.metrics.estimateOnly ? ' (est.)' : ''}`, pass: this.metrics.estimatedPeakPsram <= 1572864 },
-        { key: 'offline', label: this.$t('lesson.budgetOffline'), value: this.metrics.offlineReady ? this.$t('lesson.statusPass') : this.$t('lesson.statusFail'), pass: this.metrics.offlineReady },
-        { key: 'paths', label: this.$t('lesson.budgetPaths'), value: this.metrics.allPathsTerminate ? this.$t('lesson.statusPass') : this.$t('lesson.statusFail'), pass: this.metrics.allPathsTerminate },
+        proofRow('offline', 'lesson.budgetOffline', this.metrics.offlineReady),
+        proofRow('paths', 'lesson.budgetPaths', this.metrics.allPathsTerminate),
       ];
     },
     budgetsReady() {
@@ -120,8 +129,7 @@ export default {
       ];
     },
     ready() {
-      if (this.validationResult) return this.validationReady && this.budgetsReady;
-      return !this.metrics.estimateOnly && this.metrics.errors.length === 0 && this.metrics.offlineReady && this.metrics.allPathsTerminate && this.metrics.estimatedPeakPsram <= 1572864;
+      return this.validationReady && this.budgetsReady;
     },
   },
   watch: {

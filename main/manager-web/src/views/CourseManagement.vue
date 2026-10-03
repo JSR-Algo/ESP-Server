@@ -11,7 +11,6 @@
         </el-radio-group>
       </div>
       <div class="right-operations">
-        <span class="backend-hint">{{ $t('course.backendHint') }}</span>
         <el-button size="small" @click="$router.push('/lesson-monitoring')">
           {{ $t('lesson.monitor') }}
         </el-button>
@@ -591,6 +590,7 @@ export default {
       });
     },
     openClone(row) {
+      this.cloning = false;
       this.cloneNotice = ''; this.cloneErrors = {}; this.cloneFoundCourse = null;
       this.cloneSource = { ...row };
       this.cloneForm = {
@@ -614,7 +614,7 @@ export default {
       };
       const finish = () => {
         this.actionPending = { ...this.actionPending, [action]: false };
-        if (form) this[clone ? 'cloning' : 'saving'] = false;
+        if (form && current()) this[clone ? 'cloning' : 'saving'] = false;
       };
       this.actionPending = { ...this.actionPending, [action]: true };
       if (form) this[clone ? 'cloning' : 'saving'] = true;
@@ -692,12 +692,14 @@ export default {
     openCreate() {
       this.formErrors = {}; this.formNotice = ''; this.foundCourse = null;
       this.editing = false;
+      this.saving = false;
       this.form = blankCourseForm();
       this.dialogVisible = true;
     },
     openEdit(row) {
       this.formErrors = {}; this.formNotice = ''; this.foundCourse = null;
       this.editing = true;
+      this.saving = false;
       this.form = {
         courseId: row.courseId,
         courseKey: row.courseKey,
@@ -734,7 +736,7 @@ export default {
       const action = 'delete:' + id;
       if (this.actionPending[action]) return;
       this.actionPending = { ...this.actionPending, [action]: true };
-      this.$confirm(this.$t('course.deleteConfirm', { key }), this.$t('course.delete'), { type: 'warning' })
+      this.$confirm(this.$t('course.deleteConfirm', { key }), this.$t('course.delete'), { type: 'warning', customClass: 'course-delete-confirm' })
         .then(() => {
           this.actionPending = { ...this.actionPending, [action]: false };
           this.runCourseMutation({ action, target: { courseId: id },

@@ -90,7 +90,14 @@ test('admin creates and persists an eight-minute safe-speaking lesson draft', as
   await assertNoUnexpectedPageErrors.waitForSettledRequests();
   // Fonts are outside the API/image journal and must finish before reload too.
   await page.evaluate(() => document.fonts.ready.then(() => undefined));
+  const lessonId = new URLSearchParams(page.url().split('?')[1]).get('lessonId');
+  const reloadedPreview = page.waitForResponse(response =>
+    new URL(response.url()).pathname === `/nestjs/v1/admin/lessons/${lessonId}/manifest-preview`
+      && response.request().method() === 'GET');
   await page.reload();
+  // Automatic preview temporarily disables proof actions after the editor loads.
+  expect(await (await reloadedPreview).finished()).toBeNull();
+  await assertNoUnexpectedPageErrors.waitForSettledRequests();
 
   await expect(eightMinutes.locator('input[type="radio"]')).toBeChecked();
   const authoredValues = await page.locator('input, textarea').evaluateAll((elements) =>
@@ -107,8 +114,8 @@ test('admin creates and persists an eight-minute safe-speaking lesson draft', as
     response.url().includes('/nestjs/v1/admin/lessons/')
       && response.url().endsWith('/validate')
       && response.request().method() === 'POST');
-  const lessonId = new URLSearchParams(page.url().split('?')[1]).get('lessonId');
   assertNoUnexpectedPageErrors.expectFault('POST', `/nestjs/v1/admin/lessons/${lessonId}/validate`, 422, 'draft has no asset bundle');
+  await expect(page.getByRole('button', { name: 'Validate' })).toBeEnabled();
   await page.getByRole('button', { name: 'Validate' }).click();
   const validationResponse = await validateLesson;
   expect(validationResponse.status()).toBe(422);

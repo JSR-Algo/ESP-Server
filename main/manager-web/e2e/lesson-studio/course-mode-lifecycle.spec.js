@@ -261,8 +261,17 @@ test('published browsing exposes the existing draft without another version muta
   const row = page.locator('.el-table__body-wrapper .el-table__row').filter({ hasText: fixture.lesson.lesson_key || fixture.lesson.lessonKey });
   await expect(row).toHaveCount(1);
   await expect(row).toContainText('published');
-  await row.getByTestId('edit-existing-draft').click();
+  await page.locator('.el-table__fixed-right tbody tr')
+    .filter({ hasText: fixture.lesson.lesson_key || fixture.lesson.lessonKey }).getByTestId('edit-existing-draft').click();
   await expect(page).toHaveURL(new RegExp(`lessonId=${draft.id}`));
+  await page.reload();
+  await expect(page.getByRole('heading', { name: draft.title, exact: true })).toBeVisible();
+  await page.getByTestId('lesson-return-course').click();
+  await expect(page).toHaveURL(new RegExp(`course-lessons\\?courseId=${fixture.course.id}`));
+  await expect(page.getByRole('heading', { name: new RegExp(fixture.course.title) })).toBeVisible();
+  await page.goBack();
+  await expect(page).toHaveURL(new RegExp(`lessonId=${draft.id}`));
+  await expect(page.getByRole('heading', { name: draft.title, exact: true })).toBeVisible();
   expect(nextVersionWrites).toBe(0);
   expect((await adminApi(page, 'GET', `/lessons/${fixture.lesson.id}`)).status).toBe('published');
   expect((await adminApi(page, 'GET', `/lessons/${draft.id}`)).status).toBe('draft');

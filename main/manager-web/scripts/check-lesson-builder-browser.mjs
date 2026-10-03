@@ -41,6 +41,10 @@ try {
   await cdp('Page.enable'); await cdp('Runtime.enable'); await cdp('Page.navigate', { url: `http://127.0.0.1:${server.address().port}/` });
   const editorReady = 'Boolean(window.__LESSON_BUILDER_READY__) && document.querySelectorAll(".step-nav__item").length >= 2 && [...document.querySelectorAll(".right-operations button")].some((button)=>button.textContent.includes("Preview"))';
   await waitForReadiness(editorReady, 'lesson builder fixture readiness', 'JSON.stringify({ signaled: Boolean(window.__LESSON_BUILDER_READY__), lessonId: window.__LESSON_BUILDER_TEST__?.editor?.lessonId, bodyText: document.body.innerText.slice(0, 500) })');
+  const initialProof = await evaluate(`(()=>{const e=window.__LESSON_BUILDER_TEST__.editor; const r=e.$children.find(c=>c.$options.name==='LessonPublishReadiness'); return {ready:r.ready, rows:r.budgetRows.filter(row=>['offline','paths'].includes(row.key)).map(row=>({pass:row.pass,value:row.value})), failing:r.$el.querySelectorAll('.readiness__grid .is-failing').length}})()`);
+  assert.equal(initialProof.ready, false);
+  assert.ok(initialProof.rows.every(row=>row.pass===null), 'unvalidated proof must remain unknown');
+  assert.equal(initialProof.failing, 0, 'missing validation is not a failed check');
   const initialLayoutAudits = [];
   for (const width of [1440, 1024, 768, 390]) {
     initialLayoutAudits.push(await auditLayoutAt(width));
@@ -68,21 +72,28 @@ try {
   assert.equal(pickerLoadingBoundary.staleLessonPickers, 0, 'a retained previous-route lesson must not mount legacy media pickers');
   assert.ok(pickerLoadingBoundary.nonCourseV5Pickers > 0, 'resolved non-Course v5 retains legacy authoring');
   assert.ok(pickerLoadingBoundary.legacyPickers > 0, 'current legacy lessons retain their pickers');
+  await evaluate(`document.querySelectorAll('.step-nav__item')[1].click()`);
+  await waitForReadiness('window.__LESSON_BUILDER_TEST__.editor.selectedStepIndex === 1', 'second lesson step selection');
+  const committedPickerMedia = {};
+  for (const [slot, kind, expectedPath, resultKey] of [
+    ['backgroundScene', 'img', '/tvideo-demo/assets/t54-layered/background-farm.jpg', 'background'],
+    ['teachingObject', 'img', '/tvideo-demo/assets/objects/barn.png', 'teaching'],
+  ]) {
+    const selector = `[data-slot="${slot}"]`;
+    await evaluate(`(()=>{const picker=document.querySelector(${JSON.stringify(selector)});picker.scrollIntoView({block:'center',inline:'nearest'});picker.querySelector('.asset-picker__grid').scrollLeft=0})()`);
+    const mediaPredicate = `(()=>{const media=[...document.querySelectorAll(${JSON.stringify(selector + ' ' + kind)})];return media.length===2&&media.every(element=>String(element.getAttribute('src')||'').endsWith(${JSON.stringify(expectedPath)})${kind === 'video' ? "&&element.muted&&element.hasAttribute('playsinline')&&element.getAttribute('preload')==='metadata'" : ''})})()`;
+    await waitForReadiness(mediaPredicate, `visible ${slot} committed picker media`,
+      `JSON.stringify([...document.querySelectorAll(${JSON.stringify(selector + ' .asset-tile')})].map(tile=>({rect:tile.getBoundingClientRect().toJSON(),media:[...tile.querySelectorAll('video,img')].map(element=>({tag:element.tagName,src:element.getAttribute('src')}))})))`);
+    committedPickerMedia[resultKey] = await evaluate(mediaPredicate);
+  }
+  committedPickerMedia.robot = await evaluate(`(()=>{const assets=window.__LESSON_BUILDER_TEST__.editor.cinematicLibraries.robotOverlay;return assets.length===2&&assets.every(asset=>asset.mimeType==='image/png'&&String(asset.url||'').endsWith('/tvideo-demo/assets/robot-alive/poses/alive-teach.png'))})()`);
   const result = await evaluate(`(async()=>{
     const t=window.__LESSON_BUILDER_TEST__,e=t.editor, tick=()=>new Promise(r=>setTimeout(r,0)),waitFor=async(test)=>{for(let i=0;i<50&&!test();i+=1)await tick();if(!test())throw new Error('browser fixture condition timed out')};
     const setInput=(input,value)=>{input.value=value;input.dispatchEvent(new Event('input',{bubbles:true}))};
     const testInput=(id)=>{const root=document.querySelector('[data-testid="'+id+'"]')||document.getElementById(id);return root&&root.matches('input,textarea')?root:root?.querySelector('input,textarea')};
     const formItem=(label)=>[...document.querySelectorAll('.interaction-panel .el-form-item')].find(x=>x.querySelector('.el-form-item__label')?.textContent.trim()===label);
     const choose=async(label,text)=>{const item=formItem(label);if(!item)throw new Error('missing form item '+label);item.querySelector('.el-select input').click();await tick();const options=[...document.querySelectorAll('body .el-select-dropdown__item')].filter(x=>x.textContent.trim()===text);const option=options.at(-1);if(!option)throw new Error('missing option '+label+':'+text);option.click();await tick()};
-    document.querySelectorAll('.step-nav__item')[1].click();await tick();
     const selectedVersionsBefore=Object.fromEntries(['backgroundScene','teachingObject','robotOverlay'].map(slot=>[slot,e.selectedVisualVersionId(slot)]));
-    const backgroundVideos=[...document.querySelectorAll('[data-slot="backgroundScene"] video')];
-    const teachingImages=[...document.querySelectorAll('[data-slot="teachingObject"] img')];
-    const committedPickerMedia={
-      background:backgroundVideos.length===2&&backgroundVideos.every(video=>video.muted&&video.hasAttribute('playsinline')&&video.getAttribute('preload')==='metadata'&&String(video.getAttribute('src')||'').endsWith('/tvideo-demo/assets/scenes/deep-barn-farm-background-6s.mp4')),
-      teaching:teachingImages.length===2&&teachingImages.every(image=>String(image.getAttribute('src')||'').endsWith('/tvideo-demo/assets/objects/barn.png')),
-      robot:e.cinematicLibraries.robotOverlay.length===2&&e.cinematicLibraries.robotOverlay.every(asset=>asset.mimeType==='video/webm'&&String(asset.url||'').endsWith('/tvideo-demo/assets/robot-alive/flight/greet-loop.webm')),
-    };
     e.$set(e.cinematicLibraryLoading,'backgroundScene',true);await tick();const loadingVisible=Boolean(document.querySelector('[data-slot="backgroundScene"] .asset-picker__loading'));e.$set(e.cinematicLibraryLoading,'backgroundScene',false);await tick();
     e.$set(e.cinematicLibraryErrors,'robotOverlay','robot library unavailable');await tick();const errorVisible=document.querySelector('[data-slot="robotOverlay"] .asset-picker__error')?.textContent.includes('robot library unavailable');e.$set(e.cinematicLibraryErrors,'robotOverlay','');await tick();
     const teachingAssets=e.rawCinematicLibraries.teachingObject;e.$set(e.rawCinematicLibraries,'teachingObject',[]);await tick();const emptyVisible=Boolean(document.querySelector('[data-slot="teachingObject"] .asset-picker__empty'));e.$set(e.rawCinematicLibraries,'teachingObject',teachingAssets);await tick();
@@ -150,11 +161,11 @@ try {
     e.validationResult={budgets:{espTft:{errors:[{code:'branch-termination',message:'Step s2 has a non-terminating branch',stepKey:'s2'}],warnings:[{code:'background-budget',message:'Background exceeds recommendation',assetKey:'scene.farm'}],metrics:t.validation.budgets.espTft.metrics}}};await tick();
     const readinessText=document.querySelector('.readiness').textContent;
     const validationIssuesRendered=readinessText.includes('branch-termination')&&readinessText.includes('Step s2 has a non-terminating branch')&&readinessText.includes('background-budget')&&readinessText.includes('scene.farm');
-    return{selected:e.selectedStepIndex,filters:t.calls.visualFilters,patch:t.calls.update[0],failedPatch:t.calls.update[1],updateCount:t.calls.update.length,metrics:t.validation.budgets.espTft.metrics,preview:[preview.stepIndex,preview.manifest.manifestVersion,preview.manifest.profile,preview.initialPath,e.previewPath.path,preview.rendererMetadata.features.lessonRendererV2.physicalMotionOwner],cinematicVisible,exactVisible,rendererContractVisible,capabilityVisible,truthfulExactLabel,openingGeometryVisible,stateControls,stateMotionClasses,degradedControls,readyBeforeEdit,staleAfterEdit,staleAfterFailure,selectedAfterReload,selectedTilePersisted,errors:t.calls.errors,previewClearedOnEdit,deferredValidationIgnored,newerDraftDirty,newerDraftWord,validateBeforeSaveIgnored,validationIssuesRendered,selectedVersionsBefore,committedPickerMedia,loadingVisible,errorVisible,emptyVisible,lessonVisualSets,robotRefSets,hydratedVersions,selectedVersionTiles,publishedImmutable,warnings:t.calls.warnings}
+    return{selected:e.selectedStepIndex,filters:t.calls.visualFilters,patch:t.calls.update[0],failedPatch:t.calls.update[1],updateCount:t.calls.update.length,metrics:t.validation.budgets.espTft.metrics,preview:[preview.stepIndex,preview.manifest.manifestVersion,preview.manifest.profile,preview.initialPath,e.previewPath.path,preview.rendererMetadata.features.lessonRendererV2.physicalMotionOwner],cinematicVisible,exactVisible,rendererContractVisible,capabilityVisible,truthfulExactLabel,openingGeometryVisible,stateControls,stateMotionClasses,degradedControls,readyBeforeEdit,staleAfterEdit,staleAfterFailure,selectedAfterReload,selectedTilePersisted,errors:t.calls.errors,previewClearedOnEdit,deferredValidationIgnored,newerDraftDirty,newerDraftWord,validateBeforeSaveIgnored,validationIssuesRendered,selectedVersionsBefore,loadingVisible,errorVisible,emptyVisible,lessonVisualSets,robotRefSets,hydratedVersions,selectedVersionTiles,publishedImmutable,warnings:t.calls.warnings}
   })()`);
   assert.equal(result.selected, 1); assert.deepEqual(result.filters, [{ category: 'scene', profile: 'espTft' }, { category: 'teachingObject', profile: 'espTft' }, { category: 'robotPose', profile: 'espTft' }]);
   assert.deepEqual(result.selectedVersionsBefore, { backgroundScene: 'scene-v3', teachingObject: 'teach-v2', robotOverlay: 'robot-v4' });
-  assert.deepEqual(result.committedPickerMedia, { background: true, teaching: true, robot: true }); assert.equal(result.loadingVisible, true); assert.equal(result.errorVisible, true); assert.equal(result.emptyVisible, true);
+  assert.deepEqual(committedPickerMedia, { background: true, teaching: true, robot: true }); assert.equal(result.loadingVisible, true); assert.equal(result.errorVisible, true); assert.equal(result.emptyVisible, true);
   assert.deepEqual(result.lessonVisualSets, [
     { lessonId: 'lesson-1', payload: { backgroundAssetVersionId: 'scene-v4', objectAssetVersionId: 'teach-v2' } },
     { lessonId: 'lesson-1', payload: { backgroundAssetVersionId: 'scene-v4', objectAssetVersionId: 'teach-v3' } },

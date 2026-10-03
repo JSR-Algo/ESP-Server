@@ -282,6 +282,7 @@ export default {
       learnersSequence: 0,
       previewSequence: 0,
       saveSequence: 0,
+      selectionSequence: 0,
       qualitySequence: 0,
       learnersFailed: false,
       previewFailed: false,
@@ -427,6 +428,7 @@ export default {
     },
     selectLearner(row) {
       if (!row || row.childId === this.selectedLearner.childId) return;
+      this.selectionSequence++;
       this.previewSequence++;
       this.previewLessons = [];
       this.selectedLearner = row;
@@ -448,6 +450,7 @@ export default {
     savePersonality() {
       if (!this.selectedLearner.childId || this.savingPersonality || this.requestsDisposed) return;
       const sequence = ++this.saveSequence;
+      const selectionSequence = this.selectionSequence;
       const childId = this.selectedLearner.childId;
       const childName = this.selectedLearner.childName || childId;
       this.savingPersonality = true;
@@ -466,7 +469,7 @@ export default {
           // A completed write belongs to its submitted child, not the current selection.
           this.learners = this.learners.map((row) => row.childId === childId ? learner : row);
           this.$message.success(`${this.$t('insights.personalitySaved')}: ${childName}`);
-          if (this.selectedLearner.childId === childId) {
+          if (selectionSequence === this.selectionSequence && this.selectedLearner.childId === childId) {
             this.selectedLearner = learner;
             this.fetchPreview();
           }
@@ -474,7 +477,7 @@ export default {
         (msg) => {
           if (this.requestsDisposed || sequence !== this.saveSequence) return;
           this.savingPersonality = false;
-          if (this.selectedLearner.childId !== childId) return;
+          if (selectionSequence !== this.selectionSequence || this.selectedLearner.childId !== childId) return;
           this.$message.error(msg || this.$t('insights.saveFail'));
         },
       );

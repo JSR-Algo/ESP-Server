@@ -112,3 +112,62 @@ test('pending A metadata mutation cannot leave B creation locked or change B for
   c.createLesson[0].ok(lesson('late-A', 1, 'draft')); assert.equal(s.form.title, 'B'); assert.equal(s.dialogVisible, true);
   assert.equal(s.saving, true); s.submit(); assert.equal(c.createLesson.length, 2);
 });
+
+test('assignment monitor link preserves the original child device and version during reconciliation', () => {
+  const { s, c, pushes } = setup(); const row = lesson('published', 3); s.openAssignmentDialog(row);
+  s.assignmentDialog.childId = 'child-A'; s.createLessonAssignment({ deviceId: 'device-A', availability: 'available' });
+  c.createAssignment[0].fail('timeout', { status: 0 });
+  s.openMonitoring(row);
+  assert.deepEqual(pushes[0].query, { lessonId: 'published', lessonVersion: '3', courseId: A, lesson: 'Version 3', childId: 'child-A', deviceId: 'device-A' });
+  assert.deepEqual(c.eligibleDevices[0].args[0], { childId: 'child-A', lessonId: 'same-key', lessonVersion: 3 });
+  assert.equal(c.createAssignment.length, 1);
+});
+test('busy devices never dispatch assignment writes', () => {
+  const { s, c } = setup(); s.openAssignmentDialog(lesson('published', 1)); s.assignmentDialog.childId = 'child';
+  s.createLessonAssignment({ deviceId: 'busy-device', availability: 'busy' }); assert.equal(c.createAssignment, undefined);
+});
+test('lost response reconciles same target without replaying the assignment POST', () => {
+  const { s, c } = setup(); s.openAssignmentDialog(lesson('published', 3)); s.assignmentDialog.childId = 'child';
+  s.createLessonAssignment({ deviceId: 'device', availability: 'available' }); c.createAssignment[0].fail('timeout', { status: 0 });
+  assert.equal(s.assignmentDialog.submitting, true);
+  s.createLessonAssignment({ deviceId: 'device', availability: 'available' }); assert.equal(c.createAssignment.length, 1);
+  assert.deepEqual(c.eligibleDevices[0].args[0], { childId: 'child', lessonId: 'same-key', lessonVersion: 3 });
+  c.eligibleDevices[0].ok([{ deviceId: 'device', availability: 'already_assigned' }]);
+  assert.equal(s.assignmentDialog.submitting, false); assert.equal(s.assignmentDialog.statusMessage, 'lesson.assignAlreadySuccess');
+});
+test('active assignment conflict refreshes authoritative eligibility and releases lock after readback', () => {
+  const { s, c } = setup(); s.openAssignmentDialog(lesson('published', 3)); s.assignmentDialog.childId = 'child';
+  s.createLessonAssignment({ deviceId: 'device', availability: 'available' });
+  c.createAssignment[0].fail('Busy', { status: 409, data: { code: 'ASSIGNMENT_CONFLICT' } });
+  assert.equal(s.assignmentDialog.submitting, true); assert.equal(s.assignmentDialog.statusMessage, 'lesson.assignConflict');
+  c.eligibleDevices[0].ok([{ deviceId: 'device', availability: 'busy', currentAssignment: { state: 'RUNNING' } }]);
+  assert.equal(s.assignmentDialog.submitting, false); assert.equal(s.assignmentDialog.devices[0].availability, 'busy'); assert.equal(c.createAssignment.length, 1);
+});
+for (const state of ['COMPLETED', 'CANCELLED', 'FAILED']) test('terminal ' + state + ' response never announces a reusable active assignment', () => {
+  const { s, c } = setup(); s.openAssignmentDialog(lesson('published', 3)); s.assignmentDialog.childId = 'child';
+  s.createLessonAssignment({ deviceId: 'device', availability: 'available' });
+  c.createAssignment[0].ok({ created: false, assignment: { deviceId: 'device', childId: 'child', lessonId: 'same-key', lessonVersion: 3, profile: 'espTft', state } });
+  assert.equal(s.assignmentDialog.statusMessage, 'lesson.assignUncertainRetry'); assert.equal(c.eligibleDevices.length, 1); assert.equal(c.createAssignment.length, 1);
+});
+test('missing published media eligibility leaves no assignable device and does not create', () => {
+  const { s, c } = setup(); s.openAssignmentDialog(lesson('published', 3)); s.assignmentDialog.childId = 'child';
+  s.refreshAssignmentEligibility(); c.eligibleDevices[0].fail('Published espTft-assignable lesson not found', { status: 422 });
+  assert.deepEqual(s.assignmentDialog.devices, []); assert.equal(s.assignmentDialog.loadingDevices, false);
+  assert.equal(s.assignmentDialog.statusType, 'error'); assert.equal(c.createAssignment, undefined);
+});
+test('reopening after a terminal run starts a fresh eligibility read without replaying a POST', () => {
+  const { s, c } = setup(); const row = lesson('published', 3); s.openAssignmentDialog(row); s.assignmentDialog.childId = 'child';
+  s.assignmentDialog.statusMessage = 'old result'; s.assignmentDialog.readinessBlocked = true;
+  s.openAssignmentDialog(row); s.assignmentDialog.childId = 'child'; s.handleAssignmentChildChange();
+  c.eligibleDevices[0].ok([{ deviceId: 'device', availability: 'available', currentAssignment: null }]);
+  assert.equal(s.assignmentDialog.statusMessage, ''); assert.equal(s.assignmentDialog.readinessBlocked, false);
+  assert.equal(s.assignmentDialog.devices[0].currentAssignment, null); assert.equal(c.createAssignment, undefined);
+});
+test('late uncertain reconciliation after dialog reopen cannot change the new target', () => {
+  const { s, c } = setup(); s.openAssignmentDialog(lesson('published-A', 3)); s.assignmentDialog.childId = 'child-A';
+  s.createLessonAssignment({ deviceId: 'device-A', availability: 'available' }); c.createAssignment[0].fail('timeout', { status: 0 });
+  s.openAssignmentDialog({ ...lesson('published-B', 4), lessonKey: 'other-key' }); s.assignmentDialog.childId = 'child-B';
+  c.eligibleDevices[0].ok([{ deviceId: 'device-A', availability: 'already_assigned' }]);
+  assert.equal(s.assignmentDialog.childId, 'child-B'); assert.equal(s.assignmentDialog.statusMessage, '');
+  assert.equal(s.assignmentDialog.submitting, false); assert.equal(s.assignmentDialog.selectedDeviceId, ''); assert.equal(c.createAssignment.length, 1);
+});

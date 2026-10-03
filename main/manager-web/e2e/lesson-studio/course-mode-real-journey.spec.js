@@ -303,6 +303,12 @@ test('query navigation keeps server course identity when an older read settles l
     await expect(page.getByRole('heading', { name: 'Lessons · ' + b.title, exact: true })).toBeVisible();
     await page.goBack();
     await expect(page.getByRole('heading', { name: 'Lessons · ' + a.title, exact: true })).toBeVisible();
+    const invalidReads = [];
+    page.on('request', request => { if (request.url().includes('/courses/not-a-uuid')) invalidReads.push(request.url()); });
+    await gotoAppRoute(page, '#/course-lessons?courseId=not-a-uuid&title=Forged');
+    await expect(page).toHaveURL(/#\/course-management$/);
+    await expect(page.getByRole('heading', { name: 'Courses', exact: true })).toBeVisible();
+    expect(invalidReads).toEqual([]);
   } finally {
     release(); await page.unroute(pattern);
     await adminApi(page, 'DELETE', '/courses/' + b.id);

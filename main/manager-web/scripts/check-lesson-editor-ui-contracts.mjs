@@ -171,7 +171,7 @@ expectNotContains('src/views/CourseLessons.vue', 'prop="lessonVersion"', 'normal
 expectNotContains('src/views/CourseLessons.vue', 'createNextVersion', 'normal lesson lists must not expose the compatibility version action');
 expectContains(
   'src/apis/module/lesson.js',
-  'listAuthoritativeLessons(courseId, onSuccess, onError)',
+  'listAuthoritativeLessons(courseId, params, onSuccess, onError)',
   'normal lesson browsing needs a dedicated authoritative API without changing full-history consumers',
 );
 expectContains(
@@ -184,10 +184,10 @@ expectContains(
   'Api.lesson.listAuthoritativeLessons(',
   'normal lesson browsing must show exactly one authoritative row per lesson key',
 );
-expectNotContains(
+expectContains(
   'src/views/CourseLessons.vue',
-  'Api.lesson.listLessons(',
-  'CourseLessons must not load historical rows',
+  "rows.filter((row) => row.status === 'draft')",
+  'the separate authoring list must include only drafts, not historical published versions',
 );
 expectContains(
   'src/views/LessonEditor.vue',

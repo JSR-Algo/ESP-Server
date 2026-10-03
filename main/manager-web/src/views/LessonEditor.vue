@@ -12,7 +12,7 @@
     <!-- Lesson header -->
     <div class="operation-bar">
       <div class="left-title">
-        <el-button type="text" icon="el-icon-arrow-left" @click="$router.back()">
+        <el-button type="text" icon="el-icon-arrow-left" data-testid="lesson-return-course" @click="returnToCourse">
           {{ $t('lesson.pageTitle') }}
         </el-button>
         <h2 class="page-title" v-if="lesson">
@@ -175,8 +175,8 @@
           <section v-if="lesson.lessonId === lessonId && !courseModeLoading && !isCourseModeV5" class="lesson-visual-pair" v-loading="savingLessonVisuals" :aria-busy="savingLessonVisuals ? 'true' : 'false'">
             <div class="lesson-visual-pair__heading">
               <div>
-                <h4>{{ $t(isCourseModeV5 ? 'lesson.visualTripleTitle' : 'lesson.visualPairTitle') }}</h4>
-                <p>{{ $t(isCourseModeV5 ? 'lesson.visualTripleWholeLesson' : 'lesson.visualPairWholeLesson') }}</p>
+                <h4>{{ $t('lesson.visualPairTitle') }}</h4>
+                <p>{{ $t('lesson.visualPairWholeLesson') }}</p>
               </div>
               <span v-if="savingLessonVisuals" role="status" aria-live="polite">{{ $t('common.loading') }}</span>
             </div>
@@ -190,12 +190,12 @@
               {{ $t('lesson.visualPairReloadFailed') }}
             </p>
             <p
-              v-else-if="pendingLessonVisualPair && (!lessonVisualPair.backgroundAssetVersionId || !lessonVisualPair.objectAssetVersionId || (isCourseModeV5 && !lessonVisualPair.robotAssetVersionId))"
+              v-else-if="pendingLessonVisualPair && (!lessonVisualPair.backgroundAssetVersionId || !lessonVisualPair.objectAssetVersionId)"
               class="lesson-visual-pair__notice"
               role="status"
               aria-live="polite"
             >
-              {{ $t(isCourseModeV5 ? 'lesson.visualTripleRequired' : 'lesson.visualPairRequired') }}
+              {{ $t('lesson.visualPairRequired') }}
             </p>
             <div v-if="lessonCapabilities.sharedVisualAuthoring || lessonCapabilities.exactEspTftPreview" class="cinematic-pickers">
               <div v-if="!isDraft" class="immutable-version-message" data-testid="immutable-version-message">
@@ -434,10 +434,11 @@
         <p v-else class="muted">{{ $t('lesson.draftOnly') }}</p>
       </el-card>
 
-      <!-- Asset authoring (draft only): layer + role + stable assetKey + critical
-           + robot pose picker + per-session preview list. -->
+      <!-- Published bundles still feed preview and readiness; only drafts permit mutations. -->
       <LessonAssetManager
-        v-if="isDraft"
+        v-if="lesson"
+        :key="lessonId"
+        :read-only="!isDraft"
         ref="assetManager"
         :lesson-id="lessonId"
         :subject-hint="lastSubject"
@@ -683,7 +684,7 @@ import {
   bindClonedAssetToStep,
   collectAssetReferences,
   isCourseModeAuthority as detectCourseModeAuthority,
-  mergeAuthoringFields,
+  mergePersistedAuthoringFields,
   normalizeCourseModeVisualKeys,
   replaceStepAssetReference,
   validSimulationEvidence as validateSimulationEvidence,
@@ -1038,7 +1039,7 @@ export default {
       return requiredFlattenedDerivativePhaseIds(manifest, this.steps);
     },
     isDraft() {
-      return this.lesson && this.lesson.status === 'draft';
+      return this.lesson && this.lesson.lessonId === this.lessonId && this.lesson.status === 'draft';
     },
     passiveStepTypes() {
       return this.stepTypes.filter((t) => t.completionClass !== 'interactive');
@@ -1064,12 +1065,16 @@ export default {
     },
     cinematicLibraries() {
       const libraries = this.rawCinematicLibraries || {};
+      const imagesOnly = ['teebot-lesson-renderer.v1', 'teebot-lesson-renderer.v2']
+        .includes(this.lesson && this.lesson.manifestVersion);
+      const compatible = rows => (Array.isArray(rows) ? rows : [])
+        .filter(asset => !imagesOnly || !String(asset.mimeType || '').startsWith('video/'));
       return {
-        backgroundScene: Array.isArray(libraries.backgroundScene) ? libraries.backgroundScene : [],
-        teachingObject: Array.isArray(libraries.teachingObject) ? libraries.teachingObject : [],
+        backgroundScene: compatible(libraries.backgroundScene),
+        teachingObject: compatible(libraries.teachingObject),
         robotOverlay: this.isCourseModeV5
           ? this.filterRobotVideoAssets(libraries.robotOverlay)
-          : (Array.isArray(libraries.robotOverlay) ? libraries.robotOverlay : []),
+          : compatible(libraries.robotOverlay),
       };
     },
     selectedStep() {
@@ -1172,9 +1177,9 @@ export default {
     },
     selectedAuthoring: {
       get() {
-        if (!this.selectedStep) return mergeAuthoringFields({}, {});
+        if (!this.selectedStep) return mergePersistedAuthoringFields({}, {});
         return this.selectedStepDrafts[this.selectedStep.stepKey]
-          || mergeAuthoringFields(this.selectedStep.stepBody || {}, {});
+          || mergePersistedAuthoringFields(this.selectedStep.stepBody || {}, {});
       },
       set(value) {
         if (!this.selectedStep || this.savingStep || this.lessonVisualStepMutationBlocked || this.rebindingSharedVisual) return;
@@ -1258,6 +1263,12 @@ export default {
         this.$router.replace('/course-management');
         return;
       }
+      // The router has already accepted the leave/discard decision. Step keys
+      // repeat across versions, so no old draft may be applied to the new lesson.
+      this.stepEditor = createLessonStepEditorState();
+      this.promptDraft = '';
+      this.promptStepKey = '';
+      this.promptDirty = false;
       this.savingLessonVisuals = false;
       this.creatingNextVersion = false;
       this.pendingLessonVisualPair = null;
@@ -1352,6 +1363,12 @@ export default {
     this.lessonUpdateSafety.release();
   },
   methods: {
+    returnToCourse() {
+      const courseId = this.lesson && this.lesson.lessonId === this.lessonId && this.lesson.courseId;
+      this.$router.push(courseId
+        ? { path: '/course-lessons', query: { courseId } }
+        : { path: '/course-management' });
+    },
     requestEditorLeave(next) {
       if (this._pendingRouteNext) this._pendingRouteNext(false);
       this._pendingRouteNext = next;
@@ -1562,7 +1579,8 @@ export default {
       return this.submitNextVersion({ rendererVersion: 'teebot-lesson-renderer.v5' });
     },
     submitNextVersion(data) {
-      if (this.creatingNextVersion || !this.lesson || this.lesson.status !== 'published') return false;
+      if (this.editorDestroying || this.creatingNextVersion || !this.lesson
+        || this.lesson.lessonId !== this.lessonId || this.lesson.status !== 'published') return false;
       const publishedLessonId = this.lesson.lessonId;
       const publishedLessonVersion = Number(this.lesson.lessonVersion);
       const loadRequestId = this.lessonLoadRequestId;
@@ -2121,6 +2139,12 @@ export default {
       const requestId = this.lessonLoadRequestId + 1;
       const lessonId = this.lessonId;
       this.lessonLoadRequestId = requestId;
+      if (this.lesson && this.lesson.lessonId !== lessonId) {
+        this.lesson = null;
+        this.steps = [];
+      }
+      this.renameVisible = false;
+      this.renaming = false;
       this.resetLessonAssetGenerationStatus();
       this.clearPreviewProofState();
       this.clearValidationProofState();
@@ -2705,7 +2729,7 @@ export default {
       if (selectedAsset) {
         stepBody.teachingObject = {
           ...(stepBody.teachingObject || {}),
-          primaryWord: authored.teachingWord.text || step.subject,
+          primaryWord: (authored.teachingWord && authored.teachingWord.text) || step.subject,
           asset: {
             key: selectedAsset.assetKey,
             src: selectedAsset.path || selectedAsset.url,
@@ -2847,6 +2871,12 @@ export default {
     selectCinematicLayer(selection) {
       if (!selection || !selection.assetVersionId) return;
       const asset = selection.asset || {};
+      if (['teebot-lesson-renderer.v1', 'teebot-lesson-renderer.v2']
+        .includes(this.lesson && this.lesson.manifestVersion)
+        && String(asset.mimeType || '').startsWith('video/')) {
+        this.$message.warning('This lesson renderer requires an image. Select a compatible image asset.');
+        return false;
+      }
       if (selection.slot === 'backgroundScene') {
         return this.selectBackground({ assetKey: asset.assetKey, versionId: selection.assetVersionId });
       }
@@ -3236,12 +3266,15 @@ export default {
       this.renameVisible = true;
     },
     doRename() {
-      if (!this.titleDraft) return;
+      if (!this.titleDraft || this.editorDestroying || this.renaming) return;
+      const lessonId = this.lessonId;
+      const loadRequestId = this.lessonLoadRequestId;
       this.renaming = true;
       Api.lesson.updateLesson(
         this.lessonId,
         { title: this.titleDraft },
         (l) => {
+          if (this.editorDestroying || lessonId !== this.lessonId || loadRequestId !== this.lessonLoadRequestId) return;
           const currentLesson = this.lesson || {};
           const updatedLesson = {
             ...currentLesson,
@@ -3256,6 +3289,7 @@ export default {
           this.$message.success(this.$t('lesson.renamed'));
         },
         (msg, error) => {
+          if (this.editorDestroying || lessonId !== this.lessonId || loadRequestId !== this.lessonLoadRequestId) return;
           this.renaming = false;
           this.handleUncertainMutationError(error, this.fetchAll);
           this.$message.error(msg);
@@ -3303,12 +3337,21 @@ export default {
           else if (!parsed.valid) fail(this.$t('lesson.validFail'));
           else succeed(parsed);
         },
-        (msg) => {
+        (msg, error) => {
           if (this.editorDestroying) return;
           if (requestId !== this.validationRequestId || proofVersion !== this.proofVersion
             || lessonId !== this.lessonId || lessonLoadRequestId !== this.lessonLoadRequestId) return;
           this.validating = false;
-          this.validationResult = { valid: false, profiles: [], errors: [msg], warnings: [], findings: [] };
+          const body = error && (error.data || (error.response && error.response.data));
+          const details = body && body.code === 'LESSON_PUBLISH_VALIDATION_FAILED' && body.details;
+          this.validationResult = {
+            valid: false, profiles: [],
+            errors: details && Array.isArray(details.errors) && details.errors.length ? details.errors : [msg],
+            warnings: details && Array.isArray(details.warnings) ? details.warnings : [],
+            findings: [],
+            ...(details && details.metrics && typeof details.metrics === 'object' ? { metrics: details.metrics } : {}),
+            ...(details ? { budgets: { espTft: details } } : {}),
+          };
           this.validationProofVersion = proofVersion;
           this.$message.error(msg);
           fail(msg);

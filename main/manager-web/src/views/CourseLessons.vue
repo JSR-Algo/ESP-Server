@@ -3,7 +3,7 @@
     <HeaderBar />
     <div class="operation-bar">
       <div class="left-title">
-        <el-button type="text" icon="el-icon-arrow-left" @click="$router.back()">
+        <el-button type="text" icon="el-icon-arrow-left" @click="$router.push({ path: '/course-management' })">
           {{ $t('course.pageTitle') }}
         </el-button>
         <h2 class="page-title">{{ $t('lesson.pageTitle') }} · {{ courseTitle }}</h2>
@@ -157,7 +157,7 @@
       </el-card>
     </div>
 
-    <el-dialog :title="dialogTitle" :visible.sync="dialogVisible" width="560px" @closed="!dialogVisible && resetForm()">
+    <el-dialog class="metadata-dialog" :title="dialogTitle" :visible.sync="dialogVisible" width="min(560px, calc(100vw - 24px))" @closed="!dialogVisible && resetForm()">
       <el-alert v-if="formNotice" :title="formNotice" type="warning" :closable="false" />
       <el-form :model="form" label-width="150px" size="small">
         <el-form-item :label="$t('lesson.colKey')" required :error="formErrors.lessonKey">
@@ -234,9 +234,12 @@
       @closed="resetAssignmentDialog"
     >
       <div v-if="assignmentDialog.lesson" class="assignment-dialog">
-        <div class="assignment-lesson">
+        <div class="assignment-lesson" data-testid="assignment-lesson">
           <strong>{{ assignmentDialog.lesson.title || assignmentDialog.lesson.lessonKey }}</strong>
           <span class="muted small">{{ assignmentDialog.lesson.lessonKey }} · v{{ assignmentDialog.lesson.lessonVersion }}</span>
+          <span v-if="assignmentDialog.selectedDeviceId" class="muted small" data-testid="assignment-target-device">
+            {{ $t('lesson.assignDevice') }}: {{ assignmentDialog.selectedDeviceId }}
+          </span>
         </div>
         <el-select
           v-model="assignmentDialog.childId"
@@ -265,6 +268,7 @@
           :closable="false"
           show-icon
           class="assignment-alert"
+          data-testid="assignment-status"
         >
           <el-button v-if="assignmentDialog.statusType === 'warning'" type="text" size="mini" @click="openMonitoring(assignmentDialog.lesson)">
             {{ $t('lesson.monitor') }}
@@ -302,6 +306,7 @@
                 size="mini"
                 :disabled="scope.row.availability === 'busy' || assignmentDialog.submitting || assignmentDialog.readinessBlocked"
                 :loading="assignmentDialog.submittingDeviceId === scope.row.deviceId"
+                data-testid="assignment-submit"
                 @click="createLessonAssignment(scope.row)"
               >
                 {{ scope.row.availability === 'already_assigned' ? $t('lesson.assignReuse') : $t('lesson.assign') }}
@@ -353,6 +358,7 @@ const blankAssignmentDialog = () => ({
   loadingDevices: false,
   submitting: false,
   submittingDeviceId: '',
+  selectedDeviceId: '',
   statusMessage: '',
   statusType: 'info',
   readinessBlocked: false,
@@ -373,6 +379,7 @@ export default {
     return {
       requestsDisposed: false,
       listSequence: 0,
+      courseContextSequence: 0,
       page: 1,
       pagination: { page: 1, pageSize: 50, total: 0, totalPages: 0 },
       searchTimer: null,
@@ -467,6 +474,7 @@ export default {
   },
   watch: {
     courseId() {
+      this.courseContextSequence++;
       this.resetAssignmentDialog();
       this.dialogVisible = false;
       this.saving = false;
@@ -590,9 +598,15 @@ export default {
       });
     },
     openMonitoring(row) {
+      const dialog = this.assignmentDialog;
+      const target = dialog.visible && dialog.lesson && dialog.lesson.lessonId === row.lessonId;
       this.$router.push({
         path: '/lesson-monitoring',
-        query: { lessonId: row.lessonId, lessonVersion: String(row.lessonVersion), courseId: this.courseId, lesson: row.title || row.lessonKey },
+        query: {
+          lessonId: row.lessonId, lessonVersion: String(row.lessonVersion), courseId: this.courseId, lesson: row.title || row.lessonKey,
+          ...(target && dialog.childId ? { childId: dialog.childId } : {}),
+          ...(target && dialog.selectedDeviceId ? { deviceId: dialog.selectedDeviceId } : {}),
+        },
       });
     },
     openAssignmentDialog(row) {
@@ -688,6 +702,7 @@ export default {
     handleAssignmentChildChange() {
       if (this.assignmentDialog.submitting) return;
       this.assignmentDialog.devices = [];
+      this.assignmentDialog.selectedDeviceId = '';
       this.assignmentDialog.submitting = false;
       this.assignmentDialog.submittingDeviceId = '';
       this.setAssignmentStatus('info', '');
@@ -760,6 +775,7 @@ export default {
       this.assignmentDialog.submitContext = submitContext;
       this.assignmentDialog.submitting = true;
       this.assignmentDialog.submittingDeviceId = device.deviceId;
+      this.assignmentDialog.selectedDeviceId = device.deviceId;
       this.setAssignmentStatus('info', '');
       Api.lesson.createAssignment(
         {
@@ -831,12 +847,14 @@ export default {
       if (!this.courseReady) return;
       this.formErrors = {}; this.formNotice = '';
       this.editingMetadata = false;
+      this.saving = false;
       this.form = blankForm();
       this.dialogVisible = true;
     },
     openMetadata(row) {
       this.formErrors = {}; this.formNotice = '';
       this.editingMetadata = true;
+      this.saving = false;
       this.form = {
         lessonId: row.lessonId,
         lessonKey: row.lessonKey,
@@ -872,6 +890,7 @@ export default {
       this.metadataPending[action] = true;
       const payload = this.metadataPayload();
       const ok = (lesson) => {
+        if (this.requestsDisposed) return;
         delete this.metadataPending[action];
         if (!current()) return;
         this.saving = false;
@@ -880,6 +899,7 @@ export default {
         if (editing) this.fetchList(); else this.openEditor(lesson);
       };
       const fail = (msg, response) => {
+        if (this.requestsDisposed) return;
         delete this.metadataPending[action];
         if (uncertainMutation(response)) this.metadataUncertain[action] = true;
         if (!current()) return;
@@ -897,6 +917,7 @@ export default {
     },
     confirmDelete(row) {
       const id = row.lessonId; const courseId = this.courseId;
+      const courseContextSequence = this.courseContextSequence;
       if (this.deleteUncertain[id]) {
         if (this.deletePending[id]) return;
         this.deletePending = { ...this.deletePending, [id]: true };
@@ -913,14 +934,15 @@ export default {
       if (this.deletePending[id] || this.requestsDisposed) return;
       this.deletePending = { ...this.deletePending, [id]: true };
       const finish = () => { this.deletePending = { ...this.deletePending, [id]: false }; };
-      this.$confirm(this.$t('lesson.deleteConfirm', { key: row.lessonKey }), this.$t('lesson.delete'), { type: 'warning' })
+      this.$confirm(this.$t('lesson.deleteConfirm', { key: row.lessonKey }), this.$t('lesson.delete'), { type: 'warning', customClass: 'course-delete-confirm' })
         .then(() => {
+          if (this.requestsDisposed || courseContextSequence !== this.courseContextSequence || courseId !== this.courseId) { finish(); return; }
           Api.lesson.deleteLesson(id, () => {
-            finish(); if (this.requestsDisposed || this.courseId !== courseId) return;
+            finish(); if (this.requestsDisposed || courseContextSequence !== this.courseContextSequence || this.courseId !== courseId) return;
             this.$message.success(this.$t('lesson.deleted')); this.fetchList();
           }, (msg, response) => {
             finish(); if (uncertainMutation(response)) this.deleteUncertain[id] = true;
-            if (this.requestsDisposed || this.courseId !== courseId) return;
+            if (this.requestsDisposed || courseContextSequence !== this.courseContextSequence || this.courseId !== courseId) return;
             this.$message.error(uncertainMutation(response) ? this.$t('lesson.metadataUncertain') : msg); this.fetchList();
           });
         }).catch(finish);
